@@ -1,6 +1,9 @@
 {
     "name": "@portal-solutions/jade",
-    "workspaces": [],
+    "workspaces": [
+        "jade-element",
+        "jade-js"
+    ],
     "devDependencies": {
         "parcel": "^2.15.4"
     }
