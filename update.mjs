@@ -49,7 +49,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
             }
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
             case 5: 
-            const val = arg(),closureArgs:number[]=[...arg()],[spanner,...spans]=arg();
+            const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3],closureArgs:number[]=[...arg()],[spanner,...spans]=arg();
             const j = code().getUint32(ip,true);
             ip+=4;
             state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
@@ -72,7 +72,9 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
 writeFileSync(
   `${__dirname}/packages/jade-js/vm.ts`,
   `
-  const {apply} = Reflect;
-  const {create,defineProperties} = Object;
-  ${vmcode}`
+/* This is GENERATED code by \`update.mjs\` */
+
+const {apply} = Reflect;
+const {create,defineProperties} = Object;
+${vmcode}`
 );

@@ -1,7 +1,9 @@
 
-  const {apply} = Reflect;
-  const {create,defineProperties} = Object;
-  
+/* This is GENERATED code by `update.mjs` */
+
+const {apply} = Reflect;
+const {create,defineProperties} = Object;
+
 export async function* runVirtualizedAG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this')}:{ip?:number,globalThis?: typeof window},...args: any[]): AsyncGenerator<any,any,any>{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
@@ -17,7 +19,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
             case 3: state[code().getUint32(ip,true)]=yield* arg();ip += 4;break;
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
             case 5: 
-            const val = arg(),closureArgs:number[]=[...arg()],[spanner,...spans]=arg();
+            const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3],closureArgs:number[]=[...arg()],[spanner,...spans]=arg();
             const j = code().getUint32(ip,true);
             ip+=4;
             state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
@@ -51,7 +53,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
             case 3: return runVirtualizedAG(code,state,{ip:ip-2,globalThis},...args);
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
             case 5: 
-            const val = arg(),closureArgs:number[]=[...arg()],[spanner,...spans]=arg();
+            const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3],closureArgs:number[]=[...arg()],[spanner,...spans]=arg();
             const j = code().getUint32(ip,true);
             ip+=4;
             state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
@@ -85,7 +87,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
             case 3: state[code().getUint32(ip,true)]=yield* arg();ip += 4;break;
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
             case 5: 
-            const val = arg(),closureArgs:number[]=[...arg()],[spanner,...spans]=arg();
+            const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3],closureArgs:number[]=[...arg()],[spanner,...spans]=arg();
             const j = code().getUint32(ip,true);
             ip+=4;
             state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
@@ -119,7 +121,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
             case 3: return runVirtualizedG(code,state,{ip:ip-2,globalThis},...args);
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
             case 5: 
-            const val = arg(),closureArgs:number[]=[...arg()],[spanner,...spans]=arg();
+            const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3],closureArgs:number[]=[...arg()],[spanner,...spans]=arg();
             const j = code().getUint32(ip,true);
             ip+=4;
             state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
