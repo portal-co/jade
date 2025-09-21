@@ -4,7 +4,14 @@
   "description": "",
   "main": "index.js",
   "types": "index.d.ts",
-  "source": "index.ts",
+  "zshy": {
+    "module": "index.ts",
+    "main": "index.ts",
+    "exports": {
+      ".": "index.ts",
+      "./gc": "gc.ts"
+    }
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },

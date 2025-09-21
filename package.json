@@ -5,6 +5,8 @@
         "jade-js"
     ],
     "devDependencies": {
-        "parcel": "^2.15.4"
+        "parcel": "^2.15.4",
+        "typescript": "^5.9.2",
+        "zshy": "^0.4.2"
     }
 }
