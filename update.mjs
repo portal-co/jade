@@ -63,7 +63,13 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                         enumerable:true,
                         configurable:false
                     };
-                    return apply(val,this,[code,defineProperties(create(null),o),{ip:j,globalThis},...args]);
+                    const s=create(null);
+                    return apply(val,this,[
+                        code,
+                        (defineProperties(s,o),s),
+                        {ip:j,globalThis},
+                        ...args
+                    ]);
                 },...spans);
                 ip += 4;
                 break;

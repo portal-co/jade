@@ -32,7 +32,13 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                         enumerable:true,
                         configurable:false
                     };
-                    return apply(val,this,[code,defineProperties(create(null),o),{ip:j,globalThis},...args]);
+                    const s=create(null);
+                    return apply(val,this,[
+                        code,
+                        (defineProperties(s,o),s),
+                        {ip:j,globalThis},
+                        ...args
+                    ]);
                 },...spans);
                 ip += 4;
                 break;
@@ -101,7 +107,13 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                         enumerable:true,
                         configurable:false
                     };
-                    return apply(val,this,[code,defineProperties(create(null),o),{ip:j,globalThis},...args]);
+                    const s=create(null);
+                    return apply(val,this,[
+                        code,
+                        (defineProperties(s,o),s),
+                        {ip:j,globalThis},
+                        ...args
+                    ]);
                 },...spans);
                 ip += 4;
                 break;
@@ -170,7 +182,13 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                         enumerable:true,
                         configurable:false
                     };
-                    return apply(val,this,[code,defineProperties(create(null),o),{ip:j,globalThis},...args]);
+                    const s=create(null);
+                    return apply(val,this,[
+                        code,
+                        (defineProperties(s,o),s),
+                        {ip:j,globalThis},
+                        ...args
+                    ]);
                 },...spans);
                 ip += 4;
                 break;
@@ -239,7 +257,13 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                         enumerable:true,
                         configurable:false
                     };
-                    return apply(val,this,[code,defineProperties(create(null),o),{ip:j,globalThis},...args]);
+                    const s=create(null);
+                    return apply(val,this,[
+                        code,
+                        (defineProperties(s,o),s),
+                        {ip:j,globalThis},
+                        ...args
+                    ]);
                 },...spans);
                 ip += 4;
                 break;
