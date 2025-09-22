@@ -1,0 +1,13 @@
+[package]
+name = "portal-solutions-jade-vm"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description.workspace = true
+
+[dependencies]
+num_enum = "0.7.4"
+swc_common.workspace = true
+swc_ecma_ast.workspace = true
+swc_ecma_utils.workspace = true
+swc_ecma_visit.workspace = true
