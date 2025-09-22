@@ -10,6 +10,6 @@ export function isCamoKey(a: any): boolean {
   );
 }
 import * as single_tenant from "./single_tenant.ts";
-import * as vm from "./vm.ts"
-export { isPolyfillKey, single_tenant,vm };
-export * from "./gc.ts"
+import * as vm from "./vm.ts";
+export { isPolyfillKey, single_tenant, vm };
+export * from "./gc.ts";
