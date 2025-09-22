@@ -149,6 +149,9 @@ writeFileSync(
 #[non_exhaustive]
 pub enum Opcode {
     ${[...Object.entries(opcodes)].map(([a, b]) => `${a}=${b}`).join(",\n    ")}
-}  
+}
+impl Opcode{
+  pub const LEN: u16 = ${Object.entries(opcodes).length};
+}
 `
 );

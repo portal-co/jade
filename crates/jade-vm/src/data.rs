@@ -17,4 +17,7 @@ pub enum Opcode {
     STR=8,
     LITOBJ=9,
     NEW_TARGET=10
-}  
+}
+impl Opcode{
+  pub const LEN: u16 = 11;
+}
