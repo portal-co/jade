@@ -55,15 +55,15 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 break;
             }
             case 9: {
-                let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c > 0? {} : {
                     ...(c=-c,arg())
-                };ip+=4;
+                }));
                 while(c--){
                     obj[arg()]=arg();
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    defineProperties(state[key >>> 1] = {},obj);
+                    defineProperties(state[key >>> 1],obj);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -124,15 +124,15 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 break;
             }
             case 9: {
-                let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c > 0? {} : {
                     ...(c=-c,arg())
-                };ip+=4;
+                }));
                 while(c--){
                     obj[arg()]=arg();
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    defineProperties(state[key >>> 1] = {},obj);
+                    defineProperties(state[key >>> 1],obj);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -193,15 +193,15 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 break;
             }
             case 9: {
-                let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c > 0? {} : {
                     ...(c=-c,arg())
-                };ip+=4;
+                }));
                 while(c--){
                     obj[arg()]=arg();
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    defineProperties(state[key >>> 1] = {},obj);
+                    defineProperties(state[key >>> 1],obj);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -262,15 +262,15 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 break;
             }
             case 9: {
-                let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c > 0? {} : {
                     ...(c=-c,arg())
-                };ip+=4;
+                }));
                 while(c--){
                     obj[arg()]=arg();
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    defineProperties(state[key >>> 1] = {},obj);
+                    defineProperties(state[key >>> 1],obj);
                 }else{
                     state[key >>> 1]=obj;
                 }

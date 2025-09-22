@@ -86,15 +86,15 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                 break;
             }
             case 9: {
-                let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c > 0? {} : {
                     ...(c=-c,arg())
-                };ip+=4;
+                }));
                 while(c--){
                     obj[arg()]=arg();
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    defineProperties(state[key >>> 1] = {},obj);
+                    defineProperties(state[key >>> 1],obj);
                 }else{
                     state[key >>> 1]=obj;
                 }

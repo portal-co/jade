@@ -17,14 +17,14 @@ pub enum Opcode {
     STR = 8,
     LITOBJ = 9,
 }
-pub fn encode_arg(a: u32, lit: bool) -> u32 {
-    match lit {
+pub fn encode_lsb(a: u32, val: bool) -> u32 {
+    match val {
         true => a << 1,
         false => (a << 1) | 1,
     }
 }
-pub fn encode_extension(a: u32, extended: bool) -> u32 {
-    match extended {
+pub fn encode_signed(a: u32, val: bool) -> u32 {
+    match val {
         false => a,
         true => 0u32.wrapping_sub(a),
     }
