@@ -87,7 +87,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
             }
             case 9: {
                 let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
-                    ...state[c=-c,arg()]
+                    ...(c=-c,arg())
                 };ip+=4;
                 while(c--){
                     obj[arg()]=arg();

@@ -56,7 +56,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
             }
             case 9: {
                 let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
-                    ...state[c=-c,arg()]
+                    ...(c=-c,arg())
                 };ip+=4;
                 while(c--){
                     obj[arg()]=arg();
@@ -120,7 +120,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
             }
             case 9: {
                 let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
-                    ...state[c=-c,arg()]
+                    ...(c=-c,arg())
                 };ip+=4;
                 while(c--){
                     obj[arg()]=arg();
@@ -184,7 +184,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
             }
             case 9: {
                 let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
-                    ...state[c=-c,arg()]
+                    ...(c=-c,arg())
                 };ip+=4;
                 while(c--){
                     obj[arg()]=arg();
@@ -248,7 +248,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
             }
             case 9: {
                 let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
-                    ...state[c=-c,arg()]
+                    ...(c=-c,arg())
                 };ip+=4;
                 while(c--){
                     obj[arg()]=arg();
