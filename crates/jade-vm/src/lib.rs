@@ -16,6 +16,7 @@ pub enum Opcode {
     ARR = 7,
     STR = 8,
     LITOBJ = 9,
+    NEW_TARGET = 10,
 }
 pub fn encode_lsb(a: u32, val: bool) -> u32 {
     match val {
