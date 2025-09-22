@@ -14,7 +14,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
       ak ? "A" : ""
     }${
       gk ? "G" : ""
-    }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this')}:{ip?:number,globalThis?: typeof window},...args: any[]): ${
+    }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: [any] |undefined},...args: any[]): ${
       ak ? (gk ? `AsyncGenerator<any,any,any>` : `Promise<any>`) : `any`
     }{
     for(;;){
@@ -34,21 +34,21 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                 ? `state[code().getUint32(ip,true)]=await val;ip += 4;break;`
                 : `return ${n({
                     ak: true,
-                  })}(code,state,{ip:ip-2,globalThis},...args);`
+                  })}(code,state,{ip:ip-2,globalThis,nt},...args);`
             }
             case 2: ${
               gk
                 ? `state[code().getUint32(ip,true)]=yield val;ip += 4;break;`
                 : `return ${n({
                     gk: true,
-                  })}(code,state,{ip:ip-2,globalThis},...args);`
+                  })}(code,state,{ip:ip-2,globalThis,nt},...args);`
             }
             case 3: ${
               gk
                 ? `state[code().getUint32(ip,true)]=yield* val;ip += 4;break;`
                 : `return ${n({
                     gk: true,
-                  })}(code,state,{ip:ip-2,globalThis},...args);`
+                  })}(code,state,{ip:ip-2,globalThis,nt},...args);`
             }
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
             case 5: {
@@ -67,7 +67,11 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                     return apply(val,this,[
                         code,
                         (defineProperties(s,o),s),
-                        {ip:j,globalThis},
+                        {
+                            ip:j,
+                            globalThis,
+                            nt: new.target === undefined ? undefined : [new.target]
+                        },
                         ...args
                     ]);
                 },...spans);
