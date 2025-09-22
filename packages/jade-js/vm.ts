@@ -23,7 +23,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
             case 5: {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
-                    ,[spanner,...spans]=arg();
+                    ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
@@ -105,7 +105,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
             case 5: {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
-                    ,[spanner,...spans]=arg();
+                    ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
@@ -187,7 +187,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
             case 5: {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
-                    ,[spanner,...spans]=arg();
+                    ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
@@ -269,7 +269,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
             case 5: {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
-                    ,[spanner,...spans]=arg();
+                    ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{

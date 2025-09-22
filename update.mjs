@@ -54,7 +54,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
             case 5: {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
-                    ,[spanner,...spans]=arg();
+                    ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
