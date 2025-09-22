@@ -1,11 +1,11 @@
 
 /* This is GENERATED code by `update.mjs` */
-
+import {type Tenant} from "./index.ts"
 const {apply} = Reflect;
 const {create,defineProperties} = Object;
 const {fromCodePoint} = String;
 
-export async function* runVirtualizedAG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: any},...args: any[]): AsyncGenerator<any,any,any>{
+export async function* runVirtualizedAG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: typeof window,nt?: any,tenant:Tenant},...args: any[]): AsyncGenerator<any,any,any>{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -41,7 +41,8 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                         {
                             ip:j,
                             globalThis,
-                            nt: new.target
+                            nt: new.target,
+                            tenant
                         },
                         ...args
                     ]);
@@ -71,7 +72,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                     ...(c=-c,arg())
                 }));
                 while(c--){
-                    obj[arg()]=arg();
+                    obj[tenant.clean(obj,arg())]=arg();
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
@@ -87,7 +88,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
     }
 }
 
-export async function runVirtualizedA(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: any},...args: any[]): Promise<any>{
+export async function runVirtualizedA(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: typeof window,nt?: any,tenant:Tenant},...args: any[]): Promise<any>{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -99,8 +100,8 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
         switch(op){
             case 0: return val
             case 1: state[code().getUint32(ip,true)]=await val;ip += 4;break;
-            case 2: return runVirtualizedAG(code,state,{ip:ip-2,globalThis,nt},...args);
-            case 3: return runVirtualizedAG(code,state,{ip:ip-2,globalThis,nt},...args);
+            case 2: return runVirtualizedAG(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
+            case 3: return runVirtualizedAG(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
             case 5: {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
@@ -123,7 +124,8 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                         {
                             ip:j,
                             globalThis,
-                            nt: new.target
+                            nt: new.target,
+                            tenant
                         },
                         ...args
                     ]);
@@ -153,7 +155,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                     ...(c=-c,arg())
                 }));
                 while(c--){
-                    obj[arg()]=arg();
+                    obj[tenant.clean(obj,arg())]=arg();
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
@@ -169,7 +171,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
     }
 }
 
-export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: any},...args: any[]): any{
+export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: typeof window,nt?: any,tenant:Tenant},...args: any[]): any{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -180,7 +182,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
         const val: any = (op === 0 || false || op === 2 || op === 3 ) ? arg() : undefined;
         switch(op){
             case 0: return val
-            case 1: return runVirtualizedAG(code,state,{ip:ip-2,globalThis,nt},...args);
+            case 1: return runVirtualizedAG(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
             case 2: state[code().getUint32(ip,true)]=yield val;ip += 4;break;
             case 3: state[code().getUint32(ip,true)]=yield* val;ip += 4;break;
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
@@ -205,7 +207,8 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                         {
                             ip:j,
                             globalThis,
-                            nt: new.target
+                            nt: new.target,
+                            tenant
                         },
                         ...args
                     ]);
@@ -235,7 +238,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                     ...(c=-c,arg())
                 }));
                 while(c--){
-                    obj[arg()]=arg();
+                    obj[tenant.clean(obj,arg())]=arg();
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
@@ -251,7 +254,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
     }
 }
 
-export  function runVirtualized(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: any},...args: any[]): any{
+export  function runVirtualized(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: typeof window,nt?: any,tenant:Tenant},...args: any[]): any{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -262,9 +265,9 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
         const val: any = (op === 0 || false || false) ? arg() : undefined;
         switch(op){
             case 0: return val
-            case 1: return runVirtualizedA(code,state,{ip:ip-2,globalThis,nt},...args);
-            case 2: return runVirtualizedG(code,state,{ip:ip-2,globalThis,nt},...args);
-            case 3: return runVirtualizedG(code,state,{ip:ip-2,globalThis,nt},...args);
+            case 1: return runVirtualizedA(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
+            case 2: return runVirtualizedG(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
+            case 3: return runVirtualizedG(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
             case 5: {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
@@ -287,7 +290,8 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                         {
                             ip:j,
                             globalThis,
-                            nt: new.target
+                            nt: new.target,
+                            tenant
                         },
                         ...args
                     ]);
@@ -317,7 +321,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                     ...(c=-c,arg())
                 }));
                 while(c--){
-                    obj[arg()]=arg();
+                    obj[tenant.clean(obj,arg())]=arg();
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){

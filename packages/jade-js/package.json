@@ -20,6 +20,6 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@portal-solutions/semble-common": "^0.1.1"
+    "@portal-solutions/semble-common": "^0.1.3"
   }
 }

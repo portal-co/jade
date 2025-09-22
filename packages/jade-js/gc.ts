@@ -1,3 +1,5 @@
+import { MultiTenant } from "./index.ts";
+
 const weakmapInternal = (a: object, WeakMap: typeof globalThis.WeakMap) =>
   isPolyfillWeakMap(WeakMap)
     ? ((a as any)[WeakMap.__symbol] ??=
@@ -17,6 +19,7 @@ const isPolyfillWeakMap = (
 type GcState = {
   [a: string]: { map: boolean; objs: any[]; objSet: WeakMap<any, {}> };
 };
+export type MTFlags = { needsGCHooks: boolean };
 export class GCReactor {
   #weakMap: typeof WeakMap;
   #object: typeof Object;
@@ -24,15 +27,23 @@ export class GCReactor {
   #rootSet: WeakMap<any, {}> | undefined = undefined;
   #markSet: WeakMap<any, {}> | undefined = undefined;
   #markObjs: any[] = [];
+  #wipe: <T>(a: T) => T;
+  #mtFlags: MTFlags;
   constructor({
     WeakMap = globalThis.WeakMap,
     Object = { ...globalThis.Object } as any,
+    wipe = MultiTenant.wipe.bind(MultiTenant),
+    flags = MultiTenant,
   }: {
     WeakMap?: typeof globalThis.WeakMap;
     Object?: typeof globalThis.Object;
+    wipe?: <T>(a: T) => T;
+    flags?: MTFlags;
   } = {}) {
     this.#weakMap = WeakMap;
     this.#object = Object;
+    this.#wipe = wipe;
+    this.#mtFlags = flags;
   }
   get gc() {
     return () => this.#gc();
@@ -43,9 +54,14 @@ export class GCReactor {
   get unroot() {
     return (a: any) => this.#unroot(a);
   }
+  #clean(): boolean {
+    if (isPolyfillWeakMap(this.#weakMap)) return false;
+    if (this.#mtFlags.needsGCHooks) return false;
+    return true;
+  }
   #root(a: any) {
     if (typeof a !== "object" && typeof a !== "function") return;
-    if (!isPolyfillWeakMap(this.#weakMap)) return;
+    if (this.#clean()) return;
     const rootSet = (this.#rootSet ??= new this.#weakMap());
     if (rootSet.has(a)) return;
     rootSet.set(a, {});
@@ -53,13 +69,13 @@ export class GCReactor {
   }
   #unroot(a: any) {
     if (typeof a !== "object" && typeof a !== "function") return;
-    if (!isPolyfillWeakMap(this.#weakMap)) return;
+    if (this.#clean()) return;
     const rootSet = (this.#rootSet ??= new this.#weakMap());
     rootSet.delete(a);
     this.#roots = this.#roots.filter((a) => rootSet.has(a));
   }
   #gc() {
-    if (!isPolyfillWeakMap(this.#weakMap)) return;
+    if (this.#clean()) return;
     const rootSet = (this.#rootSet ??= new this.#weakMap());
     const roots = (this.#roots = this.#roots.filter((a) => rootSet.has(a)));
     const state = {};
@@ -67,7 +83,7 @@ export class GCReactor {
     this.#sweep(state);
   }
   #mark(a: any, state: GcState) {
-    if (!isPolyfillWeakMap(this.#weakMap)) return;
+    if (this.#clean()) return;
     const markSet = (this.#markSet ??= new this.#weakMap());
     if (typeof a !== "object" && typeof a !== "function") {
       const proto = this.#object.getPrototypeOf(a);
@@ -76,10 +92,11 @@ export class GCReactor {
     }
     if (markSet.has(a)) return;
     markSet.set(a, {});
+    this.#wipe(a);
     this.#markObjs = [a, ...this.#markObjs];
     const proto = this.#object.getPrototypeOf(a);
     if (proto) this.#mark(proto, state);
-    if (proto === this.#weakMap.prototype) {
+    if (isPolyfillWeakMap(this.#weakMap) && proto === this.#weakMap.prototype) {
       const r = (state[(a as any).__id] ??= {
         map: false,
         objs: [],
@@ -92,7 +109,7 @@ export class GCReactor {
     }
     const d = this.#object.getOwnPropertyDescriptors(a);
     for (const key in d) {
-      if (key === this.#weakMap.__symbol) {
+      if (isPolyfillWeakMap(this.#weakMap) && key === this.#weakMap.__symbol) {
         for (var k in d.value)
           if (k !== (markSet as any).__id) {
             const r = (state[k] ??= {
@@ -117,7 +134,7 @@ export class GCReactor {
     }
   }
   #sweep(state: GcState) {
-    if (!isPolyfillWeakMap(this.#weakMap)) return;
+    if (this.#clean()) return;
     const markSet = (this.#markSet ??= new this.#weakMap());
     for (var key in state) {
       if (!state[key].map) {

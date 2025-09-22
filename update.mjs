@@ -17,7 +17,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
       ak ? "A" : ""
     }${
       gk ? "G" : ""
-    }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: any},...args: any[]): ${
+    }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: typeof window,nt?: any,tenant:Tenant},...args: any[]): ${
       ak ? (gk ? `AsyncGenerator<any,any,any>` : `Promise<any>`) : `any`
     }{
     for(;;){
@@ -37,21 +37,21 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
         ? `state[code().getUint32(ip,true)]=await val;ip += 4;break;`
         : `return ${n({
             ak: true,
-          })}(code,state,{ip:ip-2,globalThis,nt},...args);`
+          })}(code,state,{ip:ip-2,globalThis,nt,tenant},...args);`
     }
             case ${opcodes.YIELD}: ${
       gk
         ? `state[code().getUint32(ip,true)]=yield val;ip += 4;break;`
         : `return ${n({
             gk: true,
-          })}(code,state,{ip:ip-2,globalThis,nt},...args);`
+          })}(code,state,{ip:ip-2,globalThis,nt,tenant},...args);`
     }
             case ${opcodes.YIELDSTAR}: ${
       gk
         ? `state[code().getUint32(ip,true)]=yield* val;ip += 4;break;`
         : `return ${n({
             gk: true,
-          })}(code,state,{ip:ip-2,globalThis,nt},...args);`
+          })}(code,state,{ip:ip-2,globalThis,nt,tenant},...args);`
     }
             case ${
               opcodes.GLOBAL
@@ -77,7 +77,8 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                         {
                             ip:j,
                             globalThis,
-                            nt: new.target
+                            nt: new.target,
+                            tenant
                         },
                         ...args
                     ]);
@@ -109,7 +110,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                     ...(c=-c,arg())
                 }));
                 while(c--){
-                    obj[arg()]=arg();
+                    obj[tenant.clean(obj,arg())]=arg();
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
@@ -132,7 +133,7 @@ writeFileSync(
   `${__dirname}/packages/jade-js/vm.ts`,
   `
 /* This is GENERATED code by \`update.mjs\` */
-
+import {type Tenant} from "./index.ts"
 const {apply} = Reflect;
 const {create,defineProperties} = Object;
 const {fromCodePoint} = String;
