@@ -55,10 +55,10 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 break;
             }
             case 9: {
-                let l=code().getInt32(ip,true),obj:any=l > 0? {} : {
-                    ...state[l=-l,arg()]
+                let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
+                    ...state[c=-c,arg()]
                 };ip+=4;
-                while(l--){
+                while(c--){
                     obj[arg()]=arg();
                 }
                 state[code().getUint32(ip,true)]=obj;
@@ -119,10 +119,10 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 break;
             }
             case 9: {
-                let l=code().getInt32(ip,true),obj:any=l > 0? {} : {
-                    ...state[l=-l,arg()]
+                let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
+                    ...state[c=-c,arg()]
                 };ip+=4;
-                while(l--){
+                while(c--){
                     obj[arg()]=arg();
                 }
                 state[code().getUint32(ip,true)]=obj;
@@ -183,10 +183,10 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 break;
             }
             case 9: {
-                let l=code().getInt32(ip,true),obj:any=l > 0? {} : {
-                    ...state[l=-l,arg()]
+                let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
+                    ...state[c=-c,arg()]
                 };ip+=4;
-                while(l--){
+                while(c--){
                     obj[arg()]=arg();
                 }
                 state[code().getUint32(ip,true)]=obj;
@@ -247,10 +247,10 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 break;
             }
             case 9: {
-                let l=code().getInt32(ip,true),obj:any=l > 0? {} : {
-                    ...state[l=-l,arg()]
+                let c=code().getInt32(ip,true),obj:any=c > 0? {} : {
+                    ...state[c=-c,arg()]
                 };ip+=4;
-                while(l--){
+                while(c--){
                     obj[arg()]=arg();
                 }
                 state[code().getUint32(ip,true)]=obj;
