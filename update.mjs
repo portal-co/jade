@@ -14,7 +14,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
       ak ? "A" : ""
     }${
       gk ? "G" : ""
-    }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: [any] |undefined},...args: any[]): ${
+    }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: any},...args: any[]): ${
       ak ? (gk ? `AsyncGenerator<any,any,any>` : `Promise<any>`) : `any`
     }{
     for(;;){
@@ -70,7 +70,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                         {
                             ip:j,
                             globalThis,
-                            nt: new.target === undefined ? undefined : [new.target]
+                            nt: new.target
                         },
                         ...args
                     ]);

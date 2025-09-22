@@ -5,7 +5,7 @@ const {apply} = Reflect;
 const {create,defineProperties} = Object;
 const {fromCodePoint} = String;
 
-export async function* runVirtualizedAG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: [any] |undefined},...args: any[]): AsyncGenerator<any,any,any>{
+export async function* runVirtualizedAG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: any},...args: any[]): AsyncGenerator<any,any,any>{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -39,7 +39,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                         {
                             ip:j,
                             globalThis,
-                            nt: new.target === undefined ? undefined : [new.target]
+                            nt: new.target
                         },
                         ...args
                     ]);
@@ -84,7 +84,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
     }
 }
 
-export async function runVirtualizedA(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: [any] |undefined},...args: any[]): Promise<any>{
+export async function runVirtualizedA(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: any},...args: any[]): Promise<any>{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -118,7 +118,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                         {
                             ip:j,
                             globalThis,
-                            nt: new.target === undefined ? undefined : [new.target]
+                            nt: new.target
                         },
                         ...args
                     ]);
@@ -163,7 +163,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
     }
 }
 
-export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: [any] |undefined},...args: any[]): any{
+export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: any},...args: any[]): any{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -197,7 +197,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                         {
                             ip:j,
                             globalThis,
-                            nt: new.target === undefined ? undefined : [new.target]
+                            nt: new.target
                         },
                         ...args
                     ]);
@@ -242,7 +242,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
     }
 }
 
-export  function runVirtualized(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: [any] |undefined},...args: any[]): any{
+export  function runVirtualized(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined}:{ip?:number,globalThis?: typeof window,nt?: any},...args: any[]): any{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -276,7 +276,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                         {
                             ip:j,
                             globalThis,
-                            nt: new.target === undefined ? undefined : [new.target]
+                            nt: new.target
                         },
                         ...args
                     ]);
