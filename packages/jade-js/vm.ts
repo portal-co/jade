@@ -61,7 +61,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 break;
             }
             case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c > 0? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
                     ...(c=-c,arg())
                 }));
                 while(c--){
@@ -136,7 +136,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 break;
             }
             case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c > 0? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
                     ...(c=-c,arg())
                 }));
                 while(c--){
@@ -211,7 +211,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 break;
             }
             case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c > 0? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
                     ...(c=-c,arg())
                 }));
                 while(c--){
@@ -286,7 +286,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 break;
             }
             case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c > 0? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
                     ...(c=-c,arg())
                 }));
                 while(c--){

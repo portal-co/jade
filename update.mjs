@@ -92,7 +92,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                 break;
             }
             case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c > 0? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
                     ...(c=-c,arg())
                 }));
                 while(c--){
