@@ -61,7 +61,12 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 while(c--){
                     obj[arg()]=arg();
                 }
-                state[code().getUint32(ip,true)]=obj;
+                const key = code().getUint32(ip,true);
+                if(key & 1){
+                    defineProperties(state[key >>> 1] = {},obj);
+                }else{
+                    state[key >>> 1]=obj;
+                }
                 ip+=4;
                 break;
             }
@@ -125,7 +130,12 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 while(c--){
                     obj[arg()]=arg();
                 }
-                state[code().getUint32(ip,true)]=obj;
+                const key = code().getUint32(ip,true);
+                if(key & 1){
+                    defineProperties(state[key >>> 1] = {},obj);
+                }else{
+                    state[key >>> 1]=obj;
+                }
                 ip+=4;
                 break;
             }
@@ -189,7 +199,12 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 while(c--){
                     obj[arg()]=arg();
                 }
-                state[code().getUint32(ip,true)]=obj;
+                const key = code().getUint32(ip,true);
+                if(key & 1){
+                    defineProperties(state[key >>> 1] = {},obj);
+                }else{
+                    state[key >>> 1]=obj;
+                }
                 ip+=4;
                 break;
             }
@@ -253,7 +268,12 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 while(c--){
                     obj[arg()]=arg();
                 }
-                state[code().getUint32(ip,true)]=obj;
+                const key = code().getUint32(ip,true);
+                if(key & 1){
+                    defineProperties(state[key >>> 1] = {},obj);
+                }else{
+                    state[key >>> 1]=obj;
+                }
                 ip+=4;
                 break;
             }

@@ -92,7 +92,12 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                 while(c--){
                     obj[arg()]=arg();
                 }
-                state[code().getUint32(ip,true)]=obj;
+                const key = code().getUint32(ip,true);
+                if(key & 1){
+                    defineProperties(state[key >>> 1] = {},obj);
+                }else{
+                    state[key >>> 1]=obj;
+                }
                 ip+=4;
                 break;
             }
