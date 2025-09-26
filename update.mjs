@@ -2,7 +2,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeFileSync } from "node:fs";
 
-import { opcodes } from "./packages/jade-data/index.js";
+import { opcodes } from "./packages/jade-data/dist/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -31,22 +31,22 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
       gk ? "op === 2 || op === 3 " : "false"
     }) ? arg() : undefined;
         switch(op){
-            case ${opcodes.RET}: return val
-            case ${opcodes.AWAIT}: ${
+            case ${opcodes.RET.id}: return val
+            case ${opcodes.AWAIT.id}: ${
       ak
         ? `state[code().getUint32(ip,true)]=await val;ip += 4;break;`
         : `return ${n({
             ak: true,
           })}(code,state,{ip:ip-2,globalThis,nt,tenant},...args);`
     }
-            case ${opcodes.YIELD}: ${
+            case ${opcodes.YIELD.id}: ${
       gk
         ? `state[code().getUint32(ip,true)]=yield val;ip += 4;break;`
         : `return ${n({
             gk: true,
           })}(code,state,{ip:ip-2,globalThis,nt,tenant},...args);`
     }
-            case ${opcodes.YIELDSTAR}: ${
+            case ${opcodes.YIELDSTAR.id}: ${
       gk
         ? `state[code().getUint32(ip,true)]=yield* val;ip += 4;break;`
         : `return ${n({
@@ -54,9 +54,9 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
           })}(code,state,{ip:ip-2,globalThis,nt,tenant},...args);`
     }
             case ${
-              opcodes.GLOBAL
+              opcodes.GLOBAL.id
             }: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
-            case ${opcodes.FN}: {
+            case ${opcodes.FN.id}: {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
@@ -87,16 +87,16 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                 break;
             }
             case ${
-              opcodes.LIT32
+              opcodes.LIT32.id
             }: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;
-            case ${opcodes.ARR}: {
+            case ${opcodes.ARR.id}: {
                 let l=code().getUint32(ip,true),arr:any[]=[];ip+=4;
                 while(l--)arr=[...arr,arg()];
                 state[code().getUint32(ip,true)]=arr;
                 ip+=4;
                 break;
             }
-            case ${opcodes.STR}: {
+            case ${opcodes.STR.id}: {
                 let l=code().getUint32(ip,true),arr:number[]=[];ip+=4;
                 while(l--){
                     arr=[...arr,arg()];
@@ -105,7 +105,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                 ip+=4;
                 break;
             }
-            case ${opcodes.LITOBJ}: {
+            case ${opcodes.LITOBJ.id}: {
                 let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
                     ...(c=-c,arg())
                 }));
@@ -122,7 +122,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
                 break;
             }
             case ${
-              opcodes.NEW_TARGET
+              opcodes.NEW_TARGET.id
             }: state[code().getUint32(ip,true)]=nt;ip += 4;break;
         }
     }
@@ -149,7 +149,7 @@ writeFileSync(
 #[repr(u16)]
 #[non_exhaustive]
 pub enum Opcode {
-    ${[...Object.entries(opcodes)].map(([a, b]) => `${a}=${b}`).join(",\n    ")}
+    ${[...Object.entries(opcodes)].map(([a, b]) => `${a}=${b.id}`).join(",\n    ")}
 }
 impl Opcode{
   pub const LEN: u16 = ${Object.entries(opcodes).length};

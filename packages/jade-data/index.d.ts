@@ -1,1 +1,0 @@
-export const opcodes: {[a: string]: number}

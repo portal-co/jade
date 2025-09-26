@@ -1,3 +1,4 @@
+#![no_std]
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 include!("./data.rs");
