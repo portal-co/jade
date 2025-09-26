@@ -7,7 +7,13 @@ description.workspace = true
 
 [dependencies]
 num_enum = "0.7.4"
-swc_common.workspace = true
-swc_ecma_ast.workspace = true
-swc_ecma_utils.workspace = true
-swc_ecma_visit.workspace = true
+swc_common={workspace = true,optional = true}
+swc_ecma_ast={workspace = true,optional = true}
+swc_ecma_utils={workspace = true,optional = true}
+swc_ecma_visit={workspace = true,optional = true}
+
+
+[features]
+std=["alloc"]
+alloc=[]
+swc=["std","dep:swc_common","dep:swc_ecma_ast","dep:swc_ecma_utils","dep:swc_ecma_visit"]
