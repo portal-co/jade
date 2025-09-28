@@ -35,23 +35,23 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
             case ${opcodes.AWAIT.id}: ${
       ak
         ? `state[code().getUint32(ip,true)]=await val;ip += 4;break;`
-        : `return ${n({
+        : `return apply(${n({
             ak: true,
-          })}(code,state,{ip:ip-2,globalThis,nt,tenant},...args);`
+          })},this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);`
     }
             case ${opcodes.YIELD.id}: ${
       gk
         ? `state[code().getUint32(ip,true)]=yield val;ip += 4;break;`
-        : `return ${n({
+        : `return apply(${n({
             gk: true,
-          })}(code,state,{ip:ip-2,globalThis,nt,tenant},...args);`
+          })},this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);`
     }
             case ${opcodes.YIELDSTAR.id}: ${
       gk
         ? `state[code().getUint32(ip,true)]=yield* val;ip += 4;break;`
-        : `return ${n({
+        : `return apply(${n({
             gk: true,
-          })}(code,state,{ip:ip-2,globalThis,nt,tenant},...args);`
+          })},this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);`
     }
             case ${
               opcodes.GLOBAL.id
@@ -149,7 +149,9 @@ writeFileSync(
 #[repr(u16)]
 #[non_exhaustive]
 pub enum Opcode {
-    ${[...Object.entries(opcodes)].map(([a, b]) => `${a}=${b.id}`).join(",\n    ")}
+    ${[...Object.entries(opcodes)]
+      .map(([a, b]) => `${a}=${b.id}`)
+      .join(",\n    ")}
 }
 impl Opcode{
   pub const LEN: u16 = ${Object.entries(opcodes).length};

@@ -100,8 +100,8 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
         switch(op){
             case 0: return val
             case 1: state[code().getUint32(ip,true)]=await val;ip += 4;break;
-            case 2: return runVirtualizedAG(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
-            case 3: return runVirtualizedAG(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
+            case 2: return apply(runVirtualizedAG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
+            case 3: return apply(runVirtualizedAG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
             case 5: {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
@@ -182,7 +182,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
         const val: any = (op === 0 || false || op === 2 || op === 3 ) ? arg() : undefined;
         switch(op){
             case 0: return val
-            case 1: return runVirtualizedAG(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
+            case 1: return apply(runVirtualizedAG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
             case 2: state[code().getUint32(ip,true)]=yield val;ip += 4;break;
             case 3: state[code().getUint32(ip,true)]=yield* val;ip += 4;break;
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
@@ -265,9 +265,9 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
         const val: any = (op === 0 || false || false) ? arg() : undefined;
         switch(op){
             case 0: return val
-            case 1: return runVirtualizedA(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
-            case 2: return runVirtualizedG(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
-            case 3: return runVirtualizedG(code,state,{ip:ip-2,globalThis,nt,tenant},...args);
+            case 1: return apply(runVirtualizedA,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
+            case 2: return apply(runVirtualizedG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
+            case 3: return apply(runVirtualizedG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
             case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
             case 5: {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
