@@ -12,6 +12,7 @@ const vmcode = [{ async: true, gen: true }, { async: true }, { gen: true }, {}]
     const gk = "gen" in o;
     const n = ({ ak: ak_ = ak, gk: gk_ = gk }) =>
       `runVirtualized${ak_ ? "A" : ""}${gk_ ? "G" : ""}`;
+    const si = `[code,state,{ip:ip-2,globalThis,nt,tenant},...args]`;
     return `
 export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
       ak ? "A" : ""
@@ -37,21 +38,21 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
         ? `state[code().getUint32(ip,true)]=await val;ip += 4;break;`
         : `return apply(${n({
             ak: true,
-          })},this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);`
+          })},this,${si});`
     }
             case ${opcodes.YIELD.id}: ${
       gk
         ? `state[code().getUint32(ip,true)]=yield val;ip += 4;break;`
         : `return apply(${n({
             gk: true,
-          })},this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);`
+          })},this,${si});`
     }
             case ${opcodes.YIELDSTAR.id}: ${
       gk
         ? `state[code().getUint32(ip,true)]=yield* val;ip += 4;break;`
         : `return apply(${n({
             gk: true,
-          })},this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);`
+          })},this,${si});`
     }
             case ${
               opcodes.GLOBAL.id
