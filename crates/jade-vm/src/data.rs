@@ -1,4 +1,3 @@
-
 /* This is GENERATED code by `update.mjs` */
 #[derive(
     Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, IntoPrimitive, TryFromPrimitive,

@@ -1,13 +1,10 @@
 #![no_std]
 #[cfg(feature = "alloc")]
 extern crate alloc;
-
 #[cfg(feature = "std")]
 extern crate std;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
-
 include!("./data.rs");
-
 pub fn encode_lsb(a: u32, val: bool) -> u32 {
     match val {
         true => a << 1,
