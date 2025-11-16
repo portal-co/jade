@@ -4,8 +4,9 @@ import {type Tenant} from "./index.ts"
 const {apply} = Reflect;
 const {create,defineProperties} = Object;
 const {fromCodePoint} = String;
+type _globalThis = typeof globalThis;
 
-export async function* runVirtualizedAG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: typeof window,nt?: any,tenant:Tenant},...args: any[]): AsyncGenerator<any,any,any>{
+export async function* runVirtualizedAG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant},...args: any[]): AsyncGenerator<any,any,any>{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -15,12 +16,11 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
         }
         const val: any = (op === 0 || op === 1 || op === 2 || op === 3 ) ? arg() : undefined;
         switch(op){
-            case 0: return val
+            
             case 1: state[code().getUint32(ip,true)]=await val;ip += 4;break;
             case 2: state[code().getUint32(ip,true)]=yield val;ip += 4;break;
             case 3: state[code().getUint32(ip,true)]=yield* val;ip += 4;break;
-            case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
-            case 5: {
+    case 0: return val;case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;case 5:  {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
@@ -49,16 +49,13 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 },...spans);
                 ip += 4;
                 break;
-            }
-            case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;
-            case 7: {
+            }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {
                 let l=code().getUint32(ip,true),arr:any[]=[];ip+=4;
                 while(l--)arr=[...arr,arg()];
                 state[code().getUint32(ip,true)]=arr;
                 ip+=4;
                 break;
-            }
-            case 8: {
+            }case 8:  {
                 let l=code().getUint32(ip,true),arr:number[]=[];ip+=4;
                 while(l--){
                     arr=[...arr,arg()];
@@ -66,8 +63,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 state[code().getUint32(ip,true)]=fromCodePoint(...arr);
                 ip+=4;
                 break;
-            }
-            case 9: {
+            }case 9: {
                 let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
                     ...(c=-c,arg())
                 }));
@@ -82,13 +78,12 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 }
                 ip+=4;
                 break;
-            }
-            case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
+            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
         }
     }
 }
 
-export async function runVirtualizedA(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: typeof window,nt?: any,tenant:Tenant},...args: any[]): Promise<any>{
+export async function runVirtualizedA(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant},...args: any[]): Promise<any>{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -98,12 +93,11 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
         }
         const val: any = (op === 0 || op === 1 || false) ? arg() : undefined;
         switch(op){
-            case 0: return val
+            
             case 1: state[code().getUint32(ip,true)]=await val;ip += 4;break;
             case 2: return apply(runVirtualizedAG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
             case 3: return apply(runVirtualizedAG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
-            case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
-            case 5: {
+    case 0: return val;case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;case 5:  {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
@@ -132,16 +126,13 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 },...spans);
                 ip += 4;
                 break;
-            }
-            case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;
-            case 7: {
+            }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {
                 let l=code().getUint32(ip,true),arr:any[]=[];ip+=4;
                 while(l--)arr=[...arr,arg()];
                 state[code().getUint32(ip,true)]=arr;
                 ip+=4;
                 break;
-            }
-            case 8: {
+            }case 8:  {
                 let l=code().getUint32(ip,true),arr:number[]=[];ip+=4;
                 while(l--){
                     arr=[...arr,arg()];
@@ -149,8 +140,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 state[code().getUint32(ip,true)]=fromCodePoint(...arr);
                 ip+=4;
                 break;
-            }
-            case 9: {
+            }case 9: {
                 let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
                     ...(c=-c,arg())
                 }));
@@ -165,13 +155,12 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 }
                 ip+=4;
                 break;
-            }
-            case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
+            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
         }
     }
 }
 
-export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: typeof window,nt?: any,tenant:Tenant},...args: any[]): any{
+export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant},...args: any[]): any{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -181,12 +170,11 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
         }
         const val: any = (op === 0 || false || op === 2 || op === 3 ) ? arg() : undefined;
         switch(op){
-            case 0: return val
+            
             case 1: return apply(runVirtualizedAG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
             case 2: state[code().getUint32(ip,true)]=yield val;ip += 4;break;
             case 3: state[code().getUint32(ip,true)]=yield* val;ip += 4;break;
-            case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
-            case 5: {
+    case 0: return val;case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;case 5:  {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
@@ -215,16 +203,13 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 },...spans);
                 ip += 4;
                 break;
-            }
-            case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;
-            case 7: {
+            }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {
                 let l=code().getUint32(ip,true),arr:any[]=[];ip+=4;
                 while(l--)arr=[...arr,arg()];
                 state[code().getUint32(ip,true)]=arr;
                 ip+=4;
                 break;
-            }
-            case 8: {
+            }case 8:  {
                 let l=code().getUint32(ip,true),arr:number[]=[];ip+=4;
                 while(l--){
                     arr=[...arr,arg()];
@@ -232,8 +217,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 state[code().getUint32(ip,true)]=fromCodePoint(...arr);
                 ip+=4;
                 break;
-            }
-            case 9: {
+            }case 9: {
                 let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
                     ...(c=-c,arg())
                 }));
@@ -248,13 +232,12 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 }
                 ip+=4;
                 break;
-            }
-            case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
+            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
         }
     }
 }
 
-export  function runVirtualized(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: typeof window,nt?: any,tenant:Tenant},...args: any[]): any{
+export  function runVirtualized(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant},...args: any[]): any{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -264,12 +247,11 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
         }
         const val: any = (op === 0 || false || false) ? arg() : undefined;
         switch(op){
-            case 0: return val
+            
             case 1: return apply(runVirtualizedA,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
             case 2: return apply(runVirtualizedG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
             case 3: return apply(runVirtualizedG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
-            case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
-            case 5: {
+    case 0: return val;case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;case 5:  {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
@@ -298,16 +280,13 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 },...spans);
                 ip += 4;
                 break;
-            }
-            case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;
-            case 7: {
+            }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {
                 let l=code().getUint32(ip,true),arr:any[]=[];ip+=4;
                 while(l--)arr=[...arr,arg()];
                 state[code().getUint32(ip,true)]=arr;
                 ip+=4;
                 break;
-            }
-            case 8: {
+            }case 8:  {
                 let l=code().getUint32(ip,true),arr:number[]=[];ip+=4;
                 while(l--){
                     arr=[...arr,arg()];
@@ -315,8 +294,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 state[code().getUint32(ip,true)]=fromCodePoint(...arr);
                 ip+=4;
                 break;
-            }
-            case 9: {
+            }case 9: {
                 let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
                     ...(c=-c,arg())
                 }));
@@ -331,8 +309,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 }
                 ip+=4;
                 break;
-            }
-            case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
+            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
         }
     }
 }

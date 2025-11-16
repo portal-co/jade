@@ -2,7 +2,7 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeFileSync } from "node:fs";
 
-import { opcodes } from "./packages/jade-data/dist/index.js";
+import { opcodes,handlers } from "../packages/jade-data/dist/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -18,7 +18,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
       ak ? "A" : ""
     }${
       gk ? "G" : ""
-    }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: typeof window,nt?: any,tenant:Tenant},...args: any[]): ${
+    }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant},...args: any[]): ${
       ak ? (gk ? `AsyncGenerator<any,any,any>` : `Promise<any>`) : `any`
     }{
     for(;;){
@@ -32,7 +32,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
       gk ? "op === 2 || op === 3 " : "false"
     }) ? arg() : undefined;
         switch(op){
-            case ${opcodes.RET.id}: return val
+            
             case ${opcodes.AWAIT.id}: ${
       ak
         ? `state[code().getUint32(ip,true)]=await val;ip += 4;break;`
@@ -54,77 +54,10 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
             gk: true,
           })},this,${si});`
     }
-            case ${
-              opcodes.GLOBAL.id
-            }: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;
-            case ${opcodes.FN.id}: {
-                const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
-                    ,closureArgs:number[]=[...arg()]
-                    ,[spanner,...spans]=arg()??[(a:any)=>a];
-                const j = code().getUint32(ip,true);
-                ip+=4;
-                state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
-                    const o=create(null);
-                    for(const a in closureArgs)o[closureArgs[a]]={
-                        get:()=>state[closureArgs[a]],
-                        set:(v:any)=>state[closureArgs[a]]=v,
-                        enumerable:true,
-                        configurable:false
-                    };
-                    const s=create(null);
-                    return apply(val,this,[
-                        code,
-                        (defineProperties(s,o),s),
-                        {
-                            ip:j,
-                            globalThis,
-                            nt: new.target,
-                            tenant
-                        },
-                        ...args
-                    ]);
-                },...spans);
-                ip += 4;
-                break;
-            }
-            case ${
-              opcodes.LIT32.id
-            }: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;
-            case ${opcodes.ARR.id}: {
-                let l=code().getUint32(ip,true),arr:any[]=[];ip+=4;
-                while(l--)arr=[...arr,arg()];
-                state[code().getUint32(ip,true)]=arr;
-                ip+=4;
-                break;
-            }
-            case ${opcodes.STR.id}: {
-                let l=code().getUint32(ip,true),arr:number[]=[];ip+=4;
-                while(l--){
-                    arr=[...arr,arg()];
-                }
-                state[code().getUint32(ip,true)]=fromCodePoint(...arr);
-                ip+=4;
-                break;
-            }
-            case ${opcodes.LITOBJ.id}: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
-                    ...(c=-c,arg())
-                }));
-                while(c--){
-                    obj[tenant.clean(obj,arg())]=arg();
-                }
-                const key = code().getUint32(ip,true);
-                if(key & 1){
-                    defineProperties(state[key >>> 1],obj);
-                }else{
-                    state[key >>> 1]=obj;
-                }
-                ip+=4;
-                break;
-            }
-            case ${
-              opcodes.NEW_TARGET.id
-            }: state[code().getUint32(ip,true)]=nt;ip += 4;break;
+    ${Reflect.ownKeys(opcodes)
+      .filter((op) => op !== "AWAIT" && op !== "YIELD" && op !== "YIELDSTAR")
+      .map((op) => `case ${opcodes[op].id}: ${handlers[op]}`)
+      .join("")}
         }
     }
 }`;
@@ -138,6 +71,7 @@ import {type Tenant} from "./index.ts"
 const {apply} = Reflect;
 const {create,defineProperties} = Object;
 const {fromCodePoint} = String;
+type _globalThis = typeof globalThis;
 ${vmcode}`
 );
 writeFileSync(
