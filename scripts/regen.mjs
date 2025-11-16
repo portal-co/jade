@@ -131,7 +131,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
   })
   .join("\n");
 writeFileSync(
-  `${__dirname}/packages/jade-js/vm.ts`,
+  `${__dirname}/../packages/jade-js/vm.ts`,
   `
 /* This is GENERATED code by \`update.mjs\` */
 import {type Tenant} from "./index.ts"
@@ -141,7 +141,7 @@ const {fromCodePoint} = String;
 ${vmcode}`
 );
 writeFileSync(
-  `${__dirname}/crates/jade-vm/src/data.rs`,
+  `${__dirname}/../crates/jade-vm/src/data.rs`,
   `
 /* This is GENERATED code by \`update.mjs\` */
 #[derive(
