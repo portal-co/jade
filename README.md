@@ -1,13 +1,14 @@
 # @portal-solutions/jade
 
 ## Description
-Project jade
+A TypeScript workspace containing "jade-element" and "jade-js", likely a UI framework or component library.
 
 ## Goals
-- [ ] Add project goals
+- [ ] Develop Jade UI components
+- [ ] Provide JS runtime support
 
 ## Progress
-- [ ] Initial setup
+- [ ] Workspace setup
 
 ---
 *AI assisted*
