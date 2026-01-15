@@ -5,8 +5,10 @@
         "packages/jade-js"
     ],
     "devDependencies": {
+        "@types/node": "^25.0.9",
         "parcel": "^2.15.4",
         "typescript": "^5.9.2",
         "zshy": "^0.4.2"
-    }
+    },
+    "type": "module"
 }

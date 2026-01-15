@@ -2,6 +2,7 @@
   "compilerOptions": {
     "target": "esnext",
     "lib": ["ESNext"],
-    "allowImportingTsExtensions": true
+    "allowImportingTsExtensions": true,
+    "module": "esnext"
   }
 }

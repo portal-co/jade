@@ -6,11 +6,15 @@ import { opcodes,handlers } from "../packages/jade-data/dist/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+
+
+type VMOpt = { async?: boolean; gen?: boolean };
+
 const vmcode = [{ async: true, gen: true }, { async: true }, { gen: true }, {}]
-  .map((o) => {
+  .map((o: VMOpt) => {
     const ak = "async" in o;
     const gk = "gen" in o;
-    const n = ({ ak: ak_ = ak, gk: gk_ = gk }) =>
+    const n = ({ ak: ak_ = ak, gk: gk_ = gk }: { ak?: boolean; gk?: boolean }) =>
       `runVirtualized${ak_ ? "A" : ""}${gk_ ? "G" : ""}`;
     const si = `[code,state,{ip:ip-2,globalThis,nt,tenant},...args]`;
     return `
@@ -63,6 +67,7 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
 }`;
   })
   .join("\n");
+
 writeFileSync(
   `${__dirname}/../packages/jade-js/vm.ts`,
   `
@@ -93,3 +98,4 @@ impl Opcode{
 }
 `
 );
+
