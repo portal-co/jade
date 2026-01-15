@@ -92,10 +92,15 @@ writeFileSync(
         const args = info.args;
         if (args === 0) return `    ${v},`;
         if (args === 1) return `    ${v}(u32),`;
-        if (typeof args === "number") return `    ${v}(Vec<u32>),`;
-        if (args === "array") return `    ${v}(Vec<u32>, u32),`;
+        if (typeof args === "number")
+          return `    #[cfg(feature = "alloc")]
+    ${v}(Vec<u32>),`;
+        if (args === "array")
+          return `    #[cfg(feature = "alloc")]
+    ${v}(Vec<u32>, u32),`;
         if (args === "object")
-          return `    ${v}{ c: i32, pairs: Vec<(u32,u32)>, key: u32 },`;
+          return `    #[cfg(feature = "alloc")]
+    ${v}{ c: i32, pairs: Vec<(u32,u32)>, key: u32 },`;
         return `    ${v},`;
       })
       .join("\n");
@@ -110,11 +115,20 @@ writeFileSync(
         if (args === 1)
           return `            ${id} => { let (a,no) = read_u32_le(buf, off)?; off = no; Some((Operation::${v}(a), &buf[off..])) },`;
         if (typeof args === "number")
-          return `            ${id} => { let mut vec = Vec::new(); for _ in 0..${args} { let (x,no) = read_u32_le(buf, off)?; off = no; vec.push(x); } Some((Operation::${v}(vec), &buf[off..])) },`;
+          return `            #[cfg(feature = "alloc")]
+            ${id} => { let mut vec = Vec::new(); for _ in 0..${args} { let (x,no) = read_u32_le(buf, off)?; off = no; vec.push(x); } Some((Operation::${v}(vec), &buf[off..])) },
+            #[cfg(not(feature = "alloc"))]
+            ${id} => { return None },`;
         if (args === "array")
-          return `            ${id} => { let (len,no) = read_u32_le(buf, off)?; off = no; let mut items = Vec::with_capacity(len as usize); for _ in 0..(len as usize) { let (x,no2) = read_u32_le(buf, off)?; off = no2; items.push(x); } let (dest,no3) = read_u32_le(buf, off)?; off = no3; Some((Operation::${v}(items, dest), &buf[off..])) },`;
+          return `            #[cfg(feature = "alloc")]
+            ${id} => { let (len,no) = read_u32_le(buf, off)?; off = no; let mut items = Vec::with_capacity(len as usize); for _ in 0..(len as usize) { let (x,no2) = read_u32_le(buf, off)?; off = no2; items.push(x); } let (dest,no3) = read_u32_le(buf, off)?; off = no3; Some((Operation::${v}(items, dest), &buf[off..])) },
+            #[cfg(not(feature = "alloc"))]
+            ${id} => { return None },`;
         if (args === "object")
-          return `            ${id} => { let (c,no) = read_i32_le(buf, off)?; off = no; let mut pairs = Vec::new(); let mut cnt = if c>=0 { c as usize } else { (-c) as usize }; while cnt>0 { let (k,no2) = read_u32_le(buf, off)?; off = no2; let (v,no3) = read_u32_le(buf, off)?; off = no3; pairs.push((k,v)); cnt-=1; } let (key,no4) = read_u32_le(buf, off)?; off = no4; Some((Operation::${v}{ c, pairs, key }, &buf[off..])) },`;
+          return `            #[cfg(feature = "alloc")]
+            ${id} => { let (c,no) = read_i32_le(buf, off)?; off = no; let mut pairs = Vec::new(); let mut cnt = if c>=0 { c as usize } else { (-c) as usize }; while cnt>0 { let (k,no2) = read_u32_le(buf, off)?; off = no2; let (v,no3) = read_u32_le(buf, off)?; off = no3; pairs.push((k,v)); cnt-=1; } let (key,no4) = read_u32_le(buf, off)?; off = no4; Some((Operation::${v}{ c, pairs, key }, &buf[off..])) },
+            #[cfg(not(feature = "alloc"))]
+            ${id} => { return None },`;
         return `            ${id} => Some((Operation::${v}, &buf[off..])),`;
       })
       .join("\n");
@@ -129,11 +143,20 @@ writeFileSync(
         if (args === 1)
           return `            Operation::${v}(a) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&a.to_le_bytes()); },`;
         if (typeof args === "number")
-          return `            Operation::${v}(vec) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); for &x in vec { wtr.extend_from_slice(&x.to_le_bytes()); } },`;
+          return `            #[cfg(feature = "alloc")]
+            Operation::${v}(vec) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); for &x in vec { wtr.extend_from_slice(&x.to_le_bytes()); } },
+            #[cfg(not(feature = "alloc"))]
+            Operation::${v} => { /* alloc disabled: cannot emit */ },`;
         if (args === "array")
-          return `            Operation::${v}(items,dest) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&(items.len() as u32).to_le_bytes()); for &x in items { wtr.extend_from_slice(&x.to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },`;
+          return `            #[cfg(feature = "alloc")]
+            Operation::${v}(items,dest) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&(items.len() as u32).to_le_bytes()); for &x in items { wtr.extend_from_slice(&x.to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },
+            #[cfg(not(feature = "alloc"))]
+            Operation::${v} => { /* alloc disabled: cannot emit */ },`;
         if (args === "object")
-          return `            Operation::${v}{c,pairs,key} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&c.to_le_bytes()); for (k,v) in pairs { wtr.extend_from_slice(&k.to_le_bytes()); wtr.extend_from_slice(&v.to_le_bytes()); } wtr.extend_from_slice(&key.to_le_bytes()); },`;
+          return `            #[cfg(feature = "alloc")]
+            Operation::${v}{c,pairs,key} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&c.to_le_bytes()); for (k,v) in pairs { wtr.extend_from_slice(&k.to_le_bytes()); wtr.extend_from_slice(&v.to_le_bytes()); } wtr.extend_from_slice(&key.to_le_bytes()); },
+            #[cfg(not(feature = "alloc"))]
+            Operation::${v} => { /* alloc disabled: cannot emit */ },`;
         return `            Operation::${v} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); },`;
       })
       .join("\n");
