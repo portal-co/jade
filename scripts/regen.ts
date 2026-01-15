@@ -93,8 +93,7 @@ writeFileSync(
         if (args === 0) return `    ${v},`;
         if (args === 1) return `    ${v}(u32),`;
         if (typeof args === "number")
-          return `    #[cfg(feature = "alloc")]
-    ${v}(Vec<u32>),`;
+          return `    ${v}([u32; ${args}]),`;
         if (args === "array")
           return `    #[cfg(feature = "alloc")]
     ${v}(Vec<u32>, u32),`;
@@ -115,10 +114,7 @@ writeFileSync(
         if (args === 1)
           return `            ${id} => { let (a,no) = read_u32_le(buf, off)?; off = no; Some((Operation::${v}(a), &buf[off..])) },`;
         if (typeof args === "number")
-          return `            #[cfg(feature = "alloc")]
-            ${id} => { let mut vec = Vec::new(); for _ in 0..${args} { let (x,no) = read_u32_le(buf, off)?; off = no; vec.push(x); } Some((Operation::${v}(vec), &buf[off..])) },
-            #[cfg(not(feature = "alloc"))]
-            ${id} => { return None },`;
+          return `            ${id} => { let mut arr = [0u32; ${args}]; for i in 0..${args} { let (x,no) = read_u32_le(buf, off)?; off = no; arr[i]=x; } Some((Operation::${v}(arr), &buf[off..])) },`;
         if (args === "array")
           return `            #[cfg(feature = "alloc")]
             ${id} => { let (len,no) = read_u32_le(buf, off)?; off = no; let mut items = Vec::with_capacity(len as usize); for _ in 0..(len as usize) { let (x,no2) = read_u32_le(buf, off)?; off = no2; items.push(x); } let (dest,no3) = read_u32_le(buf, off)?; off = no3; Some((Operation::${v}(items, dest), &buf[off..])) },
@@ -143,10 +139,7 @@ writeFileSync(
         if (args === 1)
           return `            Operation::${v}(a) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&a.to_le_bytes()); },`;
         if (typeof args === "number")
-          return `            #[cfg(feature = "alloc")]
-            Operation::${v}(vec) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); for &x in vec { wtr.extend_from_slice(&x.to_le_bytes()); } },
-            #[cfg(not(feature = "alloc"))]
-            Operation::${v} => { /* alloc disabled: cannot emit */ },`;
+          return `            Operation::${v}(arr) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); for &x in arr.iter() { wtr.extend_from_slice(&x.to_le_bytes()); } },`;
         if (args === "array")
           return `            #[cfg(feature = "alloc")]
             Operation::${v}(items,dest) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&(items.len() as u32).to_le_bytes()); for &x in items { wtr.extend_from_slice(&x.to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },

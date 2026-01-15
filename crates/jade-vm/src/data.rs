@@ -36,10 +36,13 @@ pub enum Operation {
     Yield(u32),
     Yieldstar(u32),
     Global,
-    Fn(Vec<u32>),
+    Fn([u32; 4]),
     Lit32(u32),
+    #[cfg(feature = "alloc")]
     Arr(Vec<u32>, u32),
+    #[cfg(feature = "alloc")]
     Str(Vec<u32>, u32),
+    #[cfg(feature = "alloc")]
     Litobj{ c: i32, pairs: Vec<(u32,u32)>, key: u32 },
     NewTarget,
 }
@@ -72,11 +75,20 @@ impl Operation {
             2 => { let (a,no) = read_u32_le(buf, off)?; off = no; Some((Operation::Yield(a), &buf[off..])) },
             3 => { let (a,no) = read_u32_le(buf, off)?; off = no; Some((Operation::Yieldstar(a), &buf[off..])) },
             4 => Some((Operation::Global, &buf[off..])),
-            5 => { let mut vec = Vec::new(); for _ in 0..4 { let (x,no) = read_u32_le(buf, off)?; off = no; vec.push(x); } Some((Operation::Fn(vec), &buf[off..])) },
+            5 => { let mut arr = [0u32; 4]; for i in 0..4 { let (x,no) = read_u32_le(buf, off)?; off = no; arr[i]=x; } Some((Operation::Fn(arr), &buf[off..])) },
             6 => { let (a,no) = read_u32_le(buf, off)?; off = no; Some((Operation::Lit32(a), &buf[off..])) },
+            #[cfg(feature = "alloc")]
             7 => { let (len,no) = read_u32_le(buf, off)?; off = no; let mut items = Vec::with_capacity(len as usize); for _ in 0..(len as usize) { let (x,no2) = read_u32_le(buf, off)?; off = no2; items.push(x); } let (dest,no3) = read_u32_le(buf, off)?; off = no3; Some((Operation::Arr(items, dest), &buf[off..])) },
+            #[cfg(not(feature = "alloc"))]
+            7 => { return None },
+            #[cfg(feature = "alloc")]
             8 => { let (len,no) = read_u32_le(buf, off)?; off = no; let mut items = Vec::with_capacity(len as usize); for _ in 0..(len as usize) { let (x,no2) = read_u32_le(buf, off)?; off = no2; items.push(x); } let (dest,no3) = read_u32_le(buf, off)?; off = no3; Some((Operation::Str(items, dest), &buf[off..])) },
+            #[cfg(not(feature = "alloc"))]
+            8 => { return None },
+            #[cfg(feature = "alloc")]
             9 => { let (c,no) = read_i32_le(buf, off)?; off = no; let mut pairs = Vec::new(); let mut cnt = if c>=0 { c as usize } else { (-c) as usize }; while cnt>0 { let (k,no2) = read_u32_le(buf, off)?; off = no2; let (v,no3) = read_u32_le(buf, off)?; off = no3; pairs.push((k,v)); cnt-=1; } let (key,no4) = read_u32_le(buf, off)?; off = no4; Some((Operation::Litobj{ c, pairs, key }, &buf[off..])) },
+            #[cfg(not(feature = "alloc"))]
+            9 => { return None },
             10 => Some((Operation::NewTarget, &buf[off..])),
       _ => None
     }
@@ -92,11 +104,20 @@ impl Operation {
             Operation::Yield(a) => { wtr.push(2 as u8); wtr.push((2>>8) as u8); wtr.extend_from_slice(&a.to_le_bytes()); },
             Operation::Yieldstar(a) => { wtr.push(3 as u8); wtr.push((3>>8) as u8); wtr.extend_from_slice(&a.to_le_bytes()); },
             Operation::Global => { wtr.push(4 as u8); wtr.push((4>>8) as u8); },
-            Operation::Fn(vec) => { wtr.push(5 as u8); wtr.push((5>>8) as u8); for &x in vec { wtr.extend_from_slice(&x.to_le_bytes()); } },
+            Operation::Fn(arr) => { wtr.push(5 as u8); wtr.push((5>>8) as u8); for &x in arr.iter() { wtr.extend_from_slice(&x.to_le_bytes()); } },
             Operation::Lit32(a) => { wtr.push(6 as u8); wtr.push((6>>8) as u8); wtr.extend_from_slice(&a.to_le_bytes()); },
+            #[cfg(feature = "alloc")]
             Operation::Arr(items,dest) => { wtr.push(7 as u8); wtr.push((7>>8) as u8); wtr.extend_from_slice(&(items.len() as u32).to_le_bytes()); for &x in items { wtr.extend_from_slice(&x.to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },
+            #[cfg(not(feature = "alloc"))]
+            Operation::Arr => { /* alloc disabled: cannot emit */ },
+            #[cfg(feature = "alloc")]
             Operation::Str(items,dest) => { wtr.push(8 as u8); wtr.push((8>>8) as u8); wtr.extend_from_slice(&(items.len() as u32).to_le_bytes()); for &x in items { wtr.extend_from_slice(&x.to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },
+            #[cfg(not(feature = "alloc"))]
+            Operation::Str => { /* alloc disabled: cannot emit */ },
+            #[cfg(feature = "alloc")]
             Operation::Litobj{c,pairs,key} => { wtr.push(9 as u8); wtr.push((9>>8) as u8); wtr.extend_from_slice(&c.to_le_bytes()); for (k,v) in pairs { wtr.extend_from_slice(&k.to_le_bytes()); wtr.extend_from_slice(&v.to_le_bytes()); } wtr.extend_from_slice(&key.to_le_bytes()); },
+            #[cfg(not(feature = "alloc"))]
+            Operation::Litobj => { /* alloc disabled: cannot emit */ },
             Operation::NewTarget => { wtr.push(10 as u8); wtr.push((10>>8) as u8); },
     }
     wtr.into_iter()
