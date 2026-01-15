@@ -81,21 +81,94 @@ ${vmcode}`
 );
 writeFileSync(
   `${__dirname}/../crates/jade-vm/src/data.rs`,
-  `
+  (() => {
+    const entries = Object.entries(opcodes) as [string, any][];
+    const pascal = (s: string) =>
+      s.split("_").map((p) => p[0] + p.slice(1).toLowerCase()).join("");
+
+    const enumVariants = entries
+      .map(([name, info]) => {
+        const v = pascal(name);
+        const args = info.args;
+        if (args === 0) return `    ${v},`;
+        if (args === 1) return `    ${v}(u32),`;
+        if (typeof args === "number") return `    ${v}(Vec<u32>),`;
+        if (args === "array") return `    ${v}(Vec<u32>, u32),`;
+        if (args === "object")
+          return `    ${v}{ c: i32, pairs: Vec<(u32,u32)>, key: u32 },`;
+        return `    ${v},`;
+      })
+      .join("\n");
+
+    const parseArms = entries
+      .map(([name, info]) => {
+        const id = info.id;
+        const v = pascal(name);
+        const args = info.args;
+        if (args === 0)
+          return `            ${id} => Some(Opcode::${v}),`;
+        if (args === 1)
+          return `            ${id} => { let a = rdr.read_u32::<LittleEndian>().ok()?; Some(Opcode::${v}(a)) },`;
+        if (typeof args === "number")
+          return `            ${id} => { let mut vec = Vec::new(); for _ in 0..${args} { vec.push(rdr.read_u32::<LittleEndian>().ok()?); } Some(Opcode::${v}(vec)) },`;
+        if (args === "array")
+          return `            ${id} => { let len = rdr.read_u32::<LittleEndian>().ok()? as usize; let mut items = Vec::with_capacity(len); for _ in 0..len { items.push(rdr.read_u32::<LittleEndian>().ok()?); } let dest = rdr.read_u32::<LittleEndian>().ok()?; Some(Opcode::${v}(items, dest)) },`;
+        if (args === "object")
+          return `            ${id} => { let c = rdr.read_i32::<LittleEndian>().ok()?; let mut pairs = Vec::new(); let mut cnt = if c>=0 { c as usize } else { (-c) as usize }; while cnt>0 { let k = rdr.read_u32::<LittleEndian>().ok()?; let v = rdr.read_u32::<LittleEndian>().ok()?; pairs.push((k,v)); cnt-=1; } let key = rdr.read_u32::<LittleEndian>().ok()?; Some(Opcode::${v}{ c, pairs, key }) },`;
+        return `            ${id} => Some(Opcode::${v}),`;
+      })
+      .join("\n");
+
+    const emitArms = entries
+      .map(([name, info]) => {
+        const id = info.id;
+        const v = pascal(name);
+        const args = info.args;
+        if (args === 0)
+          return `            Opcode::${v} => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); },`;
+        if (args === 1)
+          return `            Opcode::${v}(a) => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); wtr.write_u32::<LittleEndian>(*a).unwrap(); },`;
+        if (typeof args === "number")
+          return `            Opcode::${v}(vec) => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); for &x in vec { wtr.write_u32::<LittleEndian>(x).unwrap(); } },`;
+        if (args === "array")
+          return `            Opcode::${v}(items,dest) => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); wtr.write_u32::<LittleEndian>(items.len() as u32).unwrap(); for &x in items { wtr.write_u32::<LittleEndian>(x).unwrap(); } wtr.write_u32::<LittleEndian>(*dest).unwrap(); },`;
+        if (args === "object")
+          return `            Opcode::${v}{c,pairs,key} => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); wtr.write_i32::<LittleEndian>(*c).unwrap(); for (k,v) in pairs { wtr.write_u32::<LittleEndian>(*k).unwrap(); wtr.write_u32::<LittleEndian>(*v).unwrap(); } wtr.write_u32::<LittleEndian>(*key).unwrap(); },`;
+        return `            Opcode::${v} => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); },`;
+      })
+      .join("\n");
+
+    return `
 /* This is GENERATED code by \`update.mjs\` */
-#[derive(
-    Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, IntoPrimitive, TryFromPrimitive,
-)]
-#[repr(u16)]
-#[non_exhaustive]
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::io::Cursor;
+
+#[derive(Debug, Clone)]
 pub enum Opcode {
-    ${[...Object.entries(opcodes)]
-      .map(([a, b]) => `${a}=${b.id}`)
-      .join(",\n    ")}
+${enumVariants}
 }
-impl Opcode{
-  pub const LEN: u16 = ${Object.entries(opcodes).length};
+
+impl Opcode {
+  pub const LEN: u16 = ${entries.length};
+
+  pub fn parse(buf: &[u8]) -> Option<Opcode> {
+    let mut rdr = Cursor::new(buf);
+    let op = rdr.read_u16::<LittleEndian>().ok()?;
+    match op as u16 {
+${parseArms}
+      _ => None
+    }
+  }
+
+  pub fn emit(&self) -> Vec<u8> {
+    let mut wtr = Vec::new();
+    match self {
+${emitArms}
+    }
+    wtr
+  }
 }
-`
+`;
+  })()
 );
 
