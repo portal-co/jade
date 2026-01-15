@@ -106,16 +106,16 @@ writeFileSync(
         const v = pascal(name);
         const args = info.args;
         if (args === 0)
-          return `            ${id} => Some(Opcode::${v}),`;
+          return `            ${id} => Some((Operation::${v}, &buf[off..])),`;
         if (args === 1)
-          return `            ${id} => { let a = rdr.read_u32::<LittleEndian>().ok()?; Some(Opcode::${v}(a)) },`;
+          return `            ${id} => { let (a,no) = read_u32_le(buf, off)?; off = no; Some((Operation::${v}(a), &buf[off..])) },`;
         if (typeof args === "number")
-          return `            ${id} => { let mut vec = Vec::new(); for _ in 0..${args} { vec.push(rdr.read_u32::<LittleEndian>().ok()?); } Some(Opcode::${v}(vec)) },`;
+          return `            ${id} => { let mut vec = Vec::new(); for _ in 0..${args} { let (x,no) = read_u32_le(buf, off)?; off = no; vec.push(x); } Some((Operation::${v}(vec), &buf[off..])) },`;
         if (args === "array")
-          return `            ${id} => { let len = rdr.read_u32::<LittleEndian>().ok()? as usize; let mut items = Vec::with_capacity(len); for _ in 0..len { items.push(rdr.read_u32::<LittleEndian>().ok()?); } let dest = rdr.read_u32::<LittleEndian>().ok()?; Some(Opcode::${v}(items, dest)) },`;
+          return `            ${id} => { let (len,no) = read_u32_le(buf, off)?; off = no; let mut items = Vec::with_capacity(len as usize); for _ in 0..(len as usize) { let (x,no2) = read_u32_le(buf, off)?; off = no2; items.push(x); } let (dest,no3) = read_u32_le(buf, off)?; off = no3; Some((Operation::${v}(items, dest), &buf[off..])) },`;
         if (args === "object")
-          return `            ${id} => { let c = rdr.read_i32::<LittleEndian>().ok()?; let mut pairs = Vec::new(); let mut cnt = if c>=0 { c as usize } else { (-c) as usize }; while cnt>0 { let k = rdr.read_u32::<LittleEndian>().ok()?; let v = rdr.read_u32::<LittleEndian>().ok()?; pairs.push((k,v)); cnt-=1; } let key = rdr.read_u32::<LittleEndian>().ok()?; Some(Opcode::${v}{ c, pairs, key }) },`;
-        return `            ${id} => Some(Opcode::${v}),`;
+          return `            ${id} => { let (c,no) = read_i32_le(buf, off)?; off = no; let mut pairs = Vec::new(); let mut cnt = if c>=0 { c as usize } else { (-c) as usize }; while cnt>0 { let (k,no2) = read_u32_le(buf, off)?; off = no2; let (v,no3) = read_u32_le(buf, off)?; off = no3; pairs.push((k,v)); cnt-=1; } let (key,no4) = read_u32_le(buf, off)?; off = no4; Some((Operation::${v}{ c, pairs, key }, &buf[off..])) },`;
+        return `            ${id} => Some((Operation::${v}, &buf[off..])),`;
       })
       .join("\n");
 
@@ -125,47 +125,81 @@ writeFileSync(
         const v = pascal(name);
         const args = info.args;
         if (args === 0)
-          return `            Opcode::${v} => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); },`;
+          return `            Operation::${v} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); },`;
         if (args === 1)
-          return `            Opcode::${v}(a) => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); wtr.write_u32::<LittleEndian>(*a).unwrap(); },`;
+          return `            Operation::${v}(a) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&a.to_le_bytes()); },`;
         if (typeof args === "number")
-          return `            Opcode::${v}(vec) => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); for &x in vec { wtr.write_u32::<LittleEndian>(x).unwrap(); } },`;
+          return `            Operation::${v}(vec) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); for &x in vec { wtr.extend_from_slice(&x.to_le_bytes()); } },`;
         if (args === "array")
-          return `            Opcode::${v}(items,dest) => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); wtr.write_u32::<LittleEndian>(items.len() as u32).unwrap(); for &x in items { wtr.write_u32::<LittleEndian>(x).unwrap(); } wtr.write_u32::<LittleEndian>(*dest).unwrap(); },`;
+          return `            Operation::${v}(items,dest) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&(items.len() as u32).to_le_bytes()); for &x in items { wtr.extend_from_slice(&x.to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },`;
         if (args === "object")
-          return `            Opcode::${v}{c,pairs,key} => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); wtr.write_i32::<LittleEndian>(*c).unwrap(); for (k,v) in pairs { wtr.write_u32::<LittleEndian>(*k).unwrap(); wtr.write_u32::<LittleEndian>(*v).unwrap(); } wtr.write_u32::<LittleEndian>(*key).unwrap(); },`;
-        return `            Opcode::${v} => { wtr.write_u16::<LittleEndian>(${id}).unwrap(); },`;
+          return `            Operation::${v}{c,pairs,key} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&c.to_le_bytes()); for (k,v) in pairs { wtr.extend_from_slice(&k.to_le_bytes()); wtr.extend_from_slice(&v.to_le_bytes()); } wtr.extend_from_slice(&key.to_le_bytes()); },`;
+        return `            Operation::${v} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); },`;
       })
       .join("\n");
 
     return `
 /* This is GENERATED code by \`update.mjs\` */
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use std::io::Cursor;
+use core::convert::TryFrom;
+#[cfg(feature = "alloc")]
+extern crate alloc;
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 
-#[derive(Debug, Clone)]
+use num_enum::{IntoPrimitive, TryFromPrimitive};
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, IntoPrimitive, TryFromPrimitive)]
+#[repr(u16)]
+#[non_exhaustive]
 pub enum Opcode {
+${entries.map(([n,i])=>`${n}=${i.id}`).join(",\n    ")}
+}
+impl Opcode{
+  pub const LEN: u16 = ${entries.length};
+}
+
+// Richer operation type with operands
+#[derive(Debug, Clone)]
+pub enum Operation {
 ${enumVariants}
 }
 
-impl Opcode {
+fn read_u16_le(buf: &[u8], off: usize) -> Option<(u16, usize)> {
+    if off + 2 > buf.len() { return None; }
+    let v = u16::from_le_bytes([buf[off], buf[off+1]]);
+    Some((v, off+2))
+}
+fn read_u32_le(buf: &[u8], off: usize) -> Option<(u32, usize)> {
+    if off + 4 > buf.len() { return None; }
+    let v = u32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
+    Some((v, off+4))
+}
+fn read_i32_le(buf: &[u8], off: usize) -> Option<(i32, usize)> {
+    if off + 4 > buf.len() { return None; }
+    let v = i32::from_le_bytes([buf[off], buf[off+1], buf[off+2], buf[off+3]]);
+    Some((v, off+4))
+}
+
+impl Operation {
   pub const LEN: u16 = ${entries.length};
 
-  pub fn parse(buf: &[u8]) -> Option<Opcode> {
-    let mut rdr = Cursor::new(buf);
-    let op = rdr.read_u16::<LittleEndian>().ok()?;
+  // Parse an Operation from the start of ${'`'}buf${'`'}, returning the operation and the remaining slice.
+  pub fn parse(buf: &[u8]) -> Option<(Operation, &[u8])> {
+    let (op, mut off) = read_u16_le(buf, 0)?;
     match op as u16 {
 ${parseArms}
       _ => None
     }
   }
 
-  pub fn emit(&self) -> Vec<u8> {
-    let mut wtr = Vec::new();
+  // Emit returns an iterator over emitted bytes; requires ${'`'}alloc${'`'} feature to allocate.
+  #[cfg(feature = "alloc")]
+  pub fn emit(&self) -> alloc::vec::IntoIter<u8> {
+    let mut wtr: Vec<u8> = Vec::new();
     match self {
 ${emitArms}
     }
-    wtr
+    wtr.into_iter()
   }
 }
 `;
