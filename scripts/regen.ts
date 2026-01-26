@@ -12,18 +12,18 @@ type VMOpt = { async?: boolean; gen?: boolean };
 
 const vmcode = [{ async: true, gen: true }, { async: true }, { gen: true }, {}]
   .map((o: VMOpt) => {
-    const ak = "async" in o;
-    const gk = "gen" in o;
-    const n = ({ ak: ak_ = ak, gk: gk_ = gk }: { ak?: boolean; gk?: boolean }) =>
+    const isAsync = "async" in o;
+    const isGenerator = "gen" in o;
+    const functionName = ({ isAsync: ak_ = isAsync, isGenerator: gk_ = isGenerator }: { isAsync?: boolean; isGenerator?: boolean }) =>
       `runVirtualized${ak_ ? "A" : ""}${gk_ ? "G" : ""}`;
-    const si = `[code,state,{ip:ip-2,globalThis,nt,tenant},...args]`;
+    const parameters = `[code,state,{ip:ip-2,globalThis,nt,tenant},...args]`;
     return `
-export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
-      ak ? "A" : ""
+export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualized${
+      isAsync ? "A" : ""
     }${
-      gk ? "G" : ""
+      isGenerator ? "G" : ""
     }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant},...args: any[]): ${
-      ak ? (gk ? `AsyncGenerator<any,any,any>` : `Promise<any>`) : `any`
+      isAsync ? (isGenerator ? `AsyncGenerator<any,any,any>` : `Promise<any>`) : `any`
     }{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
@@ -32,31 +32,31 @@ export ${ak ? "async" : ""} function${gk ? "*" : ""} runVirtualized${
             ip += 4;
             return val & 1 ? state[val >>> 1] : val >>> 1;
         }
-        const val: any = (op === 0 || ${ak ? "op === 1" : "false"} || ${
-      gk ? "op === 2 || op === 3 " : "false"
+        const val: any = (op === 0 || ${isAsync ? "op === 1" : "false"} || ${
+      isGenerator ? "op === 2 || op === 3 " : "false"
     }) ? arg() : undefined;
         switch(op){
             
             case ${opcodes.AWAIT.id}: ${
-      ak
+      isAsync
         ? `state[code().getUint32(ip,true)]=await val;ip += 4;break;`
-        : `return apply(${n({
-            ak: true,
-          })},this,${si});`
+        : `return apply(${functionName({
+            isAsync: true,
+          })},this,${parameters});`
     }
             case ${opcodes.YIELD.id}: ${
-      gk
+      isGenerator
         ? `state[code().getUint32(ip,true)]=yield val;ip += 4;break;`
-        : `return apply(${n({
-            gk: true,
-          })},this,${si});`
+        : `return apply(${functionName({
+            isGenerator: true,
+          })},this,${parameters});`
     }
             case ${opcodes.YIELDSTAR.id}: ${
-      gk
+      isGenerator
         ? `state[code().getUint32(ip,true)]=yield* val;ip += 4;break;`
-        : `return apply(${n({
-            gk: true,
-          })},this,${si});`
+        : `return apply(${functionName({
+            isGenerator: true,
+          })},this,${parameters});`
     }
     ${Reflect.ownKeys(opcodes)
       .filter((op) => op !== "AWAIT" && op !== "YIELD" && op !== "YIELDSTAR")
