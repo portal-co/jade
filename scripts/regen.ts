@@ -86,24 +86,26 @@ writeFileSync(
     const pascal = (s: string) =>
       s.split("_").map((p) => p[0] + p.slice(1).toLowerCase()).join("");
 
+    // Enhanced enum variants with proper operand types
     const enumVariants = entries
       .map(([name, info]) => {
         const v = pascal(name);
         const args = info.args;
         if (args === 0) return `    ${v},`;
-        if (args === 1) return `    ${v}(u32),`;
+        if (args === 1) return `    ${v}(crate::Operand),`;
         if (typeof args === "number")
-          return `    ${v}([u32; ${args}]),`;
+          return `    ${v}([crate::Operand; ${args}]),`;
         if (args === "array")
           return `    #[cfg(feature = "alloc")]
-    ${v}(Vec<u32>, u32),`;
+    ${v}(Vec<crate::Operand>, crate::Operand),`;
         if (args === "object")
           return `    #[cfg(feature = "alloc")]
-    ${v}{ c: i32, pairs: Vec<(u32,u32)>, key: u32 },`;
+    ${v}{ c: crate::SignedOperand, pairs: Vec<(crate::Operand, crate::Operand)>, key: crate::Operand },`;
         return `    ${v},`;
       })
       .join("\n");
 
+    // Enhanced parsing with automatic operand decoding
     const parseArms = entries
       .map(([name, info]) => {
         const id = info.id;
@@ -112,23 +114,24 @@ writeFileSync(
         if (args === 0)
           return `            ${id} => Some((Operation::${v}, &buf[off..])),`;
         if (args === 1)
-          return `            ${id} => { let (a,no) = read_u32_le(buf, off)?; off = no; Some((Operation::${v}(a), &buf[off..])) },`;
+          return `            ${id} => { let (a,no) = read_u32_le(buf, off)?; off = no; Some((Operation::${v}(crate::Operand::decode(a)), &buf[off..])) },`;
         if (typeof args === "number")
-          return `            ${id} => { let mut arr = [0u32; ${args}]; for i in 0..${args} { let (x,no) = read_u32_le(buf, off)?; off = no; arr[i]=x; } Some((Operation::${v}(arr), &buf[off..])) },`;
+          return `            ${id} => { let mut arr = [crate::Operand::decode(0); ${args}]; for i in 0..${args} { let (x,no) = read_u32_le(buf, off)?; off = no; arr[i] = crate::Operand::decode(x); } Some((Operation::${v}(arr), &buf[off..])) },`;
         if (args === "array")
           return `            #[cfg(feature = "alloc")]
-            ${id} => { let (len,no) = read_u32_le(buf, off)?; off = no; let mut items = Vec::with_capacity(len as usize); for _ in 0..(len as usize) { let (x,no2) = read_u32_le(buf, off)?; off = no2; items.push(x); } let (dest,no3) = read_u32_le(buf, off)?; off = no3; Some((Operation::${v}(items, dest), &buf[off..])) },
+            ${id} => { let (len,no) = read_u32_le(buf, off)?; off = no; let mut items = Vec::with_capacity(len as usize); for _ in 0..(len as usize) { let (x,no2) = read_u32_le(buf, off)?; off = no2; items.push(crate::Operand::decode(x)); } let (dest,no3) = read_u32_le(buf, off)?; off = no3; Some((Operation::${v}(items, crate::Operand::decode(dest)), &buf[off..])) },
             #[cfg(not(feature = "alloc"))]
             ${id} => { return None },`;
         if (args === "object")
           return `            #[cfg(feature = "alloc")]
-            ${id} => { let (c,no) = read_i32_le(buf, off)?; off = no; let mut pairs = Vec::new(); let mut cnt = if c>=0 { c as usize } else { (-c) as usize }; while cnt>0 { let (k,no2) = read_u32_le(buf, off)?; off = no2; let (v,no3) = read_u32_le(buf, off)?; off = no3; pairs.push((k,v)); cnt-=1; } let (key,no4) = read_u32_le(buf, off)?; off = no4; Some((Operation::${v}{ c, pairs, key }, &buf[off..])) },
+            ${id} => { let (c,no) = read_i32_le(buf, off)?; off = no; let mut pairs = Vec::new(); let mut cnt = if c>=0 { c as usize } else { (-c) as usize }; while cnt>0 { let (k,no2) = read_u32_le(buf, off)?; off = no2; let (v,no3) = read_u32_le(buf, off)?; off = no3; pairs.push((crate::Operand::decode(k), crate::Operand::decode(v))); cnt-=1; } let (key,no4) = read_u32_le(buf, off)?; off = no4; Some((Operation::${v}{ c: crate::SignedOperand::decode(c as u32), pairs, key: crate::Operand::decode(key) }, &buf[off..])) },
             #[cfg(not(feature = "alloc"))]
             ${id} => { return None },`;
         return `            ${id} => Some((Operation::${v}, &buf[off..])),`;
       })
       .join("\n");
 
+    // Enhanced emit arms with automatic operand encoding
     const emitArms = entries
       .map(([name, info]) => {
         const id = info.id;
@@ -137,17 +140,17 @@ writeFileSync(
         if (args === 0)
           return `            Operation::${v} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); },`;
         if (args === 1)
-          return `            Operation::${v}(a) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&a.to_le_bytes()); },`;
+          return `            Operation::${v}(a) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&a.encode().to_le_bytes()); },`;
         if (typeof args === "number")
-          return `            Operation::${v}(arr) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); for &x in arr.iter() { wtr.extend_from_slice(&x.to_le_bytes()); } },`;
+          return `            Operation::${v}(arr) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); for x in arr.iter() { wtr.extend_from_slice(&x.encode().to_le_bytes()); } },`;
         if (args === "array")
           return `            #[cfg(feature = "alloc")]
-            Operation::${v}(items,dest) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&(items.len() as u32).to_le_bytes()); for &x in items { wtr.extend_from_slice(&x.to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },
+            Operation::${v}(items, dest) => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&(items.len() as u32).to_le_bytes()); for x in items { wtr.extend_from_slice(&x.encode().to_le_bytes()); } wtr.extend_from_slice(&dest.encode().to_le_bytes()); },
             #[cfg(not(feature = "alloc"))]
             Operation::${v} => { /* alloc disabled: cannot emit */ },`;
         if (args === "object")
           return `            #[cfg(feature = "alloc")]
-            Operation::${v}{c,pairs,key} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&c.to_le_bytes()); for (k,v) in pairs { wtr.extend_from_slice(&k.to_le_bytes()); wtr.extend_from_slice(&v.to_le_bytes()); } wtr.extend_from_slice(&key.to_le_bytes()); },
+            Operation::${v}{c, pairs, key} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&c.encode().to_le_bytes()); for (k, v) in pairs { wtr.extend_from_slice(&k.encode().to_le_bytes()); wtr.extend_from_slice(&v.encode().to_le_bytes()); } wtr.extend_from_slice(&key.encode().to_le_bytes()); },
             #[cfg(not(feature = "alloc"))]
             Operation::${v} => { /* alloc disabled: cannot emit */ },`;
         return `            Operation::${v} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); },`;
@@ -156,25 +159,35 @@ writeFileSync(
 
     return `
 /* This is GENERATED code by \`update.mjs\` */
-use core::convert::TryFrom;
-#[cfg(feature = "alloc")]
-extern crate alloc;
+
+// Note: alloc crate already imported in lib.rs, so we don't re-import it here
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
+/// VM opcodes enum representing all possible operations
+/// Each opcode has a unique numeric identifier matching the JavaScript implementation
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, IntoPrimitive, TryFromPrimitive)]
 #[repr(u16)]
 #[non_exhaustive]
 pub enum Opcode {
-${entries.map(([n,i])=>`${n}=${i.id}`).join(",\n    ")}
+${entries.map(([n,i])=>`    /// ${n} operation (id: ${i.id})
+    ${pascal(n)}=${i.id}`).join(",\n")}
 }
 impl Opcode{
   pub const LEN: u16 = ${entries.length};
 }
 
-// Richer operation type with operands
+/// Rich operation type with operands automatically decoded from bytecode
+/// 
+/// This enum uses the two-variant operand approach where operands are automatically
+/// decoded from raw u32 values into structured types:
+/// - \`Operand\`: Handles LSB encoding for literal vs state reference distinction
+/// - \`SignedOperand\`: Handles signed/unsigned encoding for numeric values
+/// 
+/// The parsing automatically handles the bitwise operations that were previously
+/// done manually in JavaScript, providing a type-safe interface in Rust.
 #[derive(Debug, Clone)]
 pub enum Operation {
 ${enumVariants}
