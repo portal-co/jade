@@ -2,9 +2,10 @@
 /* This is GENERATED code by `update.mjs` */
 import {type Tenant} from "./index.ts"
 const {apply} = Reflect;
-const {create,defineProperties} = Object;
+const {create,defineProperties,freeze} = Object;
 const {fromCodePoint} = String;
 type _globalThis = typeof globalThis;
+const unshift = Array.prototype.unshift.call.bind(Array.prototype.unshift);
 
 export async function* runVirtualizedAG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant},...args: any[]): AsyncGenerator<any,any,any>{
     for(;;){
@@ -38,12 +39,13 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                     return apply(val,this,[
                         code,
                         (defineProperties(s,o),s),
-                        {
+                        freeze({
+                            __proto__: null,
                             ip:j,
                             globalThis,
                             nt: new.target,
                             tenant
-                        },
+                        }),
                         ...args
                     ]);
                 },...spans);
@@ -64,7 +66,8 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 ip+=4;
                 break;
             }case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {__proto__: null} : {
+                    __proto__: null,
                     ...(c=-c,arg())
                 }));
                 while(c--){
@@ -95,8 +98,8 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
         switch(op){
             
             case 1: state[code().getUint32(ip,true)]=await val;ip += 4;break;
-            case 2: return apply(runVirtualizedAG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
-            case 3: return apply(runVirtualizedAG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
+            case 2: return apply(runVirtualizedAG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant})),unshift(args,state),unshift(args,code),args));
+            case 3: return apply(runVirtualizedAG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant})),unshift(args,state),unshift(args,code),args));
     case 0: return val;case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;case 5:  {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
@@ -115,12 +118,13 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                     return apply(val,this,[
                         code,
                         (defineProperties(s,o),s),
-                        {
+                        freeze({
+                            __proto__: null,
                             ip:j,
                             globalThis,
                             nt: new.target,
                             tenant
-                        },
+                        }),
                         ...args
                     ]);
                 },...spans);
@@ -141,7 +145,8 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 ip+=4;
                 break;
             }case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {__proto__: null} : {
+                    __proto__: null,
                     ...(c=-c,arg())
                 }));
                 while(c--){
@@ -171,7 +176,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
         const val: any = (op === 0 || false || op === 2 || op === 3 ) ? arg() : undefined;
         switch(op){
             
-            case 1: return apply(runVirtualizedAG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
+            case 1: return apply(runVirtualizedAG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant})),unshift(args,state),unshift(args,code),args));
             case 2: state[code().getUint32(ip,true)]=yield val;ip += 4;break;
             case 3: state[code().getUint32(ip,true)]=yield* val;ip += 4;break;
     case 0: return val;case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;case 5:  {
@@ -192,12 +197,13 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                     return apply(val,this,[
                         code,
                         (defineProperties(s,o),s),
-                        {
+                        freeze({
+                            __proto__: null,
                             ip:j,
                             globalThis,
                             nt: new.target,
                             tenant
-                        },
+                        }),
                         ...args
                     ]);
                 },...spans);
@@ -218,7 +224,8 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 ip+=4;
                 break;
             }case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {__proto__: null} : {
+                    __proto__: null,
                     ...(c=-c,arg())
                 }));
                 while(c--){
@@ -248,9 +255,9 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
         const val: any = (op === 0 || false || false) ? arg() : undefined;
         switch(op){
             
-            case 1: return apply(runVirtualizedA,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
-            case 2: return apply(runVirtualizedG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
-            case 3: return apply(runVirtualizedG,this,[code,state,{ip:ip-2,globalThis,nt,tenant},...args]);
+            case 1: return apply(runVirtualizedA,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant})),unshift(args,state),unshift(args,code),args));
+            case 2: return apply(runVirtualizedG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant})),unshift(args,state),unshift(args,code),args));
+            case 3: return apply(runVirtualizedG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant})),unshift(args,state),unshift(args,code),args));
     case 0: return val;case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;case 5:  {
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
                     ,closureArgs:number[]=[...arg()]
@@ -269,12 +276,13 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                     return apply(val,this,[
                         code,
                         (defineProperties(s,o),s),
-                        {
+                        freeze({
+                            __proto__: null,
                             ip:j,
                             globalThis,
                             nt: new.target,
                             tenant
-                        },
+                        }),
                         ...args
                     ]);
                 },...spans);
@@ -295,7 +303,8 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 ip+=4;
                 break;
             }case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {__proto__: null} : {
+                    __proto__: null,
                     ...(c=-c,arg())
                 }));
                 while(c--){

@@ -49,12 +49,13 @@ export const handlers: { [Op in Opcode]?: Handler} = {
                     return apply(val,this,[
                         code,
                         (defineProperties(s,o),s),
-                        {
+                        freeze({
+                            __proto__: null,
                             ip:j,
                             globalThis,
                             nt: new.target,
                             tenant
-                        },
+                        }),
                         ...args
                     ]);
                 },...spans);
@@ -79,7 +80,8 @@ export const handlers: { [Op in Opcode]?: Handler} = {
                 break;
             }`,
   LITOBJ: `{
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {} : {
+                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {__proto__: null} : {
+                    __proto__: null,
                     ...(c=-c,arg())
                 }));
                 while(c--){

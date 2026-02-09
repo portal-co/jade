@@ -16,7 +16,7 @@ const vmcode = [{ async: true, gen: true }, { async: true }, { gen: true }, {}]
     const isGenerator = "gen" in o;
     const functionName = ({ isAsync: ak_ = isAsync, isGenerator: gk_ = isGenerator }: { isAsync?: boolean; isGenerator?: boolean }) =>
       `runVirtualized${ak_ ? "A" : ""}${gk_ ? "G" : ""}`;
-    const parameters = `[code,state,{ip:ip-2,globalThis,nt,tenant},...args]`;
+    const parameters = `(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant})),unshift(args,state),unshift(args,code),args)`;
     return `
 export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualized${
       isAsync ? "A" : ""
@@ -74,9 +74,10 @@ writeFileSync(
 /* This is GENERATED code by \`update.mjs\` */
 import {type Tenant} from "./index.ts"
 const {apply} = Reflect;
-const {create,defineProperties} = Object;
+const {create,defineProperties,freeze} = Object;
 const {fromCodePoint} = String;
 type _globalThis = typeof globalThis;
+const unshift = Array.prototype.unshift.call.bind(Array.prototype.unshift);
 ${vmcode}`
 );
 writeFileSync(
