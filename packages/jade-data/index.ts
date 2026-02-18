@@ -1,16 +1,17 @@
-export const opcodes: { [Op in Opcode]: OpcodeInfo } = {
-  RET: { id: 0, args: 1 },
-  AWAIT: { id: 1, args: 1 },
-  YIELD: { id: 2, args: 1 },
-  YIELDSTAR: { id: 3, args: 1 },
-  GLOBAL: { id: 4, args: 0 },
-  FN: { id: 5, args: 4 },
-  LIT32: { id: 6, args: 1 },
-  ARR: { id: 7, args: "array" },
-  STR: { id: 8, args: "array" },
-  LITOBJ: { id: 9, args: "object" },
-  NEW_TARGET: { id: 10, args: 0 },
-};
+const {freeze} = Object;
+export const opcodes: { [Op in Opcode]: OpcodeInfo } = freeze({
+  RET: freeze({ id: 0, args: 1 }),
+  AWAIT: freeze({ id: 1, args: 1 }),
+  YIELD: freeze({ id: 2, args: 1 }),
+  YIELDSTAR: freeze({ id: 3, args: 1 }),
+  GLOBAL: freeze({ id: 4, args: 0 }),
+  FN: freeze({ id: 5, args: 4 })    ,
+  LIT32: freeze({ id: 6, args: 1 }),
+  ARR: freeze({ id: 7, args: "array" }),
+  STR: freeze({ id: 8, args: "array" }),
+  LITOBJ: freeze({ id: 9, args: "object" }),
+  NEW_TARGET: freeze({ id: 10, args: 0 }),
+});
 export type Opcode =
   | "RET"
   | "AWAIT"
@@ -28,7 +29,7 @@ export type OpcodeInfo = {
   args: number | "array" | "object";
 };
 export type Handler = string;
-export const handlers: { [Op in Opcode]?: Handler} = {
+export const handlers: { [Op in Opcode]?: Handler} = freeze({
   RET: `return val;`,
   GLOBAL: `state[code().getUint32(ip,true)]=globalThis;ip += 4;break;`,
   FN: ` {
@@ -97,4 +98,4 @@ export const handlers: { [Op in Opcode]?: Handler} = {
                 break;
             }`,
   NEW_TARGET: `state[code().getUint32(ip,true)]=nt;ip += 4;break;`,
-};
+});
