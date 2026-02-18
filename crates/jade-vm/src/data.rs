@@ -86,7 +86,7 @@ fn read_i32_le(buf: &[u8], off: usize) -> Option<(i32, usize)> {
 impl Operation {
   pub const LEN: u16 = 11;
 
-  // Parse an Operation from the start of `buf`, returning the operation and the remaining slice.
+  /// Parse an Operation from the start of `buf`, returning the operation and the remaining slice.
   pub fn parse(buf: &[u8]) -> Option<(Operation, &[u8])> {
     let (op, mut off) = read_u16_le(buf, 0)?;
     match op as u16 {
@@ -113,10 +113,37 @@ impl Operation {
       _ => None
     }
   }
-
-  // Emit returns an iterator over emitted bytes; requires `alloc` feature to allocate.
-  #[cfg(feature = "alloc")]
-  pub fn emit(&self) -> alloc::vec::IntoIter<u8> {
+/// Emit returns an iterator over emitted bytes
+  #[cfg(feature = "gen-blocks")]
+  pub fn emit(&self) -> impl Iterator<Item=u8>{
+    return gen move{
+    match self {
+                Operation::Ret(a) => { yield(0 as u8); yield((0>>8) as u8); for b in a.encode().to_le_bytes() { yield b; } },
+            Operation::Await(a) => { yield(1 as u8); yield((1>>8) as u8); for b in a.encode().to_le_bytes() { yield b; } },
+            Operation::Yield(a) => { yield(2 as u8); yield((2>>8) as u8); for b in a.encode().to_le_bytes() { yield b; } },
+            Operation::Yieldstar(a) => { yield(3 as u8); yield((3>>8) as u8); for b in a.encode().to_le_bytes() { yield b; } },
+            Operation::Global => {  yield (4 as u8); yield((4>>8) as u8); },
+            Operation::Fn(arr) => { yield(5 as u8); yield((5>>8) as u8); for x in arr.iter() { for b in x.encode().to_le_bytes() { yield b; } } },
+            Operation::Lit32(a) => { yield(6 as u8); yield((6>>8) as u8); for b in a.encode().to_le_bytes() { yield b; } },
+            #[cfg(feature = "alloc")]
+            Operation::Arr(items, dest) => { yield(7 as u8); yield((7>>8) as u8); for b in (items.len() as u32).to_le_bytes() { yield b; } for x in items { for b in x.encode().to_le_bytes() { yield b; } } for b in dest.encode().to_le_bytes() { yield b; } },
+            #[cfg(not(feature = "alloc"))]
+            Operation::Arr => { /* alloc disabled: cannot emit */ },
+            #[cfg(feature = "alloc")]
+            Operation::Str(items, dest) => { yield(8 as u8); yield((8>>8) as u8); for b in (items.len() as u32).to_le_bytes() { yield b; } for x in items { for b in x.encode().to_le_bytes() { yield b; } } for b in dest.encode().to_le_bytes() { yield b; } },
+            #[cfg(not(feature = "alloc"))]
+            Operation::Str => { /* alloc disabled: cannot emit */ },
+            #[cfg(feature = "alloc")]
+            Operation::Litobj{c, pairs, key} => { yield(9 as u8); yield((9>>8) as u8); for b in c.encode().to_le_bytes() { yield b; } for (k, v) in pairs { for b in k.encode().to_le_bytes() { yield b; } for b in v.encode().to_le_bytes() { yield b; } } for b in key.encode().to_le_bytes() { yield b; } },
+            #[cfg(not(feature = "alloc"))]
+            Operation::Litobj => { /* alloc disabled: cannot emit */ },
+            Operation::NewTarget => {  yield (10 as u8); yield((10>>8) as u8); },
+    }
+    }    
+  }
+  /// Emit returns an iterator over emitted bytes; requires `alloc` feature to allocate.
+  #[cfg(all(feature = "alloc", not(feature = "gen-blocks")))]
+  pub fn emit(&self) -> impl Iterator<Item=u8> {
     let mut wtr: Vec<u8> = Vec::new();
     match self {
             Operation::Ret(a) => { wtr.push(0 as u8); wtr.push((0>>8) as u8); wtr.extend_from_slice(&a.encode().to_le_bytes()); },

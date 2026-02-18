@@ -17,3 +17,4 @@ swc_ecma_visit={workspace = true,optional = true}
 std=["alloc"]
 alloc=[]
 swc=["std","dep:swc_common","dep:swc_ecma_ast","dep:swc_ecma_utils","dep:swc_ecma_visit"]
+gen-blocks=[]
