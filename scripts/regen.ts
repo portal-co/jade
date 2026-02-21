@@ -164,28 +164,28 @@ writeFileSync(
         const v = pascal(name);
         const args = info.args;
         if (args === 0)
-          return `            Operation::${v} => {  yield (${id} as u8); yield((${id}>>8) as u8); },`;
+          return `            Operation::${v} => {  yield_! (${id} as u8); yield_!((${id}>>8) as u8); },`;
         if (args === 1)
-          return `            Operation::${v}(a) => { yield(${id} as u8); yield((${id}>>8) as u8); for b in a.encode().to_le_bytes() { yield b; } },`;
+          return `            Operation::${v}(a) => { yield_!(${id} as u8); yield_!((${id}>>8) as u8); for b in a.encode().to_le_bytes() { yield_! b; } },`;
         if (typeof args === "number")
-          return `            Operation::${v}(arr) => { yield(${id} as u8); yield((${id}>>8) as u8); for x in arr.iter() { for b in x.encode().to_le_bytes() { yield b; } } },`;
+          return `            Operation::${v}(arr) => { yield_!(${id} as u8); yield_!((${id}>>8) as u8); for x in arr.iter() { for b in x.encode().to_le_bytes() { yield_! b; } } },`;
         if (args === "array")
           return `            #[cfg(feature = "alloc")]
-            Operation::${v}(items, dest) => { yield(${id} as u8); yield((${id}>>8) as u8); for b in (items.len() as u32).to_le_bytes() { yield b; } for x in items { for b in x.encode().to_le_bytes() { yield b; } } for b in dest.encode().to_le_bytes() { yield b; } },
+            Operation::${v}(items, dest) => { yield_!(${id} as u8); yield_!((${id}>>8) as u8); for b in (items.len() as u32).to_le_bytes() { yield_! b; } for x in items { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.encode().to_le_bytes() { yield_! b; } },
             #[cfg(not(feature = "alloc"))]
             Operation::${v} => { /* alloc disabled: cannot emit */ },`;
         if (args === "object")
           return `            #[cfg(feature = "alloc")]
-            Operation::${v}{c, pairs, key} => { yield(${id} as u8); yield((${id}>>8) as u8); for b in c.encode().to_le_bytes() { yield b; } for (k, v) in pairs { for b in k.encode().to_le_bytes() { yield b; } for b in v.encode().to_le_bytes() { yield b; } } for b in key.encode().to_le_bytes() { yield b; } },
+            Operation::${v}{c, pairs, key} => { yield_!(${id} as u8); yield_!((${id}>>8) as u8); for b in c.encode().to_le_bytes() { yield_! b; } for (k, v) in pairs { for b in k.encode().to_le_bytes() { yield_! b; } for b in v.encode().to_le_bytes() { yield_! b; } } for b in key.encode().to_le_bytes() { yield_! b; } },
             #[cfg(not(feature = "alloc"))]
             Operation::${v} => { /* alloc disabled: cannot emit */ },`;
-        return `            Operation::${v} => { yield(${id} as u8); yield((${id}>>8) as u8); },`;
+        return `            Operation::${v} => { yield_!(${id} as u8); yield_!((${id}>>8) as u8); },`;
       })
       .join("\n");
 
     return `
 /* This is GENERATED code by \`update.mjs\` */
-
+use super::*;
 // Note: alloc crate already imported in lib.rs, so we don't re-import it here
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -249,7 +249,7 @@ ${parseArms}
 /// Emit returns an iterator over emitted bytes
   #[cfg(feature = "gen-blocks")]
   pub fn emit(&self) -> impl Iterator<Item=u8>{
-    return gen move{
+    return crate::gen_block!{
     match self {
     ${genArms}
     }

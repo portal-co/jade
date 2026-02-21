@@ -1,10 +1,31 @@
 #![no_std]
+#![cfg_attr(feature = "gen-blocks", feature(gen_blocks))]
 #[cfg(feature = "alloc")]
 extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
-include!("./data.rs");
+#[cfg(feature = "gen-blocks")]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! gen_block {
+    ($($a:expr)*) => {
+        gen move{
+            $($a)*
+        }
+    };
+}
+
+#[cfg(feature = "gen-blocks")]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! yield_ {
+    ($a:expr) => {
+        yield $a
+    };
+}
+
+pub mod data;
 
 /// Represents an operand that can be either a literal value or a state variable reference
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

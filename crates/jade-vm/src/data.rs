@@ -1,6 +1,6 @@
 
 /* This is GENERATED code by `update.mjs` */
-
+use super::*;
 // Note: alloc crate already imported in lib.rs, so we don't re-import it here
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -116,28 +116,28 @@ impl Operation {
 /// Emit returns an iterator over emitted bytes
   #[cfg(feature = "gen-blocks")]
   pub fn emit(&self) -> impl Iterator<Item=u8>{
-    return gen move{
+    return crate::gen_block!{
     match self {
-                Operation::Ret(a) => { yield(0 as u8); yield((0>>8) as u8); for b in a.encode().to_le_bytes() { yield b; } },
-            Operation::Await(a) => { yield(1 as u8); yield((1>>8) as u8); for b in a.encode().to_le_bytes() { yield b; } },
-            Operation::Yield(a) => { yield(2 as u8); yield((2>>8) as u8); for b in a.encode().to_le_bytes() { yield b; } },
-            Operation::Yieldstar(a) => { yield(3 as u8); yield((3>>8) as u8); for b in a.encode().to_le_bytes() { yield b; } },
-            Operation::Global => {  yield (4 as u8); yield((4>>8) as u8); },
-            Operation::Fn(arr) => { yield(5 as u8); yield((5>>8) as u8); for x in arr.iter() { for b in x.encode().to_le_bytes() { yield b; } } },
-            Operation::Lit32(a) => { yield(6 as u8); yield((6>>8) as u8); for b in a.encode().to_le_bytes() { yield b; } },
+                Operation::Ret(a) => { yield_!(0 as u8); yield_!((0>>8) as u8); for b in a.encode().to_le_bytes() { yield_! b; } },
+            Operation::Await(a) => { yield_!(1 as u8); yield_!((1>>8) as u8); for b in a.encode().to_le_bytes() { yield_! b; } },
+            Operation::Yield(a) => { yield_!(2 as u8); yield_!((2>>8) as u8); for b in a.encode().to_le_bytes() { yield_! b; } },
+            Operation::Yieldstar(a) => { yield_!(3 as u8); yield_!((3>>8) as u8); for b in a.encode().to_le_bytes() { yield_! b; } },
+            Operation::Global => {  yield_! (4 as u8); yield_!((4>>8) as u8); },
+            Operation::Fn(arr) => { yield_!(5 as u8); yield_!((5>>8) as u8); for x in arr.iter() { for b in x.encode().to_le_bytes() { yield_! b; } } },
+            Operation::Lit32(a) => { yield_!(6 as u8); yield_!((6>>8) as u8); for b in a.encode().to_le_bytes() { yield_! b; } },
             #[cfg(feature = "alloc")]
-            Operation::Arr(items, dest) => { yield(7 as u8); yield((7>>8) as u8); for b in (items.len() as u32).to_le_bytes() { yield b; } for x in items { for b in x.encode().to_le_bytes() { yield b; } } for b in dest.encode().to_le_bytes() { yield b; } },
+            Operation::Arr(items, dest) => { yield_!(7 as u8); yield_!((7>>8) as u8); for b in (items.len() as u32).to_le_bytes() { yield_! b; } for x in items { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.encode().to_le_bytes() { yield_! b; } },
             #[cfg(not(feature = "alloc"))]
             Operation::Arr => { /* alloc disabled: cannot emit */ },
             #[cfg(feature = "alloc")]
-            Operation::Str(items, dest) => { yield(8 as u8); yield((8>>8) as u8); for b in (items.len() as u32).to_le_bytes() { yield b; } for x in items { for b in x.encode().to_le_bytes() { yield b; } } for b in dest.encode().to_le_bytes() { yield b; } },
+            Operation::Str(items, dest) => { yield_!(8 as u8); yield_!((8>>8) as u8); for b in (items.len() as u32).to_le_bytes() { yield_! b; } for x in items { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.encode().to_le_bytes() { yield_! b; } },
             #[cfg(not(feature = "alloc"))]
             Operation::Str => { /* alloc disabled: cannot emit */ },
             #[cfg(feature = "alloc")]
-            Operation::Litobj{c, pairs, key} => { yield(9 as u8); yield((9>>8) as u8); for b in c.encode().to_le_bytes() { yield b; } for (k, v) in pairs { for b in k.encode().to_le_bytes() { yield b; } for b in v.encode().to_le_bytes() { yield b; } } for b in key.encode().to_le_bytes() { yield b; } },
+            Operation::Litobj{c, pairs, key} => { yield_!(9 as u8); yield_!((9>>8) as u8); for b in c.encode().to_le_bytes() { yield_! b; } for (k, v) in pairs { for b in k.encode().to_le_bytes() { yield_! b; } for b in v.encode().to_le_bytes() { yield_! b; } } for b in key.encode().to_le_bytes() { yield_! b; } },
             #[cfg(not(feature = "alloc"))]
             Operation::Litobj => { /* alloc disabled: cannot emit */ },
-            Operation::NewTarget => {  yield (10 as u8); yield((10>>8) as u8); },
+            Operation::NewTarget => {  yield_! (10 as u8); yield_!((10>>8) as u8); },
     }
     }    
   }
