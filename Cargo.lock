@@ -119,6 +119,8 @@ dependencies = [
  "js-sys",
  "num_enum",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "whisk",
 ]
 
 [[package]]
@@ -241,6 +243,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-bindgen-futures"
+version = "0.4.71"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96492d0d3ffba25305a7dc88720d250b1401d7edca02cc3bcd50633b424673b8"
+dependencies = [
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "wasm-bindgen-macro"
 version = "0.2.121"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -273,6 +285,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "whisk"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09c50b72a1db0b7c540669604d763db75abe736c348f9b05d3e816bd28ed4f3a"
+
+[[package]]
 name = "winnow"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -280,6 +298,10 @@ checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]
+
+[[patch.unused]]
+name = "portal-pc-asm-common"
+version = "0.1.1"
 
 [[patch.unused]]
 name = "portal-jsc-common"
@@ -316,58 +338,6 @@ version = "0.8.0-pre.11"
 [[patch.unused]]
 name = "portal-jsc-swc-util"
 version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-pc-waffle"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-backend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-copying-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-entity"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-frontend"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-fuzzing"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-hooking"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-ir"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-lowering"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-waffle-passes-shared"
-version = "0.6.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-solutions-swibb"
-version = "0.6.0-alpha.1"
 
 [[patch.unused]]
 name = "ast-traits"
@@ -438,122 +408,6 @@ name = "type-onion"
 version = "0.2.3"
 
 [[patch.unused]]
-name = "ephemera"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vaffle"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-c-backend"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-common"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-compiler"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-compiler-common"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-compiler-passes"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-dyn"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-common"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-lir-target"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-passes"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-lir"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-lir-codegen"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-primitives"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-provenance"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-spec"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-spec-dyn"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-vaffle-target"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-weaver"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "pit-core"
-version = "0.5.0-alpha.1"
-
-[[patch.unused]]
-name = "portal-pc-asm-common"
-version = "0.1.1"
-
-[[patch.unused]]
-name = "portal-solutions-asm-aarch64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-jvm"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-regalloc"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-riscv64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-semantics"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86-64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-solutions-asm-x86-64-shim"
-version = "0.1.0"
-
-[[patch.unused]]
 name = "wax-core"
 version = "0.1.0"
 
@@ -562,12 +416,56 @@ name = "wax-tags"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "embedded-llm"
-version = "0.1.0"
+name = "pit-core"
+version = "0.5.0-alpha.1"
 
 [[patch.unused]]
-name = "embedded-llm-tools"
-version = "0.1.0"
+name = "portal-pc-waffle"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-backend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-copying-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-entity"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-frontend"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-fuzzing"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-hooking"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-ir"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-lowering"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes"
+version = "0.6.0-alpha.1"
+
+[[patch.unused]]
+name = "portal-pc-waffle-passes-shared"
+version = "0.6.0-alpha.1"
 
 [[patch.unused]]
 name = "dex-bytecode"
@@ -650,6 +548,122 @@ name = "yecta"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "embedded-llm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "embedded-llm-tools"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-aarch64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-jvm"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-regalloc"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-riscv64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-semantics"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86-64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-asm-x86-64-shim"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ephemera"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vaffle"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-c-backend"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-common"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-compiler"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-compiler-common"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-compiler-passes"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-dyn"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-common"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-lir-target"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-passes"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-lir"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-lir-codegen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-primitives"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-provenance"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-spec"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-spec-dyn"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-vaffle-target"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-weaver"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "dreamcomp-ir-plugin-host"
 version = "0.1.0"
 
@@ -708,3 +722,7 @@ version = "0.1.0"
 [[patch.unused]]
 name = "dreamcompiler-minibc-interp"
 version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-solutions-swibb"
+version = "0.6.0-alpha.1"
