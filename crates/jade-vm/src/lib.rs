@@ -26,6 +26,7 @@ macro_rules! yield_ {
 }
 
 pub mod data;
+pub use data::{Opcode, Operation};
 
 /// Represents an operand that can be either a literal value or a state variable reference
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,14 +192,14 @@ mod tests {
         // Test RET operation
         let ret_op = Operation::Ret(Operand::StateRef(5));
         let bytes: Vec<u8> = ret_op.emit().collect();
-        
+
         // Should be: opcode (2 bytes) + encoded operand (4 bytes)
         assert_eq!(bytes.len(), 6);
-        
+
         // Parse it back
         let (parsed_op, remaining) = Operation::parse(&bytes).unwrap();
         assert_eq!(remaining.len(), 0);
-        
+
         if let Operation::Ret(operand) = parsed_op {
             assert_eq!(operand, Operand::StateRef(5));
         } else {
@@ -207,21 +208,21 @@ mod tests {
     }
 
     #[cfg(feature = "alloc")]
-    #[test] 
+    #[test]
     fn test_array_operation() {
         use alloc::vec::Vec;
 
         let arr_items = vec![
             Operand::Literal(10),
             Operand::StateRef(2),
-            Operand::Literal(20)
+            Operand::Literal(20),
         ];
         let dest = Operand::StateRef(1);
         let arr_op = Operation::Arr(arr_items.clone(), dest);
-        
+
         let bytes: Vec<u8> = arr_op.emit().collect();
         let (parsed_op, _) = Operation::parse(&bytes).unwrap();
-        
+
         if let Operation::Arr(parsed_items, parsed_dest) = parsed_op {
             assert_eq!(parsed_items, arr_items);
             assert_eq!(parsed_dest, dest);
@@ -237,7 +238,13 @@ mod tests {
         assert_eq!(encode_lsb(42, false), Operand::StateRef(42).encode());
 
         // Test compatibility with existing encode_signed function
-        assert_eq!(encode_signed(42, false), SignedOperand::Positive(42).encode());
-        assert_eq!(encode_signed(42, true), SignedOperand::Negative(42).encode());
+        assert_eq!(
+            encode_signed(42, false),
+            SignedOperand::Positive(42).encode()
+        );
+        assert_eq!(
+            encode_signed(42, true),
+            SignedOperand::Negative(42).encode()
+        );
     }
 }

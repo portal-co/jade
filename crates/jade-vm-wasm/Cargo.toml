@@ -1,0 +1,15 @@
+[package]
+name = "portal-solutions-jade-vm-wasm"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+js-sys = "0.3"
+portal-solutions-jade-vm = { path = "../jade-vm", features = ["alloc"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"

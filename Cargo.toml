@@ -1,5 +1,5 @@
 [workspace]
-members=["crates/jade-vm"]
+members=["crates/jade-vm", "crates/jade-vm-wasm"]
 resolver="3"
 
 [workspace.package]
