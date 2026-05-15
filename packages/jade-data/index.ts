@@ -11,6 +11,7 @@ export const opcodes: { [Op in Opcode]: OpcodeInfo } = freeze({
   STR: freeze({ id: 8, args: "array" }),
   LITOBJ: freeze({ id: 9, args: "object" }),
   NEW_TARGET: freeze({ id: 10, args: 0 }),
+  CALL: freeze({ id: 11, args: "call" }),
 });
 export type Opcode =
   | "RET"
@@ -23,10 +24,11 @@ export type Opcode =
   | "ARR"
   | "STR"
   | "LITOBJ"
-  | "NEW_TARGET";
+  | "NEW_TARGET"
+  | "CALL";
 export type OpcodeInfo = {
   id: number;
-  args: number | "array" | "object";
+  args: number | "array" | "object" | "call";
 };
 export type Handler = string;
 export const handlers: { [Op in Opcode]?: Handler} = freeze({
@@ -98,4 +100,13 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                 break;
             }`,
   NEW_TARGET: `state[code().getUint32(ip,true)]=nt;ip += 4;break;`,
+  CALL: `{
+                const fn = arg();
+                let n = code().getUint32(ip,true); ip += 4;
+                const callArgs: any[] = [];
+                while(n--) callArgs.push(arg());
+                state[code().getUint32(ip,true)] = apply(fn, undefined, callArgs);
+                ip += 4;
+                break;
+            }`,
 });

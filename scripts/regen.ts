@@ -102,6 +102,9 @@ writeFileSync(
         if (args === "object")
           return `    #[cfg(feature = "alloc")]
     ${v}{ c: crate::SignedOperand, pairs: Vec<(crate::Operand, crate::Operand)>, key: crate::Operand },`;
+        if (args === "call")
+          return `    #[cfg(feature = "alloc")]
+    ${v}{ fn_op: crate::Operand, args: Vec<crate::Operand>, dest: u32 },`;
         return `    ${v},`;
       })
       .join("\n");
@@ -126,6 +129,11 @@ writeFileSync(
         if (args === "object")
           return `            #[cfg(feature = "alloc")]
             ${id} => { let (c,no) = read_i32_le(buf, off)?; off = no; let mut pairs = Vec::new(); let mut cnt = if c>=0 { c as usize } else { (-c) as usize }; while cnt>0 { let (k,no2) = read_u32_le(buf, off)?; off = no2; let (v,no3) = read_u32_le(buf, off)?; off = no3; pairs.push((crate::Operand::decode(k), crate::Operand::decode(v))); cnt-=1; } let (key,no4) = read_u32_le(buf, off)?; off = no4; Some((Operation::${v}{ c: crate::SignedOperand::decode(c as u32), pairs, key: crate::Operand::decode(key) }, &buf[off..])) },
+            #[cfg(not(feature = "alloc"))]
+            ${id} => { return None },`;
+        if (args === "call")
+          return `            #[cfg(feature = "alloc")]
+            ${id} => { let (fn_raw,no) = read_u32_le(buf, off)?; off = no; let (len,no) = read_u32_le(buf, off)?; off = no; let mut args = Vec::with_capacity(len as usize); for _ in 0..len { let (x,no2) = read_u32_le(buf, off)?; off = no2; args.push(crate::Operand::decode(x)); } let (dest,no) = read_u32_le(buf, off)?; off = no; Some((Operation::${v}{ fn_op: crate::Operand::decode(fn_raw), args, dest }, &buf[off..])) },
             #[cfg(not(feature = "alloc"))]
             ${id} => { return None },`;
         return `            ${id} => Some((Operation::${v}, &buf[off..])),`;
@@ -154,6 +162,11 @@ writeFileSync(
             Operation::${v}{c, pairs, key} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&c.encode().to_le_bytes()); for (k, v) in pairs { wtr.extend_from_slice(&k.encode().to_le_bytes()); wtr.extend_from_slice(&v.encode().to_le_bytes()); } wtr.extend_from_slice(&key.encode().to_le_bytes()); },
             #[cfg(not(feature = "alloc"))]
             Operation::${v} => { /* alloc disabled: cannot emit */ },`;
+        if (args === "call")
+          return `            #[cfg(feature = "alloc")]
+            Operation::${v}{fn_op, args, dest} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); wtr.extend_from_slice(&fn_op.encode().to_le_bytes()); wtr.extend_from_slice(&(args.len() as u32).to_le_bytes()); for x in args { wtr.extend_from_slice(&x.encode().to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },
+            #[cfg(not(feature = "alloc"))]
+            Operation::${v} => { /* alloc disabled: cannot emit */ },`;
         return `            Operation::${v} => { wtr.push(${id} as u8); wtr.push((${id}>>8) as u8); },`;
       })
       .join("\n");
@@ -177,6 +190,11 @@ writeFileSync(
         if (args === "object")
           return `            #[cfg(feature = "alloc")]
             Operation::${v}{c, pairs, key} => { yield_!(${id} as u8); yield_!((${id}>>8) as u8); for b in c.encode().to_le_bytes() { yield_! b; } for (k, v) in pairs { for b in k.encode().to_le_bytes() { yield_! b; } for b in v.encode().to_le_bytes() { yield_! b; } } for b in key.encode().to_le_bytes() { yield_! b; } },
+            #[cfg(not(feature = "alloc"))]
+            Operation::${v} => { /* alloc disabled: cannot emit */ },`;
+        if (args === "call")
+          return `            #[cfg(feature = "alloc")]
+            Operation::${v}{fn_op, args, dest} => { yield_!(${id} as u8); yield_!((${id}>>8) as u8); for b in fn_op.encode().to_le_bytes() { yield_! b; } for b in (args.len() as u32).to_le_bytes() { yield_! b; } for x in args { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.to_le_bytes() { yield_! b; } },
             #[cfg(not(feature = "alloc"))]
             Operation::${v} => { /* alloc disabled: cannot emit */ },`;
         return `            Operation::${v} => { yield_!(${id} as u8); yield_!((${id}>>8) as u8); },`;

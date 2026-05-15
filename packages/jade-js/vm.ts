@@ -81,7 +81,15 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 }
                 ip+=4;
                 break;
-            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
+            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;case 11: {
+                const fn = arg();
+                let n = code().getUint32(ip,true); ip += 4;
+                const callArgs: any[] = [];
+                while(n--) callArgs.push(arg());
+                state[code().getUint32(ip,true)] = apply(fn, undefined, callArgs);
+                ip += 4;
+                break;
+            }
         }
     }
 }
@@ -160,7 +168,15 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 }
                 ip+=4;
                 break;
-            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
+            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;case 11: {
+                const fn = arg();
+                let n = code().getUint32(ip,true); ip += 4;
+                const callArgs: any[] = [];
+                while(n--) callArgs.push(arg());
+                state[code().getUint32(ip,true)] = apply(fn, undefined, callArgs);
+                ip += 4;
+                break;
+            }
         }
     }
 }
@@ -239,7 +255,15 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 }
                 ip+=4;
                 break;
-            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
+            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;case 11: {
+                const fn = arg();
+                let n = code().getUint32(ip,true); ip += 4;
+                const callArgs: any[] = [];
+                while(n--) callArgs.push(arg());
+                state[code().getUint32(ip,true)] = apply(fn, undefined, callArgs);
+                ip += 4;
+                break;
+            }
         }
     }
 }
@@ -318,7 +342,15 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 }
                 ip+=4;
                 break;
-            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;
+            }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;case 11: {
+                const fn = arg();
+                let n = code().getUint32(ip,true); ip += 4;
+                const callArgs: any[] = [];
+                while(n--) callArgs.push(arg());
+                state[code().getUint32(ip,true)] = apply(fn, undefined, callArgs);
+                ip += 4;
+                break;
+            }
         }
     }
 }
