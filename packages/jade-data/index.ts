@@ -1,17 +1,17 @@
 const {freeze} = Object;
 export const opcodes: { [Op in Opcode]: OpcodeInfo } = freeze({
-  RET: freeze({ id: 0, args: 1 }),
-  AWAIT: freeze({ id: 1, args: 1 }),
-  YIELD: freeze({ id: 2, args: 1 }),
-  YIELDSTAR: freeze({ id: 3, args: 1 }),
-  GLOBAL: freeze({ id: 4, args: 0 }),
-  FN: freeze({ id: 5, args: 4 })    ,
-  LIT32: freeze({ id: 6, args: 1 }),
-  ARR: freeze({ id: 7, args: "array" }),
-  STR: freeze({ id: 8, args: "array" }),
-  LITOBJ: freeze({ id: 9, args: "object" }),
-  NEW_TARGET: freeze({ id: 10, args: 0 }),
-  CALL: freeze({ id: 11, args: "call" }),
+  RET:        freeze({ id: 0,  args: "src"      }),  // [LSB val]
+  AWAIT:      freeze({ id: 1,  args: "src_dest" }),  // [LSB val] [raw dest]
+  YIELD:      freeze({ id: 2,  args: "src_dest" }),  // [LSB val] [raw dest]
+  YIELDSTAR:  freeze({ id: 3,  args: "src_dest" }),  // [LSB val] [raw dest]
+  GLOBAL:     freeze({ id: 4,  args: "dest"     }),  // [raw dest]
+  FN:         freeze({ id: 5,  args: "fn"       }),  // [LSB variant][LSB closure_args][LSB spanner][raw j][raw dest]
+  LIT32:      freeze({ id: 6,  args: "lit32"    }),  // [raw dest][raw val]
+  ARR:        freeze({ id: 7,  args: "array"    }),  // [raw len][LSB items…][raw dest]
+  STR:        freeze({ id: 8,  args: "array"    }),  // [raw len][LSB items…][raw dest]
+  LITOBJ:     freeze({ id: 9,  args: "object"   }),  // [i32 c][spread?][pairs…][LSB key]
+  NEW_TARGET: freeze({ id: 10, args: "dest"     }),  // [raw dest]
+  CALL:       freeze({ id: 11, args: "call"     }),  // [LSB fn][raw n][LSB args…][raw dest]
 });
 export type Opcode =
   | "RET"
@@ -28,7 +28,7 @@ export type Opcode =
   | "CALL";
 export type OpcodeInfo = {
   id: number;
-  args: number | "array" | "object" | "call";
+  args: "src" | "src_dest" | "dest" | "fn" | "lit32" | "array" | "object" | "call";
 };
 export type Handler = string;
 export const handlers: { [Op in Opcode]?: Handler} = freeze({

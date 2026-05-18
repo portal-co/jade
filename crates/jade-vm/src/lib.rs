@@ -189,21 +189,51 @@ mod tests {
     fn test_operation_parsing_and_emitting() {
         use alloc::vec::Vec;
 
-        // Test RET operation
+        // RET: opcode (2) + LSB val (4) = 6 bytes
         let ret_op = Operation::Ret(Operand::StateRef(5));
         let bytes: Vec<u8> = ret_op.emit().collect();
-
-        // Should be: opcode (2 bytes) + encoded operand (4 bytes)
         assert_eq!(bytes.len(), 6);
-
-        // Parse it back
         let (parsed_op, remaining) = Operation::parse(&bytes).unwrap();
         assert_eq!(remaining.len(), 0);
-
         if let Operation::Ret(operand) = parsed_op {
             assert_eq!(operand, Operand::StateRef(5));
         } else {
-            panic!("Expected Ret operation");
+            panic!("Expected Ret");
+        }
+
+        // GLOBAL: opcode (2) + raw dest (4) = 6 bytes
+        let global_op = Operation::Global(7);
+        let bytes: Vec<u8> = global_op.emit().collect();
+        assert_eq!(bytes.len(), 6);
+        let (parsed_op, _) = Operation::parse(&bytes).unwrap();
+        if let Operation::Global(dest) = parsed_op {
+            assert_eq!(dest, 7);
+        } else {
+            panic!("Expected Global");
+        }
+
+        // AWAIT: opcode (2) + LSB val (4) + raw dest (4) = 10 bytes
+        let await_op = Operation::Await { val: Operand::StateRef(3), dest: 9 };
+        let bytes: Vec<u8> = await_op.emit().collect();
+        assert_eq!(bytes.len(), 10);
+        let (parsed_op, _) = Operation::parse(&bytes).unwrap();
+        if let Operation::Await { val, dest } = parsed_op {
+            assert_eq!(val, Operand::StateRef(3));
+            assert_eq!(dest, 9);
+        } else {
+            panic!("Expected Await");
+        }
+
+        // LIT32: opcode (2) + raw dest (4) + raw val (4) = 10 bytes
+        let lit_op = Operation::Lit32 { dest: 2, val: 0xDEAD_BEEF };
+        let bytes: Vec<u8> = lit_op.emit().collect();
+        assert_eq!(bytes.len(), 10);
+        let (parsed_op, _) = Operation::parse(&bytes).unwrap();
+        if let Operation::Lit32 { dest, val } = parsed_op {
+            assert_eq!(dest, 2);
+            assert_eq!(val, 0xDEAD_BEEF);
+        } else {
+            panic!("Expected Lit32");
         }
     }
 
@@ -212,22 +242,25 @@ mod tests {
     fn test_array_operation() {
         use alloc::vec::Vec;
 
-        let arr_items = vec![
+        let items = vec![
             Operand::Literal(10),
             Operand::StateRef(2),
             Operand::Literal(20),
         ];
-        let dest = Operand::StateRef(1);
-        let arr_op = Operation::Arr(arr_items.clone(), dest);
+        // dest is now a raw u32 slot index, not an Operand
+        let dest: u32 = 1;
+        let arr_op = Operation::Arr(items.clone(), dest);
 
         let bytes: Vec<u8> = arr_op.emit().collect();
-        let (parsed_op, _) = Operation::parse(&bytes).unwrap();
+        // opcode(2) + len(4) + 3 items×4(12) + dest(4) = 22 bytes
+        assert_eq!(bytes.len(), 22);
 
+        let (parsed_op, _) = Operation::parse(&bytes).unwrap();
         if let Operation::Arr(parsed_items, parsed_dest) = parsed_op {
-            assert_eq!(parsed_items, arr_items);
+            assert_eq!(parsed_items, items);
             assert_eq!(parsed_dest, dest);
         } else {
-            panic!("Expected Arr operation");
+            panic!("Expected Arr");
         }
     }
 
