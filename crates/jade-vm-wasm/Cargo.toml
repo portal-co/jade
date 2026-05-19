@@ -11,5 +11,6 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 js-sys = "0.3"
 portal-solutions-jade-vm = { path = "../jade-vm", features = ["alloc"] }
+portal-solutions-jade-vm-core = { path = "../jade-vm-core" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

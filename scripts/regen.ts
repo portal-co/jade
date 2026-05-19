@@ -326,3 +326,159 @@ ${emitArms}
   })()
 );
 
+// ---------------------------------------------------------------------------
+// Generate crates/jade-vm-core/src/dispatch.rs
+//
+// Platform trait + exec_op dispatch function.
+// Covers all opcodes EXCEPT "src" (RET) and "src_dest" (AWAIT/YIELD/YIELDSTAR)
+// which are handled by the interpreter loop level in jade-vm-wasm.
+// ---------------------------------------------------------------------------
+writeFileSync(
+  `${__dirname}/../crates/jade-vm-core/src/dispatch.rs`,
+  (() => {
+    const entries = Object.entries(opcodes) as [string, any][];
+    const pascal = (s: string) =>
+      s.split("_").map((p) => p[0] + p.slice(1).toLowerCase()).join("");
+
+    // Opcodes handled at loop level (not dispatched through exec_op)
+    const loopLevel = new Set(["src", "src_dest"]);
+
+    // ---- Platform trait method signatures -----------------------------------
+    const traitMethods = entries
+      .filter(([, { args }]) => !loopLevel.has(args))
+      .map(([name, { args }]) => {
+        const mn = `op_${name.toLowerCase()}`;
+        switch (args) {
+          case "dest":
+            return `    fn ${mn}(&mut self, dest: u32) -> Result<(), Self::Error>;`;
+          case "lit32":
+            return `    fn op_lit32(&mut self, dest: u32, val: u32) -> Result<(), Self::Error>;`;
+          case "fn":
+            return `    fn op_fn(&mut self, code: &[u8], variant: Self::Value, closure_args: Self::Value, spanner: Self::Value, j: u32, dest: u32) -> Result<(), Self::Error>;`;
+          case "array":
+            return `    fn ${mn}(&mut self, items: Vec<Self::Value>, dest: u32) -> Result<(), Self::Error>;`;
+          case "object":
+            return `    fn op_litobj(&mut self, spread: Option<Self::Value>, pairs: Vec<(Self::Value, Self::Value)>, key: portal_solutions_jade_vm::Operand) -> Result<(), Self::Error>;`;
+          case "call":
+            return `    fn op_call(&mut self, code: &[u8], fn_val: Self::Value, args: Vec<Self::Value>, dest: u32) -> Result<(), Self::Error>;`;
+          default:
+            return null;
+        }
+      })
+      .filter(Boolean)
+      .join("\n");
+
+    // ---- exec_op match arms -------------------------------------------------
+    const execArms = entries
+      .filter(([, { args }]) => !loopLevel.has(args))
+      .map(([name, { args }]) => {
+        const v = pascal(name);
+        const mn = `op_${name.toLowerCase()}`;
+        switch (args) {
+          case "dest":
+            return `        Operation::${v}(dest) => platform.${mn}(dest),`;
+          case "lit32":
+            return `        Operation::Lit32 { dest, val } => platform.op_lit32(dest, val),`;
+          case "fn":
+            // Pre-resolve operands into temps to avoid simultaneous &mut borrows
+            // (one from self, one from each resolve call in the argument list).
+            return `        Operation::Fn { variant, closure_args, spanner, j, dest } => {
+            let r0 = crate::resolve(variant, platform);
+            let r1 = crate::resolve(closure_args, platform);
+            let r2 = crate::resolve(spanner, platform);
+            platform.op_fn(code, r0, r1, r2, j, dest)
+        }`;
+          case "array":
+            return `        Operation::${v}(items, dest) => {
+            let items: Vec<_> = items.into_iter().map(|op| crate::resolve(op, platform)).collect();
+            platform.${mn}(items, dest)
+        }`;
+          case "object":
+            // Resolve into owned values before calling op_litobj to avoid
+            // simultaneous mutable borrows.
+            return `        Operation::Litobj { c, pairs, key } => {
+            let mut iter = pairs.into_iter();
+            let spread = if c.as_i32() < 0 {
+                Some(crate::resolve(iter.next().unwrap().0, platform))
+            } else { None };
+            let kv: Vec<_> = iter.map(|(k, v)| {
+                let k = crate::resolve(k, platform);
+                let v = crate::resolve(v, platform);
+                (k, v)
+            }).collect();
+            platform.op_litobj(spread, kv, key)
+        }`;
+          case "call":
+            return `        Operation::Call { fn_op, args, dest } => {
+            let fn_val = crate::resolve(fn_op, platform);
+            let args: Vec<_> = args.into_iter().map(|op| crate::resolve(op, platform)).collect();
+            platform.op_call(code, fn_val, args, dest)
+        }`;
+          default:
+            return null;
+        }
+      })
+      .filter(Boolean)
+      .join("\n");
+
+    const BT = "\x60"; // backtick character (can't use ` inside a template literal)
+    return `/* This is GENERATED code by ${BT}update.mjs${BT} */
+use portal_solutions_jade_vm::Operation;
+
+/// Platform abstraction for the Jade VM interpreter.
+///
+/// Implementors provide:
+/// - State access (get/set with optional caching, flush for persistence)
+/// - Value constructors (f64, string, undefined)
+/// - Opcode handlers for all non-loop opcodes
+///
+/// The two interpreter-loop opcodes (RET via "src", and AWAIT/YIELD/YIELDSTAR
+/// via "src_dest") are handled by the caller using ${BT}crate::resolve${BT}.
+pub trait Platform {
+    /// The platform's value type (e.g. JsValue on WASM).
+    type Value: Clone;
+    /// The platform's error type.
+    type Error;
+
+    // State access --------------------------------------------------------
+    /// Read state slot ${BT}idx${BT}.
+    fn get(&mut self, idx: u32) -> Self::Value;
+    /// Write state slot ${BT}idx${BT}.
+    fn set(&mut self, idx: u32, val: Self::Value);
+    /// Flush dirty cache entries to the underlying state storage.
+    fn flush(&mut self);
+    /// Flush then invalidate the cache (call before a foreign function may mutate state).
+    fn flush_and_invalidate(&mut self);
+
+    // Value construction --------------------------------------------------
+    fn f64_val(&self, v: f64) -> Self::Value;
+    fn str_val(&self, s: &str) -> Self::Value;
+    fn undefined(&self) -> Self::Value;
+
+    // Error construction --------------------------------------------------
+    fn err(msg: &'static str) -> Self::Error;
+
+    // Opcode handlers (one per non-loop opcode) ---------------------------
+${traitMethods}
+}
+
+/// Dispatch a non-loop ${BT}Operation${BT} through the platform.
+///
+/// Operands are resolved before being passed to trait methods, so each
+/// method receives ready-to-use ${BT}Self::Value${BT} arguments.
+/// Returns ${BT}Err${BT} only for truly unknown opcodes (should never happen with
+/// a well-formed bytecode stream).
+pub fn exec_op<P: Platform>(
+    op: Operation,
+    code: &[u8],
+    platform: &mut P,
+) -> Result<(), P::Error> {
+    match op {
+${execArms}
+        _ => Err(P::err("exec_op: unexpected opcode")),
+    }
+}
+`;
+  })()
+);
+
