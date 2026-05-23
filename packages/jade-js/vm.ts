@@ -1,5 +1,5 @@
 
-/* This is GENERATED code by `update.mjs` */
+/* This is GENERATED code by `regen.ts` */
 import {type Tenant} from "./index.ts"
 const {apply} = Reflect;
 const {create,defineProperties,freeze} = Object;

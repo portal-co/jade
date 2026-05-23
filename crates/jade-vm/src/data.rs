@@ -1,5 +1,5 @@
 
-/* This is GENERATED code by `update.mjs` */
+/* This is GENERATED code by `regen.ts` */
 use super::*;
 // Note: alloc crate already imported in lib.rs, so we don't re-import it here
 #[cfg(feature = "alloc")]
