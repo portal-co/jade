@@ -36,21 +36,35 @@ pub enum Opcode {
     /// NEW_TARGET operation (id: 10)
     NewTarget=10,
     /// CALL operation (id: 11)
-    Call=11
+    Call=11,
+    /// BOOL operation (id: 12)
+    Bool=12,
+    /// EQ operation (id: 13)
+    Eq=13,
+    /// NE operation (id: 14)
+    Ne=14,
+    /// LT operation (id: 15)
+    Lt=15,
+    /// LE operation (id: 16)
+    Le=16,
+    /// GT operation (id: 17)
+    Gt=17,
+    /// GE operation (id: 18)
+    Ge=18,
+    /// SEL operation (id: 19)
+    Sel=19,
+    /// FIXPOINT operation (id: 20)
+    Fixpoint=20,
+    /// IF operation (id: 21)
+    If=21,
+    /// SWITCH operation (id: 22)
+    Switch=22
 }
 impl Opcode{
-  pub const LEN: u16 = 12;
+  pub const LEN: u16 = 23;
 }
 
 /// Rich operation type with operands automatically decoded from bytecode
-/// 
-/// This enum uses the two-variant operand approach where operands are automatically
-/// decoded from raw u32 values into structured types:
-/// - `Operand`: Handles LSB encoding for literal vs state reference distinction
-/// - `SignedOperand`: Handles signed/unsigned encoding for numeric values
-/// 
-/// The parsing automatically handles the bitwise operations that were previously
-/// done manually in JavaScript, providing a type-safe interface in Rust.
 #[derive(Debug, Clone)]
 pub enum Operation {
     Ret(crate::Operand),
@@ -69,6 +83,20 @@ pub enum Operation {
     NewTarget(u32),
     #[cfg(feature = "alloc")]
     Call{ fn_op: crate::Operand, args: Vec<crate::Operand>, dest: u32 },
+    Bool { val: bool, dest: u32 },
+    Eq { a: crate::Operand, b: crate::Operand, dest: u32 },
+    Ne { a: crate::Operand, b: crate::Operand, dest: u32 },
+    Lt { a: crate::Operand, b: crate::Operand, dest: u32 },
+    Le { a: crate::Operand, b: crate::Operand, dest: u32 },
+    Gt { a: crate::Operand, b: crate::Operand, dest: u32 },
+    Ge { a: crate::Operand, b: crate::Operand, dest: u32 },
+    Sel { cond: crate::Operand, then: crate::Operand, else_: crate::Operand, dest: u32 },
+    #[cfg(feature = "alloc")]
+    Fixpoint(Vec<u8>),
+    #[cfg(feature = "alloc")]
+    If { cond: crate::Operand, then_body: Vec<u8>, else_body: Vec<u8> },
+    #[cfg(feature = "alloc")]
+    Switch { val: crate::Operand, cases: Vec<(u32, Vec<u8>)>, default_body: Vec<u8> },
 }
 
 fn read_u16_le(buf: &[u8], off: usize) -> Option<(u16, usize)> {
@@ -88,7 +116,7 @@ fn read_i32_le(buf: &[u8], off: usize) -> Option<(i32, usize)> {
 }
 
 impl Operation {
-  pub const LEN: u16 = 12;
+  pub const LEN: u16 = 23;
 
   /// Parse an Operation from the start of `buf`, returning the operation and the remaining slice.
   pub fn parse(buf: &[u8]) -> Option<(Operation, &[u8])> {
@@ -118,6 +146,26 @@ impl Operation {
             11 => { let (fn_r,no)=read_u32_le(buf,off)?; off=no; let (len,no)=read_u32_le(buf,off)?; off=no; let mut args=Vec::with_capacity(len as usize); for _ in 0..len { let (x,no2)=read_u32_le(buf,off)?; off=no2; args.push(crate::Operand::decode(x)); } let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Call{ fn_op: crate::Operand::decode(fn_r), args, dest }, &buf[off..])) },
             #[cfg(not(feature = "alloc"))]
             11 => { return None },
+            12 => { let (v,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Bool{ val: v != 0, dest }, &buf[off..])) },
+            13 => { let (a,no)=read_u32_le(buf,off)?; off=no; let (b,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Eq{ a: crate::Operand::decode(a), b: crate::Operand::decode(b), dest }, &buf[off..])) },
+            14 => { let (a,no)=read_u32_le(buf,off)?; off=no; let (b,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Ne{ a: crate::Operand::decode(a), b: crate::Operand::decode(b), dest }, &buf[off..])) },
+            15 => { let (a,no)=read_u32_le(buf,off)?; off=no; let (b,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Lt{ a: crate::Operand::decode(a), b: crate::Operand::decode(b), dest }, &buf[off..])) },
+            16 => { let (a,no)=read_u32_le(buf,off)?; off=no; let (b,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Le{ a: crate::Operand::decode(a), b: crate::Operand::decode(b), dest }, &buf[off..])) },
+            17 => { let (a,no)=read_u32_le(buf,off)?; off=no; let (b,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Gt{ a: crate::Operand::decode(a), b: crate::Operand::decode(b), dest }, &buf[off..])) },
+            18 => { let (a,no)=read_u32_le(buf,off)?; off=no; let (b,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Ge{ a: crate::Operand::decode(a), b: crate::Operand::decode(b), dest }, &buf[off..])) },
+            19 => { let (cond,no)=read_u32_le(buf,off)?; off=no; let (then,no)=read_u32_le(buf,off)?; off=no; let (else_r,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Sel{ cond: crate::Operand::decode(cond), then: crate::Operand::decode(then), else_: crate::Operand::decode(else_r), dest }, &buf[off..])) },
+            #[cfg(feature = "alloc")]
+            20 => { let (len,no)=read_u32_le(buf,off)?; off=no; if off+len as usize > buf.len() { return None; } let body=buf[off..off+len as usize].to_vec(); off+=len as usize; Some((Operation::Fixpoint(body), &buf[off..])) },
+            #[cfg(not(feature = "alloc"))]
+            20 => { return None },
+            #[cfg(feature = "alloc")]
+            21 => { let (cond_r,no)=read_u32_le(buf,off)?; off=no; let (tl,no)=read_u32_le(buf,off)?; off=no; let (el,no)=read_u32_le(buf,off)?; off=no; if off+tl as usize+el as usize > buf.len() { return None; } let then_body=buf[off..off+tl as usize].to_vec(); off+=tl as usize; let else_body=buf[off..off+el as usize].to_vec(); off+=el as usize; Some((Operation::If{ cond: crate::Operand::decode(cond_r), then_body, else_body }, &buf[off..])) },
+            #[cfg(not(feature = "alloc"))]
+            21 => { return None },
+            #[cfg(feature = "alloc")]
+            22 => { let (val_r,no)=read_u32_le(buf,off)?; off=no; let (n,no)=read_u32_le(buf,off)?; off=no; let mut cases=Vec::with_capacity(n as usize); for _ in 0..n { let (cv,no2)=read_u32_le(buf,off)?; off=no2; let (cl,no3)=read_u32_le(buf,off)?; off=no3; if off+cl as usize > buf.len() { return None; } let cbody=buf[off..off+cl as usize].to_vec(); off+=cl as usize; cases.push((cv,cbody)); } let (dl,no)=read_u32_le(buf,off)?; off=no; if off+dl as usize > buf.len() { return None; } let default_body=buf[off..off+dl as usize].to_vec(); off+=dl as usize; Some((Operation::Switch{ val: crate::Operand::decode(val_r), cases, default_body }, &buf[off..])) },
+            #[cfg(not(feature = "alloc"))]
+            22 => { return None },
       _ => None
     }
   }
@@ -150,8 +198,28 @@ impl Operation {
             Operation::Call{fn_op, args, dest} => { yield_!(11 as u8); yield_!((11>>8) as u8); for b in fn_op.encode().to_le_bytes() { yield_! b; } for b in (args.len() as u32).to_le_bytes() { yield_! b; } for x in args { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.to_le_bytes() { yield_! b; } },
             #[cfg(not(feature = "alloc"))]
             Operation::Call{..} => { /* alloc disabled: cannot emit */ },
+            Operation::Bool{val, dest} => { yield_!(12 as u8); yield_!((12>>8) as u8); for b in (if val { 1u32 } else { 0u32 }).to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },
+            Operation::Eq{a, b, dest} => { yield_!(13 as u8); yield_!((13>>8) as u8); for b2 in a.encode().to_le_bytes() { yield_! b2; } for b2 in b.encode().to_le_bytes() { yield_! b2; } for b2 in dest.to_le_bytes() { yield_! b2; } },
+            Operation::Ne{a, b, dest} => { yield_!(14 as u8); yield_!((14>>8) as u8); for b2 in a.encode().to_le_bytes() { yield_! b2; } for b2 in b.encode().to_le_bytes() { yield_! b2; } for b2 in dest.to_le_bytes() { yield_! b2; } },
+            Operation::Lt{a, b, dest} => { yield_!(15 as u8); yield_!((15>>8) as u8); for b2 in a.encode().to_le_bytes() { yield_! b2; } for b2 in b.encode().to_le_bytes() { yield_! b2; } for b2 in dest.to_le_bytes() { yield_! b2; } },
+            Operation::Le{a, b, dest} => { yield_!(16 as u8); yield_!((16>>8) as u8); for b2 in a.encode().to_le_bytes() { yield_! b2; } for b2 in b.encode().to_le_bytes() { yield_! b2; } for b2 in dest.to_le_bytes() { yield_! b2; } },
+            Operation::Gt{a, b, dest} => { yield_!(17 as u8); yield_!((17>>8) as u8); for b2 in a.encode().to_le_bytes() { yield_! b2; } for b2 in b.encode().to_le_bytes() { yield_! b2; } for b2 in dest.to_le_bytes() { yield_! b2; } },
+            Operation::Ge{a, b, dest} => { yield_!(18 as u8); yield_!((18>>8) as u8); for b2 in a.encode().to_le_bytes() { yield_! b2; } for b2 in b.encode().to_le_bytes() { yield_! b2; } for b2 in dest.to_le_bytes() { yield_! b2; } },
+            Operation::Sel{cond, then, else_, dest} => { yield_!(19 as u8); yield_!((19>>8) as u8); for b in cond.encode().to_le_bytes() { yield_! b; } for b in then.encode().to_le_bytes() { yield_! b; } for b in else_.encode().to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },
+            #[cfg(feature = "alloc")]
+            Operation::Fixpoint(body) => { yield_!(20 as u8); yield_!((20>>8) as u8); for b in (body.len() as u32).to_le_bytes() { yield_! b; } for b in &body { yield_! *b; } },
+            #[cfg(not(feature = "alloc"))]
+            Operation::Fixpoint(..) => { /* alloc disabled: cannot emit */ },
+            #[cfg(feature = "alloc")]
+            Operation::If{cond, then_body, else_body} => { yield_!(21 as u8); yield_!((21>>8) as u8); for b in cond.encode().to_le_bytes() { yield_! b; } for b in (then_body.len() as u32).to_le_bytes() { yield_! b; } for b in (else_body.len() as u32).to_le_bytes() { yield_! b; } for b in &then_body { yield_! *b; } for b in &else_body { yield_! *b; } },
+            #[cfg(not(feature = "alloc"))]
+            Operation::If{..} => { /* alloc disabled: cannot emit */ },
+            #[cfg(feature = "alloc")]
+            Operation::Switch{val, cases, default_body} => { yield_!(22 as u8); yield_!((22>>8) as u8); for b in val.encode().to_le_bytes() { yield_! b; } for b in (cases.len() as u32).to_le_bytes() { yield_! b; } for (cv, cb) in &cases { for b in cv.to_le_bytes() { yield_! b; } for b in (cb.len() as u32).to_le_bytes() { yield_! b; } for b in cb { yield_! *b; } } for b in (default_body.len() as u32).to_le_bytes() { yield_! b; } for b in &default_body { yield_! *b; } },
+            #[cfg(not(feature = "alloc"))]
+            Operation::Switch{..} => { /* alloc disabled: cannot emit */ },
     }
-    }    
+    }
   }
   /// Emit returns an iterator over emitted bytes; requires `alloc` feature to allocate.
   #[cfg(all(feature = "alloc", not(feature = "gen-blocks")))]
@@ -182,6 +250,26 @@ impl Operation {
             Operation::Call{fn_op, args, dest} => { wtr.push(11 as u8); wtr.push((11>>8) as u8); wtr.extend_from_slice(&fn_op.encode().to_le_bytes()); wtr.extend_from_slice(&(args.len() as u32).to_le_bytes()); for x in args { wtr.extend_from_slice(&x.encode().to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },
             #[cfg(not(feature = "alloc"))]
             Operation::Call{..} => { /* alloc disabled: cannot emit */ },
+            Operation::Bool{val, dest} => { wtr.push(12 as u8); wtr.push((12>>8) as u8); wtr.extend_from_slice(&(if *val { 1u32 } else { 0u32 }).to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },
+            Operation::Eq{a, b, dest} => { wtr.push(13 as u8); wtr.push((13>>8) as u8); wtr.extend_from_slice(&a.encode().to_le_bytes()); wtr.extend_from_slice(&b.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },
+            Operation::Ne{a, b, dest} => { wtr.push(14 as u8); wtr.push((14>>8) as u8); wtr.extend_from_slice(&a.encode().to_le_bytes()); wtr.extend_from_slice(&b.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },
+            Operation::Lt{a, b, dest} => { wtr.push(15 as u8); wtr.push((15>>8) as u8); wtr.extend_from_slice(&a.encode().to_le_bytes()); wtr.extend_from_slice(&b.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },
+            Operation::Le{a, b, dest} => { wtr.push(16 as u8); wtr.push((16>>8) as u8); wtr.extend_from_slice(&a.encode().to_le_bytes()); wtr.extend_from_slice(&b.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },
+            Operation::Gt{a, b, dest} => { wtr.push(17 as u8); wtr.push((17>>8) as u8); wtr.extend_from_slice(&a.encode().to_le_bytes()); wtr.extend_from_slice(&b.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },
+            Operation::Ge{a, b, dest} => { wtr.push(18 as u8); wtr.push((18>>8) as u8); wtr.extend_from_slice(&a.encode().to_le_bytes()); wtr.extend_from_slice(&b.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },
+            Operation::Sel{cond, then, else_, dest} => { wtr.push(19 as u8); wtr.push((19>>8) as u8); wtr.extend_from_slice(&cond.encode().to_le_bytes()); wtr.extend_from_slice(&then.encode().to_le_bytes()); wtr.extend_from_slice(&else_.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },
+            #[cfg(feature = "alloc")]
+            Operation::Fixpoint(body) => { wtr.push(20 as u8); wtr.push((20>>8) as u8); wtr.extend_from_slice(&(body.len() as u32).to_le_bytes()); wtr.extend_from_slice(&body); },
+            #[cfg(not(feature = "alloc"))]
+            Operation::Fixpoint(..) => { /* alloc disabled: cannot emit */ },
+            #[cfg(feature = "alloc")]
+            Operation::If{cond, then_body, else_body} => { wtr.push(21 as u8); wtr.push((21>>8) as u8); wtr.extend_from_slice(&cond.encode().to_le_bytes()); wtr.extend_from_slice(&(then_body.len() as u32).to_le_bytes()); wtr.extend_from_slice(&(else_body.len() as u32).to_le_bytes()); wtr.extend_from_slice(&then_body); wtr.extend_from_slice(&else_body); },
+            #[cfg(not(feature = "alloc"))]
+            Operation::If{..} => { /* alloc disabled: cannot emit */ },
+            #[cfg(feature = "alloc")]
+            Operation::Switch{val, cases, default_body} => { wtr.push(22 as u8); wtr.push((22>>8) as u8); wtr.extend_from_slice(&val.encode().to_le_bytes()); wtr.extend_from_slice(&(cases.len() as u32).to_le_bytes()); for (cv, cb) in cases { wtr.extend_from_slice(&cv.to_le_bytes()); wtr.extend_from_slice(&(cb.len() as u32).to_le_bytes()); wtr.extend_from_slice(cb); } wtr.extend_from_slice(&(default_body.len() as u32).to_le_bytes()); wtr.extend_from_slice(default_body); },
+            #[cfg(not(feature = "alloc"))]
+            Operation::Switch{..} => { /* alloc disabled: cannot emit */ },
     }
     wtr.into_iter()
   }

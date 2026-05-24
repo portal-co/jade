@@ -403,6 +403,61 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         Ok(Reflect::apply(fn_val.unchecked_ref::<Function>(), &JsValue::UNDEFINED, &call_args)
             .unwrap_or(JsValue::UNDEFINED))
     }
+
+    fn op_bool(&self, val: bool) -> JsValue { JsValue::from_bool(val) }
+
+    fn op_eq(&self, a: JsValue, b: JsValue) -> JsValue { JsValue::from_bool(a == b) }
+    fn op_ne(&self, a: JsValue, b: JsValue) -> JsValue { JsValue::from_bool(a != b) }
+    fn op_lt(&self, a: JsValue, b: JsValue) -> JsValue {
+        JsValue::from_bool(a.as_f64().zip(b.as_f64()).map_or(false, |(a, b)| a < b))
+    }
+    fn op_le(&self, a: JsValue, b: JsValue) -> JsValue {
+        JsValue::from_bool(a.as_f64().zip(b.as_f64()).map_or(false, |(a, b)| a <= b))
+    }
+    fn op_gt(&self, a: JsValue, b: JsValue) -> JsValue {
+        JsValue::from_bool(a.as_f64().zip(b.as_f64()).map_or(false, |(a, b)| a > b))
+    }
+    fn op_ge(&self, a: JsValue, b: JsValue) -> JsValue {
+        JsValue::from_bool(a.as_f64().zip(b.as_f64()).map_or(false, |(a, b)| a >= b))
+    }
+
+    fn op_sel(&self, cond: JsValue, then: JsValue, else_: JsValue) -> JsValue {
+        if cond.is_truthy() { then } else { else_ }
+    }
+
+    // The interpreter runs the body once per fixpoint call; a future JIT backend
+    // will loop until the output value stabilises.
+    fn fixpoint<Ctx, F>(&mut self, ctx: &mut Ctx, init: JsValue, mut body: F) -> Result<JsValue, JsValue>
+    where F: FnMut(&mut Self, &mut Ctx, JsValue) -> Result<JsValue, JsValue> {
+        body(self, ctx, init)
+    }
+
+    fn if_op<Ctx, FT, FE>(
+        &mut self, ctx: &mut Ctx, cond: JsValue, then_body: FT, else_body: FE,
+    ) -> Result<JsValue, JsValue>
+    where
+        FT: FnOnce(&mut Self, &mut Ctx) -> Result<JsValue, JsValue>,
+        FE: FnOnce(&mut Self, &mut Ctx) -> Result<JsValue, JsValue>,
+    {
+        if cond.is_truthy() { then_body(self, ctx) } else { else_body(self, ctx) }
+    }
+
+    fn switch_op<Ctx, F, D>(
+        &mut self, ctx: &mut Ctx, val: JsValue,
+        cases: impl IntoIterator<Item = (u32, F)>, default_body: D,
+    ) -> Result<JsValue, JsValue>
+    where
+        F: FnOnce(&mut Self, &mut Ctx) -> Result<JsValue, JsValue>,
+        D: FnOnce(&mut Self, &mut Ctx) -> Result<JsValue, JsValue>,
+    {
+        let tag = val.as_f64().map(|v| v as u32);
+        for (cv, branch) in cases {
+            if tag == Some(cv) {
+                return branch(self, ctx);
+            }
+        }
+        default_body(self, ctx)
+    }
 }
 
 // ---------------------------------------------------------------------------

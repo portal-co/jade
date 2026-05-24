@@ -12,6 +12,17 @@ export const opcodes: { [Op in Opcode]: OpcodeInfo } = freeze({
   LITOBJ:     freeze({ id: 9,  args: "object"   }),  // [i32 c][spread?][pairs…][LSB key]
   NEW_TARGET: freeze({ id: 10, args: "dest"     }),  // [raw dest]
   CALL:       freeze({ id: 11, args: "call"     }),  // [LSB fn][raw n][LSB args…][raw dest]
+  BOOL:       freeze({ id: 12, args: "bool"     }),  // [raw val (0/1)][raw dest]
+  EQ:         freeze({ id: 13, args: "binop"    }),  // [LSB a][LSB b][raw dest]
+  NE:         freeze({ id: 14, args: "binop"    }),  // [LSB a][LSB b][raw dest]
+  LT:         freeze({ id: 15, args: "binop"    }),  // [LSB a][LSB b][raw dest]
+  LE:         freeze({ id: 16, args: "binop"    }),  // [LSB a][LSB b][raw dest]
+  GT:         freeze({ id: 17, args: "binop"    }),  // [LSB a][LSB b][raw dest]
+  GE:         freeze({ id: 18, args: "binop"    }),  // [LSB a][LSB b][raw dest]
+  SEL:        freeze({ id: 19, args: "sel"      }),  // [LSB cond][LSB then][LSB else_][raw dest]
+  FIXPOINT:   freeze({ id: 20, args: "fixpoint_block" }),  // [raw body_len][body bytes...]
+  IF:         freeze({ id: 21, args: "if_block" }),  // [LSB cond][raw then_len][raw else_len][then...][else...]
+  SWITCH:     freeze({ id: 22, args: "switch_block" }), // [LSB val][raw n][n×(raw case_val, raw len, body...)][raw default_len][default...]
 });
 export type Opcode =
   | "RET"
@@ -25,10 +36,22 @@ export type Opcode =
   | "STR"
   | "LITOBJ"
   | "NEW_TARGET"
-  | "CALL";
+  | "CALL"
+  | "BOOL"
+  | "EQ"
+  | "NE"
+  | "LT"
+  | "LE"
+  | "GT"
+  | "GE"
+  | "SEL"
+  | "FIXPOINT"
+  | "IF"
+  | "SWITCH";
 export type OpcodeInfo = {
   id: number;
-  args: "src" | "src_dest" | "dest" | "fn" | "lit32" | "array" | "object" | "call";
+  args: "src" | "src_dest" | "dest" | "fn" | "lit32" | "array" | "object" | "call"
+      | "bool" | "binop" | "sel" | "fixpoint_block" | "if_block" | "switch_block";
 };
 export type Handler = string;
 export const handlers: { [Op in Opcode]?: Handler} = freeze({
@@ -107,6 +130,48 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                 while(n--) callArgs.push(arg());
                 state[code().getUint32(ip,true)] = apply(fn, undefined, callArgs);
                 ip += 4;
+                break;
+            }`,
+  BOOL: `state[code().getUint32(ip+4,true)]=!!code().getUint32(ip,true);ip+=8;break;`,
+  EQ:   `{ const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a===b; ip+=4; break; }`,
+  NE:   `{ const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a!==b; ip+=4; break; }`,
+  LT:   `{ const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a<b;   ip+=4; break; }`,
+  LE:   `{ const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a<=b;  ip+=4; break; }`,
+  GT:   `{ const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>b;   ip+=4; break; }`,
+  GE:   `{ const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>=b;  ip+=4; break; }`,
+  SEL:  `{ const c=arg(),t=arg(),e=arg(); state[code().getUint32(ip,true)]=c?t:e; ip+=4; break; }`,
+  FIXPOINT: `{
+                const len=code().getUint32(ip,true);ip+=4;
+                execBlock(code,state,ip,len,globalThis,nt,tenant);
+                ip+=len;
+                break;
+            }`,
+  IF:   `{
+                const cond=arg();
+                const tl=code().getUint32(ip,true),el=code().getUint32(ip+4,true);ip+=8;
+                execBlock(code,state,cond?ip:ip+tl,cond?tl:el,globalThis,nt,tenant);
+                ip+=tl+el;
+                break;
+            }`,
+  SWITCH: `{
+                const sv=arg();
+                let n=code().getUint32(ip,true);ip+=4;
+                let matched=false,skip=0;
+                const base=ip;
+                // scan table to find lengths and matching case
+                let scanIp=base;
+                let matchStart=-1,matchLen=0;
+                while(n--){
+                    const cv=code().getUint32(scanIp,true);
+                    const cl=code().getUint32(scanIp+4,true);
+                    scanIp+=8;
+                    if(!matched&&cv===sv){matched=true;matchStart=scanIp;matchLen=cl;}
+                    scanIp+=cl;
+                }
+                const dl=code().getUint32(scanIp,true);scanIp+=4;
+                if(matched){execBlock(code,state,matchStart,matchLen,globalThis,nt,tenant);}
+                else{execBlock(code,state,scanIp,dl,globalThis,nt,tenant);}
+                ip=scanIp+dl;
                 break;
             }`,
 });
