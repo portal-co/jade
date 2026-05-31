@@ -7,16 +7,23 @@ export function genVmTs(opcodes: Record<string, any>, handlers: Record<string, s
       const isGenerator = "gen" in o;
       const functionName = ({ isAsync: ak_ = isAsync, isGenerator: gk_ = isGenerator }: { isAsync?: boolean; isGenerator?: boolean }) =>
         `runVirtualized${ak_ ? "A" : ""}${gk_ ? "G" : ""}`;
+      const self = functionName({});
+      // How a block body re-enters this variant: generators delegate with
+      // `yield*`, async functions await, sync functions call directly.
+      const drive = isGenerator ? "yield* " : isAsync ? "await " : "";
+      // Substitute the block-handler placeholders for this variant.
+      const subst = (s: string) => s.replaceAll("__DRIVE__", drive).replaceAll("__SELF__", self);
       const parameters = `(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant})),unshift(args,state),unshift(args,code),args)`;
-      return `
+      return subst(`
 export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualized${
         isAsync ? "A" : ""
       }${
         isGenerator ? "G" : ""
-      }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant},...args: any[]): ${
+      }(code: () => DataView, state: {[a: number]: any},{ip=0,end=undefined,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,end?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant},...args: any[]): ${
         isAsync ? (isGenerator ? `AsyncGenerator<any,any,any>` : `Promise<any>`) : `any`
       }{
     for(;;){
+        if(end!==undefined && ip>=end) return BLOCK_DONE;
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
             const val = code().getUint32(ip,true);
@@ -55,32 +62,9 @@ export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualize
         .join("")}
         }
     }
-}`;
+}`);
     })
     .join("\n");
-
-  // execBlock runs a sub-slice of bytecode in the current sync VM variant,
-  // sharing the same state object. Block opcodes (FIXPOINT, IF, SWITCH) use this.
-  const execBlockHelper = `
-function execBlock(code: () => DataView, state: {[a: number]: any}, start: number, len: number, globalThis: _globalThis, nt: any, tenant: Tenant): void {
-    let ip = start;
-    const end = start + len;
-    while(ip < end){
-        const op = code().getUint16(ip,true);ip += 2;
-        const arg = () => {
-            const val = code().getUint32(ip,true);
-            ip += 4;
-            return val & 1 ? state[val >>> 1] : val >>> 1;
-        }
-        switch(op){
-${Reflect.ownKeys(opcodes)
-  .filter((op) => op !== "AWAIT" && op !== "YIELD" && op !== "YIELDSTAR" && op !== "RET")
-  .map((op) => `            case ${opcodes[op].id}: ${handlers[op]}`)
-  .join("")}
-            default: break;
-        }
-    }
-}`;
 
   return `
 /* This is GENERATED code by \`regen.ts\` */
@@ -90,6 +74,8 @@ const {create,defineProperties,freeze} = Object;
 const {fromCodePoint} = String;
 type _globalThis = typeof globalThis;
 const unshift = Array.prototype.unshift.call.bind(Array.prototype.unshift);
-${execBlockHelper}
+// Sentinel returned by a VM variant when it reaches its block end-bound (as
+// opposed to a RET, which returns the actual value to propagate to the caller).
+const BLOCK_DONE: unique symbol = Symbol("BLOCK_DONE");
 ${vmcode}`;
 }

@@ -265,6 +265,30 @@ mod tests {
     }
 
     #[test]
+    fn test_while_operation() {
+        use alloc::vec::Vec;
+
+        // Body is an arbitrary inner op block (a Lit32 here).
+        let body: Vec<u8> = Operation::Lit32 { dest: 3, val: 7 }.emit().collect();
+        let while_op = Operation::While {
+            cond: Operand::StateRef(0),
+            body: body.clone(),
+            next: Operand::StateRef(0),
+        };
+
+        let bytes: Vec<u8> = while_op.emit().collect();
+        let (parsed_op, remaining) = Operation::parse(&bytes).unwrap();
+        assert!(remaining.is_empty());
+        if let Operation::While { cond, body: pbody, next } = parsed_op {
+            assert_eq!(cond, Operand::StateRef(0));
+            assert_eq!(next, Operand::StateRef(0));
+            assert_eq!(pbody, body);
+        } else {
+            panic!("Expected While");
+        }
+    }
+
+    #[test]
     fn test_legacy_encode_functions() {
         // Test compatibility with existing encode_lsb function
         assert_eq!(encode_lsb(42, true), Operand::Literal(42).encode());

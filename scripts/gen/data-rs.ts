@@ -30,8 +30,8 @@ function enumVariant(name: string, info: any): string {
       return `    #[cfg(feature = "alloc")]\n    ${v}{ c: crate::SignedOperand, pairs: Vec<(crate::Operand, crate::Operand)>, key: crate::Operand },`;
     case "call":
       return `    #[cfg(feature = "alloc")]\n    ${v}{ fn_op: crate::Operand, args: Vec<crate::Operand>, dest: u32 },`;
-    case "fixpoint_block":
-      return `    #[cfg(feature = "alloc")]\n    ${v}(Vec<u8>),`;
+    case "while_block":
+      return `    #[cfg(feature = "alloc")]\n    ${v} { cond: crate::Operand, body: Vec<u8>, next: crate::Operand },`;
     case "if_block":
       return `    #[cfg(feature = "alloc")]\n    ${v} { cond: crate::Operand, then_body: Vec<u8>, else_body: Vec<u8> },`;
     case "switch_block":
@@ -76,9 +76,9 @@ function parseArm(name: string, info: any): string {
             ${id} => { let (fn_r,no)=read_u32_le(buf,off)?; off=no; let (len,no)=read_u32_le(buf,off)?; off=no; let mut args=Vec::with_capacity(len as usize); for _ in 0..len { let (x,no2)=read_u32_le(buf,off)?; off=no2; args.push(crate::Operand::decode(x)); } let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::${v}{ fn_op: crate::Operand::decode(fn_r), args, dest }, &buf[off..])) },
             #[cfg(not(feature = "alloc"))]
             ${id} => { return None },`;
-    case "fixpoint_block":
+    case "while_block":
       return `            #[cfg(feature = "alloc")]
-            ${id} => { let (len,no)=read_u32_le(buf,off)?; off=no; if off+len as usize > buf.len() { return None; } let body=buf[off..off+len as usize].to_vec(); off+=len as usize; Some((Operation::${v}(body), &buf[off..])) },
+            ${id} => { let (cond_r,no)=read_u32_le(buf,off)?; off=no; let (len,no)=read_u32_le(buf,off)?; off=no; if off+len as usize > buf.len() { return None; } let body=buf[off..off+len as usize].to_vec(); off+=len as usize; let (next_r,no)=read_u32_le(buf,off)?; off=no; Some((Operation::${v}{ cond: crate::Operand::decode(cond_r), body, next: crate::Operand::decode(next_r) }, &buf[off..])) },
             #[cfg(not(feature = "alloc"))]
             ${id} => { return None },`;
     case "if_block":
@@ -132,11 +132,11 @@ function emitArm(name: string, info: any): string {
             Operation::${v}{fn_op, args, dest} => { ${hdr} wtr.extend_from_slice(&fn_op.encode().to_le_bytes()); wtr.extend_from_slice(&(args.len() as u32).to_le_bytes()); for x in args { wtr.extend_from_slice(&x.encode().to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },
             #[cfg(not(feature = "alloc"))]
             Operation::${v}{..} => { /* alloc disabled: cannot emit */ },`;
-    case "fixpoint_block":
+    case "while_block":
       return `            #[cfg(feature = "alloc")]
-            Operation::${v}(body) => { ${hdr} wtr.extend_from_slice(&(body.len() as u32).to_le_bytes()); wtr.extend_from_slice(&body); },
+            Operation::${v}{cond, body, next} => { ${hdr} wtr.extend_from_slice(&cond.encode().to_le_bytes()); wtr.extend_from_slice(&(body.len() as u32).to_le_bytes()); wtr.extend_from_slice(&body); wtr.extend_from_slice(&next.encode().to_le_bytes()); },
             #[cfg(not(feature = "alloc"))]
-            Operation::${v}(..) => { /* alloc disabled: cannot emit */ },`;
+            Operation::${v}{..} => { /* alloc disabled: cannot emit */ },`;
     case "if_block":
       return `            #[cfg(feature = "alloc")]
             Operation::${v}{cond, then_body, else_body} => { ${hdr} wtr.extend_from_slice(&cond.encode().to_le_bytes()); wtr.extend_from_slice(&(then_body.len() as u32).to_le_bytes()); wtr.extend_from_slice(&(else_body.len() as u32).to_le_bytes()); wtr.extend_from_slice(&then_body); wtr.extend_from_slice(&else_body); },
@@ -188,11 +188,11 @@ function genArm(name: string, info: any): string {
             Operation::${v}{fn_op, args, dest} => { ${hdr} for b in fn_op.encode().to_le_bytes() { yield_! b; } for b in (args.len() as u32).to_le_bytes() { yield_! b; } for x in args { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.to_le_bytes() { yield_! b; } },
             #[cfg(not(feature = "alloc"))]
             Operation::${v}{..} => { /* alloc disabled: cannot emit */ },`;
-    case "fixpoint_block":
+    case "while_block":
       return `            #[cfg(feature = "alloc")]
-            Operation::${v}(body) => { ${hdr} for b in (body.len() as u32).to_le_bytes() { yield_! b; } for b in &body { yield_! *b; } },
+            Operation::${v}{cond, body, next} => { ${hdr} for b in cond.encode().to_le_bytes() { yield_! b; } for b in (body.len() as u32).to_le_bytes() { yield_! b; } for b in &body { yield_! *b; } for b in next.encode().to_le_bytes() { yield_! b; } },
             #[cfg(not(feature = "alloc"))]
-            Operation::${v}(..) => { /* alloc disabled: cannot emit */ },`;
+            Operation::${v}{..} => { /* alloc disabled: cannot emit */ },`;
     case "if_block":
       return `            #[cfg(feature = "alloc")]
             Operation::${v}{cond, then_body, else_body} => { ${hdr} for b in cond.encode().to_le_bytes() { yield_! b; } for b in (then_body.len() as u32).to_le_bytes() { yield_! b; } for b in (else_body.len() as u32).to_le_bytes() { yield_! b; } for b in &then_body { yield_! *b; } for b in &else_body { yield_! *b; } },

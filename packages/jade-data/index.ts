@@ -20,7 +20,7 @@ export const opcodes: { [Op in Opcode]: OpcodeInfo } = freeze({
   GT:         freeze({ id: 17, args: "binop"    }),  // [LSB a][LSB b][raw dest]
   GE:         freeze({ id: 18, args: "binop"    }),  // [LSB a][LSB b][raw dest]
   SEL:        freeze({ id: 19, args: "sel"      }),  // [LSB cond][LSB then][LSB else_][raw dest]
-  FIXPOINT:   freeze({ id: 20, args: "fixpoint_block" }),  // [raw body_len][body bytes...]
+  WHILE:      freeze({ id: 20, args: "while_block" }),  // [LSB cond][raw body_len][body bytes...][LSB next]
   IF:         freeze({ id: 21, args: "if_block" }),  // [LSB cond][raw then_len][raw else_len][then...][else...]
   SWITCH:     freeze({ id: 22, args: "switch_block" }), // [LSB val][raw n][n×(raw case_val, raw len, body...)][raw default_len][default...]
 });
@@ -45,13 +45,13 @@ export type Opcode =
   | "GT"
   | "GE"
   | "SEL"
-  | "FIXPOINT"
+  | "WHILE"
   | "IF"
   | "SWITCH";
 export type OpcodeInfo = {
   id: number;
   args: "src" | "src_dest" | "dest" | "fn" | "lit32" | "array" | "object" | "call"
-      | "bool" | "binop" | "sel" | "fixpoint_block" | "if_block" | "switch_block";
+      | "bool" | "binop" | "sel" | "while_block" | "if_block" | "switch_block";
 };
 export type Handler = string;
 export const handlers: { [Op in Opcode]?: Handler} = freeze({
@@ -140,27 +140,36 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
   GT:   `{ const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>b;   ip+=4; break; }`,
   GE:   `{ const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>=b;  ip+=4; break; }`,
   SEL:  `{ const c=arg(),t=arg(),e=arg(); state[code().getUint32(ip,true)]=c?t:e; ip+=4; break; }`,
-  FIXPOINT: `{
+  WHILE: `{
+                // [LSB cond][raw body_len][body...][LSB next]
+                const condRaw=code().getUint32(ip,true);ip+=4;
                 const len=code().getUint32(ip,true);ip+=4;
-                execBlock(code,state,ip,len,globalThis,nt,tenant);
-                ip+=len;
+                const body=ip;ip+=len;
+                const nextRaw=code().getUint32(ip,true);ip+=4;
+                const evalRaw=(x:number)=> x&1 ? state[x>>>1] : x>>>1;
+                let c=evalRaw(condRaw);
+                while(c){
+                    const r=__DRIVE____SELF__(code,state,{ip:body,end:body+len,globalThis,nt,tenant});
+                    if(r!==BLOCK_DONE) return r;
+                    c=evalRaw(nextRaw);
+                }
                 break;
             }`,
   IF:   `{
                 const cond=arg();
                 const tl=code().getUint32(ip,true),el=code().getUint32(ip+4,true);ip+=8;
-                execBlock(code,state,cond?ip:ip+tl,cond?tl:el,globalThis,nt,tenant);
+                const start=cond?ip:ip+tl,len=cond?tl:el;
+                const r=__DRIVE____SELF__(code,state,{ip:start,end:start+len,globalThis,nt,tenant});
+                if(r!==BLOCK_DONE) return r;
                 ip+=tl+el;
                 break;
             }`,
   SWITCH: `{
                 const sv=arg();
                 let n=code().getUint32(ip,true);ip+=4;
-                let matched=false,skip=0;
-                const base=ip;
                 // scan table to find lengths and matching case
-                let scanIp=base;
-                let matchStart=-1,matchLen=0;
+                let scanIp=ip;
+                let matched=false,matchStart=-1,matchLen=0;
                 while(n--){
                     const cv=code().getUint32(scanIp,true);
                     const cl=code().getUint32(scanIp+4,true);
@@ -169,8 +178,9 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                     scanIp+=cl;
                 }
                 const dl=code().getUint32(scanIp,true);scanIp+=4;
-                if(matched){execBlock(code,state,matchStart,matchLen,globalThis,nt,tenant);}
-                else{execBlock(code,state,scanIp,dl,globalThis,nt,tenant);}
+                const start=matched?matchStart:scanIp,len=matched?matchLen:dl;
+                const r=__DRIVE____SELF__(code,state,{ip:start,end:start+len,globalThis,nt,tenant});
+                if(r!==BLOCK_DONE) return r;
                 ip=scanIp+dl;
                 break;
             }`,

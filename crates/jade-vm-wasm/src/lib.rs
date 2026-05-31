@@ -425,11 +425,15 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         if cond.is_truthy() { then } else { else_ }
     }
 
-    // The interpreter runs the body once per fixpoint call; a future JIT backend
-    // will loop until the output value stabilises.
-    fn fixpoint<Ctx, F>(&mut self, ctx: &mut Ctx, init: JsValue, mut body: F) -> Result<JsValue, JsValue>
-    where F: FnMut(&mut Self, &mut Ctx, JsValue) -> Result<JsValue, JsValue> {
-        body(self, ctx, init)
+    // Run the loop body while the condition value is truthy; `init` is the
+    // initial condition and each `body` call returns the next condition value.
+    fn while_op<Ctx, F>(&mut self, ctx: &mut Ctx, init: JsValue, mut body: F) -> Result<JsValue, JsValue>
+    where F: FnMut(&mut Self, &mut Ctx) -> Result<JsValue, JsValue> {
+        let mut c = init;
+        while c.is_truthy() {
+            c = body(self, ctx)?;
+        }
+        Ok(c)
     }
 
     fn if_op<Ctx, FT, FE>(
@@ -561,7 +565,7 @@ fn run_sync(
                 platform.flush();
                 return create_sync_gen(code, state, old_ip, global_this, nt, tenant);
             }
-            _ => jade_vm_core::exec_op(op, code, &mut platform)?,
+            _ => jade_vm_core::exec_op(op, code, &mut platform, &mut ())?,
         }
     }
 }
@@ -603,7 +607,7 @@ async fn run_async_internal(
                 platform.flush();
                 return Ok(create_async_gen(code, state, old_ip, global_this, nt, tenant)?);
             }
-            _ => jade_vm_core::exec_op(op, code, &mut platform)?,
+            _ => jade_vm_core::exec_op(op, code, &mut platform, &mut ())?,
         }
     }
 }
@@ -675,7 +679,7 @@ fn gen_step_sync(m: &mut GenMachine, sent: JsValue) -> Result<StepResult, JsValu
                 m.delegating = Some((sub, dest));
                 return gen_step_sync(m, JsValue::UNDEFINED);
             }
-            _ => jade_vm_core::exec_op(op, &code, &mut platform)?,
+            _ => jade_vm_core::exec_op(op, &code, &mut platform, &mut ())?,
         }
     }
 }
@@ -746,7 +750,7 @@ async fn gen_step_async(
                 let _ = old_ip;
             }
             _ => {
-                jade_vm_core::exec_op(op, &code, &mut platform)?;
+                jade_vm_core::exec_op(op, &code, &mut platform, &mut ())?;
                 let _ = old_ip;
             }
         }

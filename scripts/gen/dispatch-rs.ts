@@ -119,15 +119,19 @@ function execArm(name: string, args: string): string | null {
 
 function execBlockArm(name: string, args: string): string | null {
   const v = pascal(name);
-  // Helper snippet: interpret all ops in a byte slice, writing results to state via exec_op.
-  // `code` is `Copy` (&[u8]) so it is safe to capture in move closures.
-  const runBody = (slice: string) =>
-    `{ let mut rem: &[u8] = ${slice}; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p)?; } Ok(p.undefined()) }`;
+  // Helper snippet: interpret all ops in a byte slice, threading the `&mut Ctx`
+  // (`c`) through the recursive `exec_op` call. `code` is `Copy` (&[u8]) so it is
+  // safe to capture in move closures.
+  const runOps = (slice: string) =>
+    `{ let mut rem: &[u8] = ${slice}; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } }`;
   switch (args) {
-    case "fixpoint_block":
-      return `        Operation::${v}(body) => {
-            let init = platform.undefined();
-            let result = platform.fixpoint(ctx, init, |p, _c, _val| ${runBody("&body")})?;
+    case "while_block":
+      return `        Operation::${v} { cond, body, next } => {
+            let init = resolve(cond, platform);
+            let result = platform.while_op(ctx, init, |p, c| {
+                ${runOps("&body")}
+                Ok(resolve(next, p))
+            })?;
             let _ = result;
             Ok(())
         }`;
@@ -137,8 +141,8 @@ function execBlockArm(name: string, args: string): string | null {
             let result = platform.if_op(
                 ctx,
                 cond_val,
-                |p, _c| ${runBody("&then_body")},
-                |p, _c| ${runBody("&else_body")},
+                |p, c| { ${runOps("&then_body")} Ok(p.undefined()) },
+                |p, c| { ${runOps("&else_body")} Ok(p.undefined()) },
             )?;
             let _ = result;
             Ok(())
@@ -149,8 +153,8 @@ function execBlockArm(name: string, args: string): string | null {
             let result = platform.switch_op(
                 ctx,
                 val_v,
-                cases.into_iter().map(|(cv, cb)| (cv, move |p: &mut P, _c: &mut Ctx| ${runBody("&cb")})),
-                |p: &mut P, _c: &mut Ctx| ${runBody("&default_body")},
+                cases.into_iter().map(|(cv, cb)| (cv, move |p: &mut P, c: &mut Ctx| { ${runOps("&cb")} Ok(p.undefined()) })),
+                |p: &mut P, c: &mut Ctx| { ${runOps("&default_body")} Ok(p.undefined()) },
             )?;
             let _ = result;
             Ok(())
@@ -234,17 +238,18 @@ ${opsMethods}
     // Ctx is a method-level generic so JIT backends can pass a compilation
     // context without it appearing in the trait bounds.
 
-    /// Run ${BT}body${BT} repeatedly, threading ${BT}Self::Value${BT} through each iteration.
-    /// ${BT}body${BT} returns the next value; iteration continues until the implementor
-    /// decides the result is stable.
-    fn fixpoint<Ctx, F>(
+    /// Run a ${BT}while${BT} loop. ${BT}init${BT} is the initial condition value; each
+    /// ${BT}body${BT} call runs the loop body and returns the next condition value.
+    /// Iteration continues while the condition is truthy; the final condition
+    /// value is returned.
+    fn while_op<Ctx, F>(
         &mut self,
         ctx: &mut Ctx,
         init: Self::Value,
         body: F,
     ) -> Result<Self::Value, Self::Error>
     where
-        F: FnMut(&mut Self, &mut Ctx, Self::Value) -> Result<Self::Value, Self::Error>;
+        F: FnMut(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>;
 
     /// Evaluate one of two branches depending on ${BT}cond${BT}, returning the branch value.
     fn if_op<Ctx, FT, FE>(
@@ -284,31 +289,21 @@ where
     }
 }
 
-/// Dispatch a non-loop, non-block ${BT}Operation${BT} through the platform.
+/// Dispatch an ${BT}Operation${BT} through the platform.
 ///
 /// Resolves operands, calls the appropriate ${BT}Ops${BT} method, and writes the
-/// result to the dest slot via ${BT}State::set${BT}.
-/// Returns ${BT}Err${BT} only for unknown or block opcodes (use ${BT}exec_block_op${BT} for those).
-pub fn exec_op<P>(
-    op: Operation,
-    code: &[u8],
-    platform: &mut P,
-) -> Result<(), <P as Ops>::Error>
-where
-    P: State + Ops<Value = <P as State>::Value>,
-{
-    match op {
-${execArms}
-        _ => Err(P::err("exec_op: unexpected opcode")),
-    }
-}
-
-/// Dispatch a block ${BT}Operation${BT} (FIXPOINT, IF, SWITCH) through the platform.
+/// result to the dest slot via ${BT}State::set${BT}. Block opcodes (WHILE, IF,
+/// SWITCH) carry embedded bytecode; their bodies are wrapped in closures (which
+/// recurse back into ${BT}exec_op${BT}) and forwarded to the matching ${BT}Ops${BT}
+/// control-flow method.
 ///
-/// Block opcodes contain embedded bytecode; this function wraps the body bytes
-/// in closures and forwards them to the appropriate ${BT}Ops${BT} control-flow method.
-/// Pass ${BT}ctx: &mut ()${BT} for the interpreter; a JIT backend passes its own context.
-pub fn exec_block_op<P, Ctx>(
+/// ${BT}ctx${BT} is threaded into the control-flow handlers as a method-level
+/// generic: the interpreter passes ${BT}&mut ()${BT}; a JIT backend passes its own
+/// compilation context.
+///
+/// Returns ${BT}Err${BT} only for the loop-level opcodes (RET/AWAIT/YIELD/YIELDSTAR),
+/// which the VM loop handles directly before reaching here.
+pub fn exec_op<P, Ctx>(
     op: Operation,
     code: &[u8],
     platform: &mut P,
@@ -318,8 +313,9 @@ where
     P: State + Ops<Value = <P as State>::Value>,
 {
     match op {
+${execArms}
 ${execBlockArms}
-        _ => Err(P::err("exec_block_op: not a block opcode")),
+        _ => Err(P::err("exec_op: unexpected opcode")),
     }
 }
 `;

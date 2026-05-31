@@ -63,17 +63,18 @@ pub trait Ops {
     // Ctx is a method-level generic so JIT backends can pass a compilation
     // context without it appearing in the trait bounds.
 
-    /// Run `body` repeatedly, threading `Self::Value` through each iteration.
-    /// `body` returns the next value; iteration continues until the implementor
-    /// decides the result is stable.
-    fn fixpoint<Ctx, F>(
+    /// Run a `while` loop. `init` is the initial condition value; each
+    /// `body` call runs the loop body and returns the next condition value.
+    /// Iteration continues while the condition is truthy; the final condition
+    /// value is returned.
+    fn while_op<Ctx, F>(
         &mut self,
         ctx: &mut Ctx,
         init: Self::Value,
         body: F,
     ) -> Result<Self::Value, Self::Error>
     where
-        F: FnMut(&mut Self, &mut Ctx, Self::Value) -> Result<Self::Value, Self::Error>;
+        F: FnMut(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>;
 
     /// Evaluate one of two branches depending on `cond`, returning the branch value.
     fn if_op<Ctx, FT, FE>(
@@ -113,15 +114,25 @@ where
     }
 }
 
-/// Dispatch a non-loop, non-block `Operation` through the platform.
+/// Dispatch an `Operation` through the platform.
 ///
 /// Resolves operands, calls the appropriate `Ops` method, and writes the
-/// result to the dest slot via `State::set`.
-/// Returns `Err` only for unknown or block opcodes (use `exec_block_op` for those).
-pub fn exec_op<P>(
+/// result to the dest slot via `State::set`. Block opcodes (WHILE, IF,
+/// SWITCH) carry embedded bytecode; their bodies are wrapped in closures (which
+/// recurse back into `exec_op`) and forwarded to the matching `Ops`
+/// control-flow method.
+///
+/// `ctx` is threaded into the control-flow handlers as a method-level
+/// generic: the interpreter passes `&mut ()`; a JIT backend passes its own
+/// compilation context.
+///
+/// Returns `Err` only for the loop-level opcodes (RET/AWAIT/YIELD/YIELDSTAR),
+/// which the VM loop handles directly before reaching here.
+pub fn exec_op<P, Ctx>(
     op: Operation,
     code: &[u8],
     platform: &mut P,
+    ctx: &mut Ctx,
 ) -> Result<(), <P as Ops>::Error>
 where
     P: State + Ops<Value = <P as State>::Value>,
@@ -246,28 +257,12 @@ where
             platform.set(dest, val);
             Ok(())
         }
-        _ => Err(P::err("exec_op: unexpected opcode")),
-    }
-}
-
-/// Dispatch a block `Operation` (FIXPOINT, IF, SWITCH) through the platform.
-///
-/// Block opcodes contain embedded bytecode; this function wraps the body bytes
-/// in closures and forwards them to the appropriate `Ops` control-flow method.
-/// Pass `ctx: &mut ()` for the interpreter; a JIT backend passes its own context.
-pub fn exec_block_op<P, Ctx>(
-    op: Operation,
-    code: &[u8],
-    platform: &mut P,
-    ctx: &mut Ctx,
-) -> Result<(), <P as Ops>::Error>
-where
-    P: State + Ops<Value = <P as State>::Value>,
-{
-    match op {
-        Operation::Fixpoint(body) => {
-            let init = platform.undefined();
-            let result = platform.fixpoint(ctx, init, |p, _c, _val| { let mut rem: &[u8] = &body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p)?; } Ok(p.undefined()) })?;
+        Operation::While { cond, body, next } => {
+            let init = resolve(cond, platform);
+            let result = platform.while_op(ctx, init, |p, c| {
+                { let mut rem: &[u8] = &body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } }
+                Ok(resolve(next, p))
+            })?;
             let _ = result;
             Ok(())
         }
@@ -276,8 +271,8 @@ where
             let result = platform.if_op(
                 ctx,
                 cond_val,
-                |p, _c| { let mut rem: &[u8] = &then_body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p)?; } Ok(p.undefined()) },
-                |p, _c| { let mut rem: &[u8] = &else_body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p)?; } Ok(p.undefined()) },
+                |p, c| { { let mut rem: &[u8] = &then_body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } } Ok(p.undefined()) },
+                |p, c| { { let mut rem: &[u8] = &else_body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } } Ok(p.undefined()) },
             )?;
             let _ = result;
             Ok(())
@@ -287,12 +282,12 @@ where
             let result = platform.switch_op(
                 ctx,
                 val_v,
-                cases.into_iter().map(|(cv, cb)| (cv, move |p: &mut P, _c: &mut Ctx| { let mut rem: &[u8] = &cb; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p)?; } Ok(p.undefined()) })),
-                |p: &mut P, _c: &mut Ctx| { let mut rem: &[u8] = &default_body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p)?; } Ok(p.undefined()) },
+                cases.into_iter().map(|(cv, cb)| (cv, move |p: &mut P, c: &mut Ctx| { { let mut rem: &[u8] = &cb; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } } Ok(p.undefined()) })),
+                |p: &mut P, c: &mut Ctx| { { let mut rem: &[u8] = &default_body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } } Ok(p.undefined()) },
             )?;
             let _ = result;
             Ok(())
         }
-        _ => Err(P::err("exec_block_op: not a block opcode")),
+        _ => Err(P::err("exec_op: unexpected opcode")),
     }
 }
