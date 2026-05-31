@@ -71,13 +71,4 @@ export class Tenant implements Tenant_ {
     }
   }
 
-  // --- Deprecated, dead GC hooks -------------------------------------------
-  // The WeakMap shadow is collected natively, so no manual GC is needed. These
-  // stubs only keep the legacy `gc.ts` GCReactor compiling; that machinery is
-  // slated to move into the `semble` polyfill library (for environments whose
-  // WeakMap is a non-collectable polyfill).
-  static needsGCHooks = false;
-  static wipe<T>(a: T): T {
-    return a;
-  }
 }
