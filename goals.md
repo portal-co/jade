@@ -1,5 +1,26 @@
 # Jade VM – Goals
 
+## Tenants (object manager / isolation)
+
+The `tenant` isolates a virtual environment by acting as an **object manager**:
+the VM never touches object properties directly — it goes through
+`tenant.{make,get,set,has,delete,ownKeys,define,assign}` (`packages/jade-js/index.ts`).
+This decouples the property representation from the VM:
+
+- **single-tenant** (`single_tenant.ts`) backs objects natively, mangling only
+  "dirty" (polyfill/camo) keys.
+- **multi-tenant** (`multi_tenant.ts`) keeps a private `WeakMap` shadow per
+  tenant; `make()` returns a bare empty shell, so tenant properties are
+  invisible to the host and other tenants ("foreign by nature") and are
+  collected by the native GC (no manual mark/sweep). The legacy `gc.ts`
+  `GCReactor` is retained only as dead code, slated to move to `semble`.
+
+Property access uses the `GET` / `SET` opcodes (`op_get` / `op_set`), which
+delegate to `tenant.get` / `tenant.set`; object literals (`LITOBJ`) build via
+`tenant.make` + `tenant.set` (+ `tenant.assign` for spread), and the define path
+uses `tenant.define`. Every backend (TS interpreter, Rust wasm, JIT) routes
+object operations through the tenant.
+
 ## Dispatch
 
 A single `exec_op<P, Ctx>(op, code, platform, ctx)` (generated into

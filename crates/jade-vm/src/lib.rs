@@ -289,6 +289,47 @@ mod tests {
     }
 
     #[test]
+    fn test_member_get_set_operations() {
+        use alloc::vec::Vec;
+
+        let get = Operation::Get {
+            obj: Operand::StateRef(1),
+            key: Operand::Literal(7),
+            dest: 3,
+        };
+        let bytes: Vec<u8> = get.emit().collect();
+        let (parsed, rest) = Operation::parse(&bytes).unwrap();
+        assert!(rest.is_empty());
+        match parsed {
+            Operation::Get { obj, key, dest } => {
+                assert_eq!(obj, Operand::StateRef(1));
+                assert_eq!(key, Operand::Literal(7));
+                assert_eq!(dest, 3);
+            }
+            _ => panic!("Expected Get"),
+        }
+
+        let set = Operation::Set {
+            obj: Operand::StateRef(1),
+            key: Operand::Literal(7),
+            val: Operand::StateRef(2),
+            dest: 4,
+        };
+        let bytes: Vec<u8> = set.emit().collect();
+        let (parsed, rest) = Operation::parse(&bytes).unwrap();
+        assert!(rest.is_empty());
+        match parsed {
+            Operation::Set { obj, key, val, dest } => {
+                assert_eq!(obj, Operand::StateRef(1));
+                assert_eq!(key, Operand::Literal(7));
+                assert_eq!(val, Operand::StateRef(2));
+                assert_eq!(dest, 4);
+            }
+            _ => panic!("Expected Set"),
+        }
+    }
+
+    #[test]
     fn test_legacy_encode_functions() {
         // Test compatibility with existing encode_lsb function
         assert_eq!(encode_lsb(42, true), Operand::Literal(42).encode());

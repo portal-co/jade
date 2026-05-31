@@ -70,16 +70,16 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 ip+=4;
                 break;
             }case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {__proto__: null} : {
-                    __proto__: null,
-                    ...(c=-c,arg())
-                }));
+                let c=code().getInt32(ip,true);ip+=4;
+                const obj=tenant.make(null);
+                if(c<0){c=-c;tenant.assign(obj,arg());}
                 while(c--){
-                    obj[tenant.clean(obj,arg())]=arg();
+                    const k=arg();
+                    tenant.set(obj,k,arg());
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    defineProperties(state[key >>> 1],obj);
+                    tenant.define(state[key >>> 1],obj);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -134,7 +134,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 if(r!==BLOCK_DONE) return r;
                 ip=scanIp+dl;
                 break;
-            }
+            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.get(o,k); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); tenant.set(o,k,v); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
     }
 }
@@ -199,16 +199,16 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 ip+=4;
                 break;
             }case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {__proto__: null} : {
-                    __proto__: null,
-                    ...(c=-c,arg())
-                }));
+                let c=code().getInt32(ip,true);ip+=4;
+                const obj=tenant.make(null);
+                if(c<0){c=-c;tenant.assign(obj,arg());}
                 while(c--){
-                    obj[tenant.clean(obj,arg())]=arg();
+                    const k=arg();
+                    tenant.set(obj,k,arg());
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    defineProperties(state[key >>> 1],obj);
+                    tenant.define(state[key >>> 1],obj);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -263,7 +263,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 if(r!==BLOCK_DONE) return r;
                 ip=scanIp+dl;
                 break;
-            }
+            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.get(o,k); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); tenant.set(o,k,v); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
     }
 }
@@ -328,16 +328,16 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 ip+=4;
                 break;
             }case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {__proto__: null} : {
-                    __proto__: null,
-                    ...(c=-c,arg())
-                }));
+                let c=code().getInt32(ip,true);ip+=4;
+                const obj=tenant.make(null);
+                if(c<0){c=-c;tenant.assign(obj,arg());}
                 while(c--){
-                    obj[tenant.clean(obj,arg())]=arg();
+                    const k=arg();
+                    tenant.set(obj,k,arg());
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    defineProperties(state[key >>> 1],obj);
+                    tenant.define(state[key >>> 1],obj);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -392,7 +392,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 if(r!==BLOCK_DONE) return r;
                 ip=scanIp+dl;
                 break;
-            }
+            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.get(o,k); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); tenant.set(o,k,v); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
     }
 }
@@ -457,16 +457,16 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 ip+=4;
                 break;
             }case 9: {
-                let c=code().getInt32(ip,true),obj:any=(ip+=4,(c >= 0 ? {__proto__: null} : {
-                    __proto__: null,
-                    ...(c=-c,arg())
-                }));
+                let c=code().getInt32(ip,true);ip+=4;
+                const obj=tenant.make(null);
+                if(c<0){c=-c;tenant.assign(obj,arg());}
                 while(c--){
-                    obj[tenant.clean(obj,arg())]=arg();
+                    const k=arg();
+                    tenant.set(obj,k,arg());
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    defineProperties(state[key >>> 1],obj);
+                    tenant.define(state[key >>> 1],obj);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -521,7 +521,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 if(r!==BLOCK_DONE) return r;
                 ip=scanIp+dl;
                 break;
-            }
+            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.get(o,k); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); tenant.set(o,k,v); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
     }
 }

@@ -249,7 +249,7 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
     }
 
     fn define_properties(&self, target: &JsVar, props: JsVar) {
-        self.line(format!("Object.defineProperties({target}, {props});"));
+        self.line(format!("tenant.define({target}, {props});"));
     }
 
     fn op_global(&self) -> JsVar {
@@ -300,14 +300,14 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
     }
 
     fn op_litobj(&self, spread: Option<JsVar>, pairs: Vec<(JsVar, JsVar)>) -> JsVar {
+        // Build the object through the tenant object manager.
         let n = self.fresh();
-        match spread {
-            Some(s) => self.line(format!("const v{n} = {{__proto__: null, ...{s}}};")),
-            None => self.line(format!("const v{n} = {{__proto__: null}};")),
+        self.line(format!("const v{n} = tenant.make(null);"));
+        if let Some(s) = spread {
+            self.line(format!("tenant.assign(v{n}, {s});"));
         }
         for (k, v) in pairs {
-            // Mirror the interpreter's `obj[tenant.clean(obj, k)] = v`.
-            self.line(format!("v{n}[tenant.clean(v{n}, {k})] = {v};"));
+            self.line(format!("tenant.set(v{n}, {k}, {v});"));
         }
         JsVar::Var(n)
     }
@@ -350,6 +350,16 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
     }
     fn op_sel(&self, cond: JsVar, then: JsVar, else_: JsVar) -> JsVar {
         self.bind(format!("({cond} ? {then} : {else_})"))
+    }
+
+    fn op_get(&self, obj: JsVar, key: JsVar) -> JsVar {
+        self.bind(format!("tenant.get({obj}, {key})"))
+    }
+
+    fn op_set(&self, obj: JsVar, key: JsVar, val: JsVar) -> JsVar {
+        // Write through the tenant; the assignment evaluates to the value.
+        self.line(format!("tenant.set({obj}, {key}, {val});"));
+        val
     }
 
     fn while_op<Ctx, F>(&mut self, ctx: &mut Ctx, init: JsVar, mut body: F) -> Result<JsVar, String>
@@ -553,6 +563,33 @@ mod tests {
         assert!(kw(1).contains("async function(tenant, nt, ...args)"), "async: {}", kw(1));
         assert!(kw(2).contains("function*(tenant, nt, ...args)"), "gen: {}", kw(2));
         assert!(kw(3).contains("async function*(tenant, nt, ...args)"), "asyncgen: {}", kw(3));
+    }
+
+    #[test]
+    fn emits_object_via_tenant_manager() {
+        // obj = {}; obj[7] = 42; return obj[7];
+        let code = chunk(&[
+            Operation::Lit32 { dest: 0, val: 42 },
+            Operation::Lit32 { dest: 1, val: 7 },
+            Operation::Litobj {
+                c: portal_solutions_jade_vm::SignedOperand::Positive(0),
+                pairs: alloc::vec![],
+                key: Operand::Literal(2), // store the new object into slot 2
+            },
+            Operation::Set {
+                obj: Operand::StateRef(2),
+                key: Operand::StateRef(1),
+                val: Operand::StateRef(0),
+                dest: 3,
+            },
+            Operation::Get { obj: Operand::StateRef(2), key: Operand::StateRef(1), dest: 4 },
+            Operation::Ret(Operand::StateRef(4)),
+        ]);
+        let (js, _reg) = compile(&code, VecRegistry::new()).unwrap();
+        assert!(js.contains("tenant.make(null)"), "got:\n{js}");
+        assert!(js.contains("tenant.set(state[2], state[1], state[0])"), "got:\n{js}");
+        assert!(js.contains("tenant.get(state[2], state[1])"), "got:\n{js}");
+        assert!(!js.contains("tenant.clean"), "got:\n{js}");
     }
 
     #[test]

@@ -24,6 +24,10 @@ function enumVariant(name: string, info: any): string {
       return `    ${v} { a: crate::Operand, b: crate::Operand, dest: u32 },`;
     case "sel":
       return `    ${v} { cond: crate::Operand, then: crate::Operand, else_: crate::Operand, dest: u32 },`;
+    case "member_get":
+      return `    ${v} { obj: crate::Operand, key: crate::Operand, dest: u32 },`;
+    case "member_set":
+      return `    ${v} { obj: crate::Operand, key: crate::Operand, val: crate::Operand, dest: u32 },`;
     case "array":
       return `    #[cfg(feature = "alloc")]\n    ${v}(Vec<crate::Operand>, u32),`;
     case "object":
@@ -61,6 +65,10 @@ function parseArm(name: string, info: any): string {
       return `            ${id} => { let (a,no)=read_u32_le(buf,off)?; off=no; let (b,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::${v}{ a: crate::Operand::decode(a), b: crate::Operand::decode(b), dest }, &buf[off..])) },`;
     case "sel":
       return `            ${id} => { let (cond,no)=read_u32_le(buf,off)?; off=no; let (then,no)=read_u32_le(buf,off)?; off=no; let (else_r,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::${v}{ cond: crate::Operand::decode(cond), then: crate::Operand::decode(then), else_: crate::Operand::decode(else_r), dest }, &buf[off..])) },`;
+    case "member_get":
+      return `            ${id} => { let (obj,no)=read_u32_le(buf,off)?; off=no; let (key,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::${v}{ obj: crate::Operand::decode(obj), key: crate::Operand::decode(key), dest }, &buf[off..])) },`;
+    case "member_set":
+      return `            ${id} => { let (obj,no)=read_u32_le(buf,off)?; off=no; let (key,no)=read_u32_le(buf,off)?; off=no; let (val,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::${v}{ obj: crate::Operand::decode(obj), key: crate::Operand::decode(key), val: crate::Operand::decode(val), dest }, &buf[off..])) },`;
     case "array":
       return `            #[cfg(feature = "alloc")]
             ${id} => { let (len,no)=read_u32_le(buf,off)?; off=no; let mut items=Vec::with_capacity(len as usize); for _ in 0..len { let (x,no2)=read_u32_le(buf,off)?; off=no2; items.push(crate::Operand::decode(x)); } let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::${v}(items, dest), &buf[off..])) },
@@ -117,6 +125,10 @@ function emitArm(name: string, info: any): string {
       return `            Operation::${v}{a, b, dest} => { ${hdr} wtr.extend_from_slice(&a.encode().to_le_bytes()); wtr.extend_from_slice(&b.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },`;
     case "sel":
       return `            Operation::${v}{cond, then, else_, dest} => { ${hdr} wtr.extend_from_slice(&cond.encode().to_le_bytes()); wtr.extend_from_slice(&then.encode().to_le_bytes()); wtr.extend_from_slice(&else_.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },`;
+    case "member_get":
+      return `            Operation::${v}{obj, key, dest} => { ${hdr} wtr.extend_from_slice(&obj.encode().to_le_bytes()); wtr.extend_from_slice(&key.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },`;
+    case "member_set":
+      return `            Operation::${v}{obj, key, val, dest} => { ${hdr} wtr.extend_from_slice(&obj.encode().to_le_bytes()); wtr.extend_from_slice(&key.encode().to_le_bytes()); wtr.extend_from_slice(&val.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },`;
     case "array":
       return `            #[cfg(feature = "alloc")]
             Operation::${v}(items, dest) => { ${hdr} wtr.extend_from_slice(&(items.len() as u32).to_le_bytes()); for x in items { wtr.extend_from_slice(&x.encode().to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },
@@ -173,6 +185,10 @@ function genArm(name: string, info: any): string {
       return `            Operation::${v}{a, b, dest} => { ${hdr} for b2 in a.encode().to_le_bytes() { yield_! b2; } for b2 in b.encode().to_le_bytes() { yield_! b2; } for b2 in dest.to_le_bytes() { yield_! b2; } },`;
     case "sel":
       return `            Operation::${v}{cond, then, else_, dest} => { ${hdr} for b in cond.encode().to_le_bytes() { yield_! b; } for b in then.encode().to_le_bytes() { yield_! b; } for b in else_.encode().to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },`;
+    case "member_get":
+      return `            Operation::${v}{obj, key, dest} => { ${hdr} for b in obj.encode().to_le_bytes() { yield_! b; } for b in key.encode().to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },`;
+    case "member_set":
+      return `            Operation::${v}{obj, key, val, dest} => { ${hdr} for b in obj.encode().to_le_bytes() { yield_! b; } for b in key.encode().to_le_bytes() { yield_! b; } for b in val.encode().to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },`;
     case "array":
       return `            #[cfg(feature = "alloc")]
             Operation::${v}(items, dest) => { ${hdr} for b in (items.len() as u32).to_le_bytes() { yield_! b; } for x in items { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.to_le_bytes() { yield_! b; } },

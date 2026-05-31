@@ -13,6 +13,10 @@ function opsMethod(name: string, args: string): string | null {
       return `    fn ${mn}(&self, a: Self::Value, b: Self::Value) -> Self::Value;`;
     case "sel":
       return `    fn op_sel(&self, cond: Self::Value, then: Self::Value, else_: Self::Value) -> Self::Value;`;
+    case "member_get":
+      return `    fn op_get(&self, obj: Self::Value, key: Self::Value) -> Self::Value;`;
+    case "member_set":
+      return `    fn op_set(&self, obj: Self::Value, key: Self::Value, val: Self::Value) -> Self::Value;`;
     case "fn":
       return `    fn op_fn(&mut self, code: &[u8], variant: Self::Value, closure_args: Self::Value, spanner: Self::Value, j: u32, parent_state: Self::Value) -> Result<Self::Value, Self::Error>;`;
     case "array":
@@ -63,6 +67,23 @@ function execArm(name: string, args: string): string | null {
             let ev = resolve(else_, platform);
             let val = platform.op_sel(cv, tv, ev);
             platform.set(dest, val);
+            Ok(())
+        }`;
+    case "member_get":
+      return `        Operation::${v} { obj, key, dest } => {
+            let o = resolve(obj, platform);
+            let k = resolve(key, platform);
+            let val = platform.op_get(o, k);
+            platform.set(dest, val);
+            Ok(())
+        }`;
+    case "member_set":
+      return `        Operation::${v} { obj, key, val, dest } => {
+            let o = resolve(obj, platform);
+            let k = resolve(key, platform);
+            let v = resolve(val, platform);
+            let r = platform.op_set(o, k, v);
+            platform.set(dest, r);
             Ok(())
         }`;
     case "fn":

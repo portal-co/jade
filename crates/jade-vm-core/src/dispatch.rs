@@ -58,6 +58,8 @@ pub trait Ops {
     fn op_gt(&self, a: Self::Value, b: Self::Value) -> Self::Value;
     fn op_ge(&self, a: Self::Value, b: Self::Value) -> Self::Value;
     fn op_sel(&self, cond: Self::Value, then: Self::Value, else_: Self::Value) -> Self::Value;
+    fn op_get(&self, obj: Self::Value, key: Self::Value) -> Self::Value;
+    fn op_set(&self, obj: Self::Value, key: Self::Value, val: Self::Value) -> Self::Value;
 
     // Control-flow handlers -----------------------------------------------
     // Ctx is a method-level generic so JIT backends can pass a compilation
@@ -255,6 +257,21 @@ where
             let ev = resolve(else_, platform);
             let val = platform.op_sel(cv, tv, ev);
             platform.set(dest, val);
+            Ok(())
+        }
+        Operation::Get { obj, key, dest } => {
+            let o = resolve(obj, platform);
+            let k = resolve(key, platform);
+            let val = platform.op_get(o, k);
+            platform.set(dest, val);
+            Ok(())
+        }
+        Operation::Set { obj, key, val, dest } => {
+            let o = resolve(obj, platform);
+            let k = resolve(key, platform);
+            let v = resolve(val, platform);
+            let r = platform.op_set(o, k, v);
+            platform.set(dest, r);
             Ok(())
         }
         Operation::While { cond, body, next } => {

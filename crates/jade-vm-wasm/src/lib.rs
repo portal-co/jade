@@ -75,16 +75,19 @@ fn make_iter_result(value: JsValue, done: bool) -> JsValue {
     obj
 }
 
-fn tenant_clean(tenant: &JsValue, obj: &JsValue, key: JsValue) -> JsValue {
-    if tenant.is_falsy() {
-        return key;
-    }
-    match Reflect::get(tenant, &JsValue::from_str("clean")) {
+/// Invoke an object-manager method (`make`/`get`/`set`/`define`/`assign`/…) on
+/// the tenant, with `tenant` as the `this` receiver. Returns `undefined` if the
+/// method is missing or throws.
+fn tenant_call(tenant: &JsValue, method: &str, args: &[JsValue]) -> JsValue {
+    match Reflect::get(tenant, &JsValue::from_str(method)) {
         Ok(f) if f.is_function() => {
-            let a = Array::of2(obj, &key);
-            Reflect::apply(f.unchecked_ref::<Function>(), tenant, &a).unwrap_or(key)
+            let a = Array::new();
+            for arg in args {
+                a.push(arg);
+            }
+            Reflect::apply(f.unchecked_ref::<Function>(), tenant, &a).unwrap_or(JsValue::UNDEFINED)
         }
-        _ => key,
+        _ => JsValue::UNDEFINED,
     }
 }
 
@@ -262,7 +265,7 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
     fn err(msg: &'static str) -> JsValue { JsValue::from_str(msg) }
 
     fn define_properties(&self, target: &JsValue, props: JsValue) {
-        js_define_properties(target, &props);
+        tenant_call(self.tenant, "define", &[target.clone(), props]);
     }
 
     fn op_global(&self) -> JsValue {
@@ -352,19 +355,13 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
     }
 
     fn op_litobj(&self, spread: Option<JsValue>, pairs: Vec<(JsValue, JsValue)>) -> JsValue {
-        let obj = if let Some(src) = spread {
-            let base = create_null_obj();
-            js_object_assign(&base, &src);
-            base
-        } else {
-            create_null_obj()
-        };
-
-        for (k, v) in pairs {
-            let ck = tenant_clean(self.tenant, &obj, k);
-            let _ = Reflect::set(&obj, &ck, &v);
+        let obj = tenant_call(self.tenant, "make", &[JsValue::NULL]);
+        if let Some(src) = spread {
+            tenant_call(self.tenant, "assign", &[obj.clone(), src]);
         }
-
+        for (k, v) in pairs {
+            tenant_call(self.tenant, "set", &[obj.clone(), k, v]);
+        }
         obj
     }
 
@@ -423,6 +420,15 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
 
     fn op_sel(&self, cond: JsValue, then: JsValue, else_: JsValue) -> JsValue {
         if cond.is_truthy() { then } else { else_ }
+    }
+
+    fn op_get(&self, obj: JsValue, key: JsValue) -> JsValue {
+        tenant_call(self.tenant, "get", &[obj, key])
+    }
+
+    fn op_set(&self, obj: JsValue, key: JsValue, val: JsValue) -> JsValue {
+        tenant_call(self.tenant, "set", &[obj, key, val.clone()]);
+        val
     }
 
     // Run the loop body while the condition value is truthy; `init` is the
