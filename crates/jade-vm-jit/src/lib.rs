@@ -55,18 +55,59 @@ impl fmt::Display for JsVar {
     }
 }
 
+/// The four Jade function variants, matching the `FN` opcode's `variant`
+/// operand (`0` sync, `1` async, `2` sync generator, `3` async generator).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FnVariant {
+    Sync,
+    Async,
+    SyncGen,
+    AsyncGen,
+}
+
+impl FnVariant {
+    /// The JS declaration keyword for this variant
+    /// (`function`, `async function`, `function*`, `async function*`).
+    pub fn keyword(self) -> &'static str {
+        match self {
+            FnVariant::Sync => "function",
+            FnVariant::Async => "async function",
+            FnVariant::SyncGen => "function*",
+            FnVariant::AsyncGen => "async function*",
+        }
+    }
+}
+
+/// Decode a resolved `variant` value (a `JsVar`) into an [`FnVariant`].
+///
+/// The `FN` opcode's `variant` operand is virtually always a literal `0..=3`,
+/// which `resolve` renders as an inline numeric expression; that case is decoded
+/// statically. A non-literal (dynamic) variant cannot select a declaration form
+/// at emit time, so it falls back to [`FnVariant::Sync`].
+fn fn_variant(v: &JsVar) -> FnVariant {
+    if let JsVar::Expr(s) = v {
+        match s.trim() {
+            "1" => return FnVariant::Async,
+            "2" => return FnVariant::SyncGen,
+            "3" => return FnVariant::AsyncGen,
+            _ => {}
+        }
+    }
+    FnVariant::Sync
+}
+
 /// Sink for functions produced by the `FN` opcode.
 ///
 /// `op_fn` compiles a function body to a statement string and calls
-/// [`register`](FnRegistry::register) with the parameter list (always leading
-/// with `tenant` and `nt`). The returned string is a JS *reference expression*
-/// (e.g. a name like `__fn0`) that the JIT emits where the function value is
-/// needed.
+/// [`register`](FnRegistry::register) with the function `variant` and parameter
+/// list (always leading with `tenant` and `nt`). The returned string is a JS
+/// *reference expression* (e.g. a name like `__fn0`) that the JIT emits where
+/// the function value is needed.
 pub trait FnRegistry {
-    /// Register a function whose parameters are `params` and whose body is the
-    /// statement block `body`. Return a JS expression that evaluates to the
-    /// function (typically the name it was bound to).
-    fn register(&mut self, params: &[&str], body: &str) -> String;
+    /// Register a function of the given `variant` whose parameters are `params`
+    /// and whose body is the statement block `body`. Return a JS expression that
+    /// evaluates to the function (typically the name it was bound to).
+    fn register(&mut self, variant: FnVariant, params: &[&str], body: &str) -> String;
 }
 
 /// A simple [`FnRegistry`] that accumulates `const __fn{n} = function(...){...}`
@@ -92,10 +133,13 @@ impl VecRegistry {
 }
 
 impl FnRegistry for VecRegistry {
-    fn register(&mut self, params: &[&str], body: &str) -> String {
+    fn register(&mut self, variant: FnVariant, params: &[&str], body: &str) -> String {
         let name = format!("__fn{}", self.decls.len());
-        self.decls
-            .push(format!("const {name} = function({}){{\n{body}\n}};", params.join(", ")));
+        self.decls.push(format!(
+            "const {name} = {}({}){{\n{body}\n}};",
+            variant.keyword(),
+            params.join(", ")
+        ));
         name
     }
 }
@@ -215,7 +259,7 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
     fn op_fn(
         &mut self,
         code: &[u8],
-        _variant: JsVar,
+        variant: JsVar,
         _closure_args: JsVar,
         _spanner: JsVar,
         j: u32,
@@ -229,14 +273,15 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
             emit_program(&mut nested, code, j as usize)?;
             format!("const state = Object.create(null);\n{}", nested.emit.into_inner().buf)
         };
-        // The function takes the implicit `tenant`/`nt` first, then its args.
-        // NOTE: closure-slot capture, the variant (sync/async/generator) and
-        // decorator (`spanner`) application are not yet wired in this first
-        // backend — `op_fn` emits a bare reference to a sync function.
-        let reference = self
-            .reg
-            .borrow_mut()
-            .register(&["tenant", "nt", "...args"], &body);
+        // The function takes the implicit `tenant`/`nt` first, then its args,
+        // and is declared with the form matching its variant.
+        // NOTE: closure-slot capture and decorator (`spanner`) application are
+        // not yet wired in this first backend.
+        let reference = self.reg.borrow_mut().register(
+            fn_variant(&variant),
+            &["tenant", "nt", "...args"],
+            &body,
+        );
         Ok(self.bind(reference))
     }
 
@@ -272,7 +317,12 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
     }
 
     fn op_call(&mut self, _code: &[u8], fn_val: JsVar, args: Vec<JsVar>) -> Result<JsVar, String> {
-        let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+        // Jade functions are registered as `function(tenant, nt, ...args)`, so a
+        // call threads the enclosing `tenant` and `nt` ahead of the user args.
+        let mut parts = Vec::with_capacity(args.len() + 2);
+        parts.push("tenant".to_string());
+        parts.push("nt".to_string());
+        parts.extend(args.iter().map(|v| v.to_string()));
         Ok(self.bind(format!("Reflect.apply({fn_val}, undefined, [{}])", parts.join(", "))))
     }
 
@@ -461,40 +511,65 @@ mod tests {
         assert_eq!(js.matches("state[0] = 0;").count(), 1, "got:\n{js}");
     }
 
-    #[test]
-    fn emits_function_with_tenant_nt_params() {
-        // FN with a trivial body that returns undefined-ish (Lit32 then RET).
+    /// Build a program whose first op is `FN` (with `variant`) pointing at a
+    /// trivial body placed immediately after it, then a top-level `RET`.
+    fn program_with_fn(variant: Operand) -> Vec<u8> {
         let fn_body = chunk(&[
             Operation::Lit32 { dest: 0, val: 1 },
             Operation::Ret(Operand::StateRef(0)),
         ]);
-        // Place FN first, then the function body after it in the same chunk.
-        let mut code = chunk(&[Operation::Fn {
-            variant: Operand::Literal(0),
-            closure_args: Operand::Literal(0),
-            spanner: Operand::Literal(0),
-            j: 0, // patched below
-            dest: 5,
-        }]);
-        let j = code.len() as u32;
-        code.extend_from_slice(&fn_body);
-        // Re-encode FN now that we know j.
-        let fn_bytes: Vec<u8> = Operation::Fn {
-            variant: Operand::Literal(0),
+        let mk = |j: u32| Operation::Fn {
+            variant,
             closure_args: Operand::Literal(0),
             spanner: Operand::Literal(0),
             j,
             dest: 5,
-        }
-        .emit()
-        .collect();
+        };
+        let mut code = chunk(&[mk(0)]);
+        let j = code.len() as u32;
+        code.extend_from_slice(&fn_body);
+        // Re-encode FN now that the body offset `j` is known (same byte length).
+        let fn_bytes: Vec<u8> = mk(j).emit().collect();
         code[..fn_bytes.len()].copy_from_slice(&fn_bytes);
-        // Terminate the top-level program.
         code.extend(Operation::Ret(Operand::StateRef(5)).emit());
+        code
+    }
 
-        let (js, reg) = compile(&code, VecRegistry::new()).unwrap();
+    #[test]
+    fn emits_function_with_tenant_nt_params() {
+        let (js, reg) = compile(&program_with_fn(Operand::Literal(0)), VecRegistry::new()).unwrap();
         let prelude = reg.prelude();
         assert!(prelude.contains("function(tenant, nt, ...args)"), "got:\n{prelude}");
         assert!(js.contains("__fn0"), "got:\n{js}");
+    }
+
+    #[test]
+    fn emits_variant_declaration_forms() {
+        let kw = |variant: u32| {
+            let (_js, reg) =
+                compile(&program_with_fn(Operand::Literal(variant)), VecRegistry::new()).unwrap();
+            reg.prelude()
+        };
+        assert!(kw(1).contains("async function(tenant, nt, ...args)"), "async: {}", kw(1));
+        assert!(kw(2).contains("function*(tenant, nt, ...args)"), "gen: {}", kw(2));
+        assert!(kw(3).contains("async function*(tenant, nt, ...args)"), "asyncgen: {}", kw(3));
+    }
+
+    #[test]
+    fn op_call_threads_tenant_and_nt() {
+        // state[1] = call state[0]( state[2] ); return state[1];
+        let code = chunk(&[
+            Operation::Call {
+                fn_op: Operand::StateRef(0),
+                args: alloc::vec![Operand::StateRef(2)],
+                dest: 1,
+            },
+            Operation::Ret(Operand::StateRef(1)),
+        ]);
+        let (js, _reg) = compile(&code, VecRegistry::new()).unwrap();
+        assert!(
+            js.contains("Reflect.apply(state[0], undefined, [tenant, nt, state[2]])"),
+            "got:\n{js}"
+        );
     }
 }

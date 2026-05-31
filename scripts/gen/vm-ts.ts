@@ -56,7 +56,7 @@ export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualize
               isGenerator: true,
             })},this,${parameters});`
       }
-    ${Reflect.ownKeys(opcodes)
+    ${Object.keys(opcodes)
         .filter((op) => op !== "AWAIT" && op !== "YIELD" && op !== "YIELDSTAR")
         .map((op) => `case ${opcodes[op].id}: ${handlers[op]}`)
         .join("")}

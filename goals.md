@@ -40,10 +40,14 @@ remotely). It drives the shared `exec_op`.
 - **`while_op`** emits a real JS `while`, with the body emitted exactly **once**.
 - **`op_fn`** compiles the function body into its own source and delegates to a
   user-supplied `FnRegistry`; registered functions always lead with the implicit
-  `tenant` and `nt` parameters, i.e. `function(tenant, nt, ...args){ … }`.
+  `tenant` and `nt` parameters, i.e. `function(tenant, nt, ...args){ … }`. The
+  function's `variant` operand selects the declaration form passed to the
+  registry — `function` / `async function` / `function*` / `async function*`
+  (`FnVariant`).
+- **`op_call`** threads the enclosing `tenant` and `nt` ahead of the user
+  arguments, matching the registered `(tenant, nt, ...args)` calling convention.
 
 Entry point: `jade_vm_jit::compile(code, reg) -> Result<(String, R), String>`.
 
-Follow-ups (not yet wired in the first backend): `FN` closure-slot capture, the
-function variant (sync/async/generator) selecting the declaration form, and
+Follow-ups (not yet wired in the first backend): `FN` closure-slot capture and
 decorator (`spanner`) application; and `AWAIT`/`YIELD`/`YIELDSTAR` support.
