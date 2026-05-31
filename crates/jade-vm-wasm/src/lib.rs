@@ -224,6 +224,27 @@ fn build_child_state_fast(closure_slots: &[u32], cache: &mut StateCache) -> JsVa
 }
 
 // ---------------------------------------------------------------------------
+// THROUGH symbol helper
+// ---------------------------------------------------------------------------
+
+/// Returns the global `Symbol.for("jade.through")` used to tag pass-through
+/// yields in doubleGen mode.  Matches the TypeScript `THROUGH` export from
+/// `shims.ts` which also uses `Symbol.for`.
+#[inline]
+fn through_symbol() -> JsValue {
+    js_sys::Symbol::for_("jade.through").into()
+}
+
+/// Wrap `value` in `{value, [THROUGH]: true}` to mark it as a pass-through
+/// yield from a declared-generator executing under the doubleGen flag.
+fn make_through_val(value: JsValue) -> JsValue {
+    let obj = create_null_obj();
+    let _ = Reflect::set(&obj, &JsValue::from_str("value"), &value);
+    let _ = Reflect::set(&obj, &through_symbol(), &JsValue::TRUE);
+    obj
+}
+
+// ---------------------------------------------------------------------------
 // WasmPlatform – jade_vm_core::Platform impl for JsValue
 // ---------------------------------------------------------------------------
 
@@ -232,15 +253,26 @@ struct WasmPlatform<'a> {
     global_this: &'a JsValue,
     nt: &'a JsValue,
     tenant: &'a JsValue,
+    add_async: bool,
+    add_gen: bool,
 }
 
 impl<'a> WasmPlatform<'a> {
-    fn new(state: &JsValue, global_this: &'a JsValue, nt: &'a JsValue, tenant: &'a JsValue) -> Self {
+    fn new(
+        state: &JsValue,
+        global_this: &'a JsValue,
+        nt: &'a JsValue,
+        tenant: &'a JsValue,
+        add_async: bool,
+        add_gen: bool,
+    ) -> Self {
         Self {
             cache: StateCache::new(state.clone()),
             global_this,
             nt,
             tenant,
+            add_async,
+            add_gen,
         }
     }
 }
@@ -281,7 +313,12 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         j: u32,
         parent_state: JsValue,
     ) -> Result<JsValue, JsValue> {
-        let variant_idx = (variant.as_f64().unwrap_or(0.0) as u32) & 3;
+        let declared_variant = (variant.as_f64().unwrap_or(0.0) as u32) & 3;
+        let effective_variant = declared_variant
+            | (self.add_async as u32)
+            | ((self.add_gen as u32) << 1);
+        // doubleGen: addGen applied on top of a declared generator → YIELD tagging
+        let child_double_gen = self.add_gen && (declared_variant & 2 != 0);
 
         let closure_slots: Vec<u32> = {
             let arr: Array = closure_args.unchecked_into();
@@ -304,12 +341,16 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         let code_c: Vec<u8> = code.to_vec();
         let gt_c = self.global_this.clone();
         let tenant_c = self.tenant.clone();
+        let add_async_c = self.add_async;
+        let add_gen_c = self.add_gen;
 
         let inner = Closure::<dyn Fn(JsValue, Array) -> JsValue>::new(
             move |js_this: JsValue, js_args: Array| {
                 let child = build_child_state(&parent_state, &closure_slots);
                 dispatch_variant(
-                    variant_idx, &code_c, &child, j, &gt_c, &js_this, &tenant_c, &js_args,
+                    effective_variant, &code_c, &child, j,
+                    &gt_c, &js_this, &tenant_c, &js_args,
+                    add_async_c, add_gen_c, child_double_gen,
                 )
             },
         );
@@ -330,7 +371,8 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
             wrapper
         };
 
-        registry_set(&spanned, variant_idx, j, &closure_slots_reg);
+        // Register with the effective variant so op_call's fast path uses the right executor.
+        registry_set(&spanned, effective_variant, j, &closure_slots_reg);
         Ok(spanned)
     }
 
@@ -387,6 +429,7 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
                 let res = run_sync(
                     code, &child, j as usize,
                     self.global_this, &JsValue::UNDEFINED, self.tenant, &call_args,
+                    self.add_async, self.add_gen,
                 )
                 .unwrap_or(JsValue::UNDEFINED);
                 for &slot in &closure_slots {
@@ -483,9 +526,12 @@ fn dispatch_variant(
     nt: &JsValue,
     tenant: &JsValue,
     args: &Array,
+    add_async: bool,
+    add_gen: bool,
+    double_gen: bool,
 ) -> JsValue {
     match variant_idx {
-        0 => run_sync(code, state, ip as usize, global_this, nt, tenant, args)
+        0 => run_sync(code, state, ip as usize, global_this, nt, tenant, args, add_async, add_gen)
             .unwrap_or(JsValue::UNDEFINED),
         1 => {
             let code = code.to_vec();
@@ -495,13 +541,13 @@ fn dispatch_variant(
             let tenant = tenant.clone();
             let args = args.clone();
             future_to_promise(async move {
-                run_async_internal(&code, &state, ip as usize, &gt, &nt, &tenant, &args).await
+                run_async_internal(&code, &state, ip as usize, &gt, &nt, &tenant, &args, add_async, add_gen).await
             })
             .into()
         }
-        2 => create_sync_gen(code, state, ip as usize, global_this, nt, tenant)
+        2 => create_sync_gen(code, state, ip as usize, global_this, nt, tenant, add_gen, double_gen)
             .unwrap_or(JsValue::UNDEFINED),
-        3 => create_async_gen(code, state, ip as usize, global_this, nt, tenant)
+        3 => create_async_gen(code, state, ip as usize, global_this, nt, tenant, add_gen, double_gen)
             .unwrap_or(JsValue::UNDEFINED),
         _ => JsValue::UNDEFINED,
     }
@@ -526,6 +572,11 @@ struct GenMachine {
     global_this: JsValue,
     nt: JsValue,
     tenant: JsValue,
+    add_async: bool,
+    add_gen: bool,
+    /// When true this function was a declared generator running under addGen;
+    /// YIELD values are wrapped in the THROUGH tag to mark them as pass-throughs.
+    double_gen: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -540,9 +591,11 @@ fn run_sync(
     nt: &JsValue,
     tenant: &JsValue,
     _args: &Array,
+    add_async: bool,
+    add_gen: bool,
 ) -> Result<JsValue, JsValue> {
     let mut ip = start_ip;
-    let mut platform = WasmPlatform::new(state, global_this, nt, tenant);
+    let mut platform = WasmPlatform::new(state, global_this, nt, tenant, add_async, add_gen);
     loop {
         let old_ip = ip;
         let (op, rest) = Operation::parse(&code[ip..])
@@ -563,13 +616,13 @@ fn run_sync(
                 let nt_c = nt.clone();
                 let tenant_c = tenant.clone();
                 let promise = future_to_promise(async move {
-                    run_async_internal(&code_c, &state_c, old_ip, &gt_c, &nt_c, &tenant_c, &Array::new()).await
+                    run_async_internal(&code_c, &state_c, old_ip, &gt_c, &nt_c, &tenant_c, &Array::new(), add_async, add_gen).await
                 });
                 return Ok(promise.into());
             }
             Operation::Yield { .. } | Operation::Yieldstar { .. } => {
                 platform.flush();
-                return create_sync_gen(code, state, old_ip, global_this, nt, tenant);
+                return create_sync_gen(code, state, old_ip, global_this, nt, tenant, add_gen, false);
             }
             _ => jade_vm_core::exec_op(op, code, &mut platform, &mut ())?,
         }
@@ -588,9 +641,11 @@ async fn run_async_internal(
     nt: &JsValue,
     tenant: &JsValue,
     _args: &Array,
+    add_async: bool,
+    add_gen: bool,
 ) -> Result<JsValue, JsValue> {
     let mut ip = start_ip;
-    let mut platform = WasmPlatform::new(state, global_this, nt, tenant);
+    let mut platform = WasmPlatform::new(state, global_this, nt, tenant, add_async, add_gen);
     loop {
         let old_ip = ip;
         let (op, rest) = Operation::parse(&code[ip..])
@@ -611,7 +666,7 @@ async fn run_async_internal(
             }
             Operation::Yield { .. } | Operation::Yieldstar { .. } => {
                 platform.flush();
-                return Ok(create_async_gen(code, state, old_ip, global_this, nt, tenant)?);
+                return Ok(create_async_gen(code, state, old_ip, global_this, nt, tenant, add_gen, false)?);
             }
             _ => jade_vm_core::exec_op(op, code, &mut platform, &mut ())?,
         }
@@ -653,7 +708,9 @@ fn gen_step_sync(m: &mut GenMachine, sent: JsValue) -> Result<StepResult, JsValu
     let global_this = m.global_this.clone();
     let nt = m.nt.clone();
     let tenant = m.tenant.clone();
-    let mut platform = WasmPlatform::new(&m.state, &global_this, &nt, &tenant);
+    let add_async = m.add_async;
+    let add_gen = m.add_gen;
+    let mut platform = WasmPlatform::new(&m.state, &global_this, &nt, &tenant, add_async, add_gen);
 
     loop {
         let old_ip = m.ip;
@@ -675,9 +732,12 @@ fn gen_step_sync(m: &mut GenMachine, sent: JsValue) -> Result<StepResult, JsValu
             }
             Operation::Yield { val: val_op, dest } => {
                 let val = jade_vm_core::resolve(val_op, &mut platform);
+                // doubleGen: this function was a declared generator running under
+                // addGen, so its native yields are tagged as pass-throughs.
+                let yield_val = if m.double_gen { make_through_val(val) } else { val };
                 m.pending_dest = Some(dest);
                 platform.flush();
-                return Ok(StepResult::Yielded(val, dest));
+                return Ok(StepResult::Yielded(yield_val, dest));
             }
             Operation::Yieldstar { val: val_op, dest } => {
                 let sub = jade_vm_core::resolve(val_op, &mut platform);
@@ -701,8 +761,10 @@ async fn gen_step_async(
     global_this: JsValue,
     nt: JsValue,
     tenant: JsValue,
+    add_async: bool,
+    add_gen: bool,
 ) -> Result<(StepResult, usize), JsValue> {
-    let mut platform = WasmPlatform::new(&state, &global_this, &nt, &tenant);
+    let mut platform = WasmPlatform::new(&state, &global_this, &nt, &tenant, add_async, add_gen);
     loop {
         let old_ip = ip;
         let (op, rest) = Operation::parse(&code[ip..])
@@ -724,6 +786,9 @@ async fn gen_step_async(
             Operation::Yield { val: val_op, dest } => {
                 let val = jade_vm_core::resolve(val_op, &mut platform);
                 platform.flush();
+                // double_gen flag is passed in via GenMachine (not WasmPlatform here);
+                // gen_step_async is called from the async gen closure which has access.
+                // NOTE: double_gen tagging for async gen is applied at the call site below.
                 return Ok((StepResult::Yielded(val, dest), ip));
             }
             Operation::Yieldstar { val: val_op, dest } => {
@@ -774,6 +839,8 @@ fn create_sync_gen(
     global_this: &JsValue,
     nt: &JsValue,
     tenant: &JsValue,
+    add_gen: bool,
+    double_gen: bool,
 ) -> Result<JsValue, JsValue> {
     use alloc::rc::Rc;
 
@@ -787,6 +854,9 @@ fn create_sync_gen(
         global_this: global_this.clone(),
         nt: nt.clone(),
         tenant: tenant.clone(),
+        add_async: false,
+        add_gen,
+        double_gen,
     }));
 
     let gen_obj = create_null_obj();
@@ -810,8 +880,10 @@ fn create_sync_gen(
                 let gt_c = m.global_this.clone();
                 let nt_c = m.nt.clone();
                 let tenant_c = m.tenant.clone();
+                let add_gen_c = m.add_gen;
+                let double_gen_c = m.double_gen;
                 drop(m);
-                let ag = create_async_gen(&code_c, &state_c, restart_ip, &gt_c, &nt_c, &tenant_c)
+                let ag = create_async_gen(&code_c, &state_c, restart_ip, &gt_c, &nt_c, &tenant_c, add_gen_c, double_gen_c)
                     .unwrap_or(JsValue::UNDEFINED);
                 make_iter_result(ag, false)
             }
@@ -862,6 +934,8 @@ fn create_async_gen(
     global_this: &JsValue,
     nt: &JsValue,
     tenant: &JsValue,
+    add_gen: bool,
+    double_gen: bool,
 ) -> Result<JsValue, JsValue> {
     use alloc::rc::Rc;
 
@@ -875,6 +949,9 @@ fn create_async_gen(
         global_this: global_this.clone(),
         nt: nt.clone(),
         tenant: tenant.clone(),
+        add_async: true,
+        add_gen,
+        double_gen,
     }));
 
     let gen_obj = create_null_obj();
@@ -883,7 +960,7 @@ fn create_async_gen(
     let next_fn = Closure::<dyn Fn(JsValue) -> Promise>::new(move |sent: JsValue| {
         let mc = m_next.clone();
         future_to_promise(async move {
-            let (code, state, pending_dest, delegating, gt, nt, tenant) = {
+            let (code, state, pending_dest, delegating, gt, nt, tenant, add_async, add_gen, double_gen) = {
                 let mut m = mc.borrow_mut();
                 if m.done {
                     return Ok(make_iter_result(JsValue::UNDEFINED, true));
@@ -896,6 +973,9 @@ fn create_async_gen(
                     m.global_this.clone(),
                     m.nt.clone(),
                     m.tenant.clone(),
+                    m.add_async,
+                    m.add_gen,
+                    m.double_gen,
                 )
             };
 
@@ -929,7 +1009,7 @@ fn create_async_gen(
 
             let ip = mc.borrow().ip;
             let (step_result, new_ip) =
-                gen_step_async(code, state, ip, gt, nt, tenant).await?;
+                gen_step_async(code, state, ip, gt, nt, tenant, add_async, add_gen).await?;
 
             {
                 let mut m = mc.borrow_mut();
@@ -944,7 +1024,10 @@ fn create_async_gen(
             }
 
             Ok(match step_result {
-                StepResult::Yielded(val, _) => make_iter_result(val, false),
+                StepResult::Yielded(val, _) => {
+                    let yield_val = if double_gen { make_through_val(val) } else { val };
+                    make_iter_result(yield_val, false)
+                }
                 StepResult::Returned(val) => make_iter_result(val, true),
             })
         })
@@ -993,8 +1076,10 @@ macro_rules! make_async_variant {
             nt: JsValue,
             tenant: JsValue,
             args: Array,
+            add_async: bool,
+            add_gen: bool,
         ) -> Result<JsValue, JsValue> {
-            run_async_internal(&code, &state, ip as usize, &global_this, &nt, &tenant, &args)
+            run_async_internal(&code, &state, ip as usize, &global_this, &nt, &tenant, &args, add_async, add_gen)
                 .await
         }
     };
@@ -1009,8 +1094,10 @@ pub fn run_virtualized(
     nt: JsValue,
     tenant: JsValue,
     args: Array,
+    add_async: bool,
+    add_gen: bool,
 ) -> Result<JsValue, JsValue> {
-    run_sync(&code, &state, ip as usize, &global_this, &nt, &tenant, &args)
+    run_sync(&code, &state, ip as usize, &global_this, &nt, &tenant, &args, add_async, add_gen)
 }
 
 make_async_variant!(run_virtualized_a);
@@ -1024,8 +1111,11 @@ pub fn run_virtualized_g(
     nt: JsValue,
     tenant: JsValue,
     _args: Array,
+    _add_async: bool,
+    add_gen: bool,
+    double_gen: bool,
 ) -> Result<JsValue, JsValue> {
-    create_sync_gen(&code, &state, ip as usize, &global_this, &nt, &tenant)
+    create_sync_gen(&code, &state, ip as usize, &global_this, &nt, &tenant, add_gen, double_gen)
 }
 
 #[wasm_bindgen]
@@ -1037,6 +1127,9 @@ pub fn run_virtualized_ag(
     nt: JsValue,
     tenant: JsValue,
     _args: Array,
+    _add_async: bool,
+    add_gen: bool,
+    double_gen: bool,
 ) -> Result<JsValue, JsValue> {
-    create_async_gen(&code, &state, ip as usize, &global_this, &nt, &tenant)
+    create_async_gen(&code, &state, ip as usize, &global_this, &nt, &tenant, add_gen, double_gen)
 }

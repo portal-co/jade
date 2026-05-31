@@ -13,13 +13,13 @@ export function genVmTs(opcodes: Record<string, any>, handlers: Record<string, s
       const drive = isGenerator ? "yield* " : isAsync ? "await " : "";
       // Substitute the block-handler placeholders for this variant.
       const subst = (s: string) => s.replaceAll("__DRIVE__", drive).replaceAll("__SELF__", self);
-      const parameters = `(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant})),unshift(args,state),unshift(args,code),args)`;
+      const parameters = `(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args)`;
       return subst(`
 export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualized${
         isAsync ? "A" : ""
       }${
         isGenerator ? "G" : ""
-      }(code: () => DataView, state: {[a: number]: any},{ip=0,end=undefined,globalThis=(0,eval)('this'),nt=undefined,tenant}:{ip?:number,end?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant},...args: any[]): ${
+      }(code: () => DataView, state: {[a: number]: any},{ip=0,end=undefined,globalThis=(0,eval)('this'),nt=undefined,tenant,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,end?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): ${
         isAsync ? (isGenerator ? `AsyncGenerator<any,any,any>` : `Promise<any>`) : `any`
       }{
     for(;;){
@@ -44,14 +44,14 @@ export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualize
       }
             case ${opcodes.YIELD.id}: ${
         isGenerator
-          ? `state[code().getUint32(ip,true)]=yield val;ip += 4;break;`
+          ? `state[code().getUint32(ip,true)]=doubleGen ? yield {value:val,[THROUGH]:true} : yield val;ip += 4;break;`
           : `return apply(${functionName({
               isGenerator: true,
             })},this,${parameters});`
       }
             case ${opcodes.YIELDSTAR.id}: ${
         isGenerator
-          ? `state[code().getUint32(ip,true)]=yield* val;ip += 4;break;`
+          ? `state[code().getUint32(ip,true)]=yield* (doubleGen ? unpackGuestGen(val) : val);ip += 4;break;`
           : `return apply(${functionName({
               isGenerator: true,
             })},this,${parameters});`
@@ -69,6 +69,8 @@ export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualize
   return `
 /* This is GENERATED code by \`regen.ts\` */
 import {type Tenant} from "./index.ts"
+import {THROUGH, createGuestGen, unpackGuestGen} from "./shims.ts"
+export {THROUGH} from "./shims.ts"
 const {apply} = Reflect;
 const {create,defineProperties,freeze} = Object;
 const {fromCodePoint} = String;

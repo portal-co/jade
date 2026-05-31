@@ -63,7 +63,10 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
   RET: `return val;`,
   GLOBAL: `state[code().getUint32(ip,true)]=globalThis;ip += 4;break;`,
   FN: ` {
-                const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][arg()&3]
+                const declaredVariant = arg()&3;
+                const effectiveVariant = declaredVariant | (addAsync ? 1 : 0) | (addGen ? 2 : 0);
+                const childDoubleGen = addGen && !!(declaredVariant & 2);
+                const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][effectiveVariant]
                     ,closureArgs:number[]=[...arg()]
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
@@ -85,7 +88,10 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                             ip:j,
                             globalThis,
                             nt: new.target,
-                            tenant
+                            tenant,
+                            addAsync,
+                            addGen,
+                            doubleGen: childDoubleGen,
                         }),
                         ...args
                     ]);
@@ -133,7 +139,10 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                 let n = code().getUint32(ip,true); ip += 4;
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
-                state[code().getUint32(ip,true)] = apply(fn, undefined, callArgs);
+                const _callRaw = apply(fn, undefined, callArgs);
+                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof _callRaw.next === 'function')
+                    ? createGuestGen(_callRaw, tenant)
+                    : _callRaw;
                 ip += 4;
                 break;
             }`,
@@ -154,7 +163,7 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                 const evalRaw=(x:number)=> x&1 ? state[x>>>1] : x>>>1;
                 let c=evalRaw(condRaw);
                 while(c){
-                    const r=__DRIVE____SELF__(code,state,{ip:body,end:body+len,globalThis,nt,tenant});
+                    const r=__DRIVE____SELF__(code,state,{ip:body,end:body+len,globalThis,nt,tenant,addAsync,addGen,doubleGen});
                     if(r!==BLOCK_DONE) return r;
                     c=evalRaw(nextRaw);
                 }
@@ -164,7 +173,7 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                 const cond=arg();
                 const tl=code().getUint32(ip,true),el=code().getUint32(ip+4,true);ip+=8;
                 const start=cond?ip:ip+tl,len=cond?tl:el;
-                const r=__DRIVE____SELF__(code,state,{ip:start,end:start+len,globalThis,nt,tenant});
+                const r=__DRIVE____SELF__(code,state,{ip:start,end:start+len,globalThis,nt,tenant,addAsync,addGen,doubleGen});
                 if(r!==BLOCK_DONE) return r;
                 ip+=tl+el;
                 break;
@@ -184,7 +193,7 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                 }
                 const dl=code().getUint32(scanIp,true);scanIp+=4;
                 const start=matched?matchStart:scanIp,len=matched?matchLen:dl;
-                const r=__DRIVE____SELF__(code,state,{ip:start,end:start+len,globalThis,nt,tenant});
+                const r=__DRIVE____SELF__(code,state,{ip:start,end:start+len,globalThis,nt,tenant,addAsync,addGen,doubleGen});
                 if(r!==BLOCK_DONE) return r;
                 ip=scanIp+dl;
                 break;

@@ -78,22 +78,45 @@ impl FnVariant {
     }
 }
 
-/// Decode a resolved `variant` value (a `JsVar`) into an [`FnVariant`].
-///
-/// The `FN` opcode's `variant` operand is virtually always a literal `0..=3`,
-/// which `resolve` renders as an inline numeric expression; that case is decoded
-/// statically. A non-literal (dynamic) variant cannot select a declaration form
-/// at emit time, so it falls back to [`FnVariant::Sync`].
-fn fn_variant(v: &JsVar) -> FnVariant {
-    if let JsVar::Expr(s) = v {
+/// Ambient capability flags for the JIT.  Propagated into every nested function
+/// compiled in the same session so the whole program upgrades uniformly.
+#[derive(Clone, Copy, Default)]
+pub struct Config {
+    /// Add async capability on top of every function's declared variant.
+    pub add_async: bool,
+    /// Add generator capability on top of every function's declared variant.
+    pub add_gen: bool,
+}
+
+/// Decode a resolved `variant` value (a `JsVar`) into an [`FnVariant`], then
+/// apply the ambient `Config` flags to compute the effective variant.
+fn fn_variant(v: &JsVar, cfg: Config) -> FnVariant {
+    let declared = if let JsVar::Expr(s) = v {
         match s.trim() {
-            "1" => return FnVariant::Async,
-            "2" => return FnVariant::SyncGen,
-            "3" => return FnVariant::AsyncGen,
-            _ => {}
+            "1" => FnVariant::Async,
+            "2" => FnVariant::SyncGen,
+            "3" => FnVariant::AsyncGen,
+            _ => FnVariant::Sync,
         }
+    } else {
+        FnVariant::Sync
+    };
+    // OR the declared bits with the ambient flag bits.
+    let declared_idx = match declared {
+        FnVariant::Sync => 0u32,
+        FnVariant::Async => 1,
+        FnVariant::SyncGen => 2,
+        FnVariant::AsyncGen => 3,
+    };
+    let effective_idx = declared_idx
+        | (cfg.add_async as u32)
+        | ((cfg.add_gen as u32) << 1);
+    match effective_idx {
+        1 => FnVariant::Async,
+        2 => FnVariant::SyncGen,
+        3 => FnVariant::AsyncGen,
+        _ => FnVariant::Sync,
     }
-    FnVariant::Sync
 }
 
 /// Sink for functions produced by the `FN` opcode.
@@ -160,11 +183,28 @@ impl Emit {
 pub struct JsJit<'a, R: FnRegistry> {
     reg: &'a RefCell<R>,
     emit: RefCell<Emit>,
+    cfg: Config,
+    /// Whether the function currently being compiled is effectively a generator.
+    is_gen: bool,
+    /// Whether the function currently being compiled is effectively async.
+    is_async: bool,
+    /// doubleGen: declared gen + add_gen → YIELD values are THROUGH-tagged.
+    double_gen: bool,
 }
 
 impl<'a, R: FnRegistry> JsJit<'a, R> {
     fn new(reg: &'a RefCell<R>) -> Self {
-        Self { reg, emit: RefCell::new(Emit::new()) }
+        Self::with_config(reg, Config::default(), false, false, false)
+    }
+
+    fn with_config(
+        reg: &'a RefCell<R>,
+        cfg: Config,
+        is_gen: bool,
+        is_async: bool,
+        double_gen: bool,
+    ) -> Self {
+        Self { reg, emit: RefCell::new(Emit::new()), cfg, is_gen, is_async, double_gen }
     }
 
     /// Mint a fresh `v{n}` variable id.
@@ -265,23 +305,29 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
         j: u32,
         _parent_state: JsVar,
     ) -> Result<JsVar, String> {
-        // Compile the function body (which starts at `j` and runs to its RET)
-        // into its own statement block, sharing this JIT's registry. The body
-        // gets a fresh `state` object so it is self-contained.
+        let eff = fn_variant(&variant, self.cfg);
+        // doubleGen: declared gen | add_gen → declared gen bit was set already
+        let declared_is_gen = if let JsVar::Expr(s) = &variant {
+            matches!(s.trim(), "2" | "3")
+        } else {
+            false
+        };
+        let child_double_gen = self.cfg.add_gen && declared_is_gen;
+        let child_is_gen = matches!(eff, FnVariant::SyncGen | FnVariant::AsyncGen);
+        let child_is_async = matches!(eff, FnVariant::Async | FnVariant::AsyncGen);
+
+        // Compile the function body into its own statement block with the
+        // context flags for the child (effective variant's gen/async/doubleGen).
         let body = {
-            let mut nested = JsJit::new(self.reg);
+            let mut nested = JsJit::with_config(
+                self.reg, self.cfg, child_is_gen, child_is_async, child_double_gen,
+            );
             emit_program(&mut nested, code, j as usize)?;
             format!("const state = Object.create(null);\n{}", nested.emit.into_inner().buf)
         };
-        // The function takes the implicit `tenant`/`nt` first, then its args,
-        // and is declared with the form matching its variant.
         // NOTE: closure-slot capture and decorator (`spanner`) application are
         // not yet wired in this first backend.
-        let reference = self.reg.borrow_mut().register(
-            fn_variant(&variant),
-            &["tenant", "nt", "...args"],
-            &body,
-        );
+        let reference = self.reg.borrow_mut().register(eff, &["tenant", "nt", "...args"], &body);
         Ok(self.bind(reference))
     }
 
@@ -323,7 +369,18 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
         parts.push("tenant".to_string());
         parts.push("nt".to_string());
         parts.extend(args.iter().map(|v| v.to_string()));
-        Ok(self.bind(format!("Reflect.apply({fn_val}, undefined, [{}])", parts.join(", "))))
+        let raw_call = format!("Reflect.apply({fn_val}, undefined, [{}])", parts.join(", "));
+        if self.cfg.add_gen {
+            // In addGen mode every Jade callee runs as a generator; wrap the
+            // result in a guest-side generator object via the shims helper.
+            // `createGuestGen` must be in scope at the call site (imported from shims).
+            let raw = self.bind(raw_call);
+            Ok(self.bind(format!(
+                "({raw} && typeof {raw}.next === 'function') ? createGuestGen({raw}, tenant) : {raw}"
+            )))
+        } else {
+            Ok(self.bind(raw_call))
+        }
     }
 
     fn op_bool(&self, val: bool) -> JsVar {
@@ -440,8 +497,39 @@ fn emit_program<R: FnRegistry>(
                 jit.line(format!("return {val};"));
                 return Ok(());
             }
-            Operation::Await { .. } | Operation::Yield { .. } | Operation::Yieldstar { .. } => {
-                return Err("jit: async/generator opcodes are not supported".to_string());
+            Operation::Await { val: val_op, dest } => {
+                if !jit.is_async {
+                    return Err("jit: AWAIT in non-async function".to_string());
+                }
+                let val = resolve(val_op, jit);
+                jit.line(format!("state[{dest}] = await {val};"));
+            }
+            Operation::Yield { val: val_op, dest } => {
+                if !jit.is_gen {
+                    return Err("jit: YIELD in non-generator function".to_string());
+                }
+                let val = resolve(val_op, jit);
+                if jit.double_gen {
+                    // doubleGen: tag native yields as pass-throughs.
+                    jit.line(format!(
+                        "state[{dest}] = yield {{value: {val}, [Symbol.for(\"jade.through\")]: true}};"
+                    ));
+                } else {
+                    jit.line(format!("state[{dest}] = yield {val};"));
+                }
+            }
+            Operation::Yieldstar { val: val_op, dest } => {
+                if !jit.is_gen {
+                    return Err("jit: YIELDSTAR in non-generator function".to_string());
+                }
+                let val = resolve(val_op, jit);
+                if jit.double_gen {
+                    // doubleGen: use the unpack shim to handle guest-gen protocol.
+                    // `unpackGuestGen` must be in scope (imported from shims).
+                    jit.line(format!("state[{dest}] = yield* unpackGuestGen({val});"));
+                } else {
+                    jit.line(format!("state[{dest}] = yield* {val};"));
+                }
             }
             _ => exec_op(op, code, jit, &mut ())?,
         }
@@ -454,10 +542,14 @@ fn emit_program<R: FnRegistry>(
 /// must be in scope at the use site; it ends with a `return`. Functions created
 /// by the `FN` opcode are registered via `reg`. Returns the emitted statements
 /// and the (now-populated) registry.
-pub fn compile<R: FnRegistry>(code: &[u8], reg: R) -> Result<(String, R), String> {
+///
+/// Pass a non-default [`Config`] to enable ambient `add_async`/`add_gen` flags.
+/// When `add_gen` is active the emitted calls to `createGuestGen` and
+/// `unpackGuestGen` (from `jade-js/shims.ts`) must be in scope at runtime.
+pub fn compile<R: FnRegistry>(code: &[u8], reg: R, cfg: Config) -> Result<(String, R), String> {
     let cell = RefCell::new(reg);
     let body = {
-        let mut jit = JsJit::new(&cell);
+        let mut jit = JsJit::with_config(&cell, cfg, false, false, false);
         emit_program(&mut jit, code, 0)?;
         jit.emit.into_inner().buf
     };
@@ -485,7 +577,7 @@ mod tests {
             Operation::Eq { a: Operand::StateRef(0), b: Operand::StateRef(1), dest: 2 },
             Operation::Ret(Operand::StateRef(2)),
         ]);
-        let (js, _reg) = compile(&code, VecRegistry::new()).unwrap();
+        let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
         assert!(js.contains("state[0] === state[1]"), "got:\n{js}");
         assert!(js.contains("state[2] ="), "got:\n{js}");
         assert!(js.contains("return state[2];"), "got:\n{js}");
@@ -499,7 +591,7 @@ mod tests {
             Operation::If { cond: Operand::StateRef(0), then_body, else_body },
             Operation::Ret(Operand::StateRef(1)),
         ]);
-        let (js, _reg) = compile(&code, VecRegistry::new()).unwrap();
+        let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
         assert!(js.contains("if (state[0]) {"), "got:\n{js}");
         assert!(js.contains("} else {"), "got:\n{js}");
         // Both arms emitted.
@@ -515,7 +607,7 @@ mod tests {
             Operation::While { cond: Operand::StateRef(0), body, next: Operand::StateRef(0) },
             Operation::Ret(Operand::StateRef(0)),
         ]);
-        let (js, _reg) = compile(&code, VecRegistry::new()).unwrap();
+        let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
         assert!(js.contains("while (v"), "got:\n{js}");
         // The body's single statement is emitted exactly once.
         assert_eq!(js.matches("state[0] = 0;").count(), 1, "got:\n{js}");
@@ -547,7 +639,7 @@ mod tests {
 
     #[test]
     fn emits_function_with_tenant_nt_params() {
-        let (js, reg) = compile(&program_with_fn(Operand::Literal(0)), VecRegistry::new()).unwrap();
+        let (js, reg) = compile(&program_with_fn(Operand::Literal(0)), VecRegistry::new(), Config::default()).unwrap();
         let prelude = reg.prelude();
         assert!(prelude.contains("function(tenant, nt, ...args)"), "got:\n{prelude}");
         assert!(js.contains("__fn0"), "got:\n{js}");
@@ -557,7 +649,7 @@ mod tests {
     fn emits_variant_declaration_forms() {
         let kw = |variant: u32| {
             let (_js, reg) =
-                compile(&program_with_fn(Operand::Literal(variant)), VecRegistry::new()).unwrap();
+                compile(&program_with_fn(Operand::Literal(variant)), VecRegistry::new(), Config::default()).unwrap();
             reg.prelude()
         };
         assert!(kw(1).contains("async function(tenant, nt, ...args)"), "async: {}", kw(1));
@@ -585,7 +677,7 @@ mod tests {
             Operation::Get { obj: Operand::StateRef(2), key: Operand::StateRef(1), dest: 4 },
             Operation::Ret(Operand::StateRef(4)),
         ]);
-        let (js, _reg) = compile(&code, VecRegistry::new()).unwrap();
+        let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
         assert!(js.contains("tenant.make(null)"), "got:\n{js}");
         assert!(js.contains("tenant.set(state[2], state[1], state[0])"), "got:\n{js}");
         assert!(js.contains("tenant.get(state[2], state[1])"), "got:\n{js}");
@@ -603,7 +695,7 @@ mod tests {
             },
             Operation::Ret(Operand::StateRef(1)),
         ]);
-        let (js, _reg) = compile(&code, VecRegistry::new()).unwrap();
+        let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
         assert!(
             js.contains("Reflect.apply(state[0], undefined, [tenant, nt, state[2]])"),
             "got:\n{js}"
