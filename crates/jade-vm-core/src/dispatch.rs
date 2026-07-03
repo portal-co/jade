@@ -41,7 +41,7 @@ pub trait Ops {
     /// Apply property descriptors in `props` to `target` in place.
     fn define_properties(&self, target: &Self::Value, props: Self::Value);
 
-    // Opcode handlers (one per non-loop, non-block opcode) ----------------
+    // Opcode handlers (one per value-producing opcode) --------------------
     fn op_global(&self) -> Self::Value;
     fn op_fn(&mut self, code: &[u8], variant: Self::Value, closure_args: Self::Value, spanner: Self::Value, j: u32, parent_state: Self::Value) -> Result<Self::Value, Self::Error>;
     fn op_lit32(&self, val: u32) -> Self::Value;
@@ -60,48 +60,6 @@ pub trait Ops {
     fn op_sel(&self, cond: Self::Value, then: Self::Value, else_: Self::Value) -> Self::Value;
     fn op_get(&self, obj: Self::Value, key: Self::Value) -> Self::Value;
     fn op_set(&self, obj: Self::Value, key: Self::Value, val: Self::Value) -> Self::Value;
-
-    // Control-flow handlers -----------------------------------------------
-    // Ctx is a method-level generic so JIT backends can pass a compilation
-    // context without it appearing in the trait bounds.
-
-    /// Run a `while` loop. `init` is the initial condition value; each
-    /// `body` call runs the loop body and returns the next condition value.
-    /// Iteration continues while the condition is truthy; the final condition
-    /// value is returned.
-    fn while_op<Ctx, F>(
-        &mut self,
-        ctx: &mut Ctx,
-        init: Self::Value,
-        body: F,
-    ) -> Result<Self::Value, Self::Error>
-    where
-        F: FnMut(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>;
-
-    /// Evaluate one of two branches depending on `cond`, returning the branch value.
-    fn if_op<Ctx, FT, FE>(
-        &mut self,
-        ctx: &mut Ctx,
-        cond: Self::Value,
-        then_body: FT,
-        else_body: FE,
-    ) -> Result<Self::Value, Self::Error>
-    where
-        FT: FnOnce(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>,
-        FE: FnOnce(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>;
-
-    /// Match `val` against `cases` (by raw u32 tag), running the matching
-    /// branch or `default_body`, returning the branch value.
-    fn switch_op<Ctx, F, D>(
-        &mut self,
-        ctx: &mut Ctx,
-        val: Self::Value,
-        cases: impl IntoIterator<Item = (u32, F)>,
-        default_body: D,
-    ) -> Result<Self::Value, Self::Error>
-    where
-        F: FnOnce(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>,
-        D: FnOnce(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>;
 }
 
 /// Resolve an `Operand`: literal → numeric value via `Ops::f64_val`,
@@ -119,22 +77,17 @@ where
 /// Dispatch an `Operation` through the platform.
 ///
 /// Resolves operands, calls the appropriate `Ops` method, and writes the
-/// result to the dest slot via `State::set`. Block opcodes (WHILE, IF,
-/// SWITCH) carry embedded bytecode; their bodies are wrapped in closures (which
-/// recurse back into `exec_op`) and forwarded to the matching `Ops`
-/// control-flow method.
+/// result to the dest slot via `State::set`.
 ///
-/// `ctx` is threaded into the control-flow handlers as a method-level
-/// generic: the interpreter passes `&mut ()`; a JIT backend passes its own
-/// compilation context.
-///
-/// Returns `Err` only for the loop-level opcodes (RET/AWAIT/YIELD/YIELDSTAR),
-/// which the VM loop handles directly before reaching here.
-pub fn exec_op<P, Ctx>(
+/// Returns `Err` for every "loop-level" opcode (`RET`/`AWAIT`/`YIELD`/
+/// `YIELDSTAR`, and the jump-family control-transfer ops `JMP`/`CONDJMP`/`SWITCH`) —
+/// none of these produce a value via a normal `op_*()`+`set()` pair; each caller's own
+/// driving loop handles them directly (updating its own program counter, or
+/// returning) before ever reaching this dispatcher.
+pub fn exec_op<P>(
     op: Operation,
     code: &[u8],
     platform: &mut P,
-    ctx: &mut Ctx,
 ) -> Result<(), <P as Ops>::Error>
 where
     P: State + Ops<Value = <P as State>::Value>,
@@ -272,37 +225,6 @@ where
             let v = resolve(val, platform);
             let r = platform.op_set(o, k, v);
             platform.set(dest, r);
-            Ok(())
-        }
-        Operation::While { cond, body, next } => {
-            let init = resolve(cond, platform);
-            let result = platform.while_op(ctx, init, |p, c| {
-                { let mut rem: &[u8] = &body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } }
-                Ok(resolve(next, p))
-            })?;
-            let _ = result;
-            Ok(())
-        }
-        Operation::If { cond, then_body, else_body } => {
-            let cond_val = resolve(cond, platform);
-            let result = platform.if_op(
-                ctx,
-                cond_val,
-                |p, c| { { let mut rem: &[u8] = &then_body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } } Ok(p.undefined()) },
-                |p, c| { { let mut rem: &[u8] = &else_body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } } Ok(p.undefined()) },
-            )?;
-            let _ = result;
-            Ok(())
-        }
-        Operation::Switch { val, cases, default_body } => {
-            let val_v = resolve(val, platform);
-            let result = platform.switch_op(
-                ctx,
-                val_v,
-                cases.into_iter().map(|(cv, cb)| (cv, move |p: &mut P, c: &mut Ctx| { { let mut rem: &[u8] = &cb; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } } Ok(p.undefined()) })),
-                |p: &mut P, c: &mut Ctx| { { let mut rem: &[u8] = &default_body; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } } Ok(p.undefined()) },
-            )?;
-            let _ = result;
             Ok(())
         }
         _ => Err(P::err("exec_op: unexpected opcode")),

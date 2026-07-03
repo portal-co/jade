@@ -20,9 +20,9 @@ export const opcodes: { [Op in Opcode]: OpcodeInfo } = freeze({
   GT:         freeze({ id: 17, args: "binop"    }),  // [LSB a][LSB b][raw dest]
   GE:         freeze({ id: 18, args: "binop"    }),  // [LSB a][LSB b][raw dest]
   SEL:        freeze({ id: 19, args: "sel"      }),  // [LSB cond][LSB then][LSB else_][raw dest]
-  WHILE:      freeze({ id: 20, args: "while_block" }),  // [LSB cond][raw body_len][body bytes...][LSB next]
-  IF:         freeze({ id: 21, args: "if_block" }),  // [LSB cond][raw then_len][raw else_len][then...][else...]
-  SWITCH:     freeze({ id: 22, args: "switch_block" }), // [LSB val][raw n][n×(raw case_val, raw len, body...)][raw default_len][default...]
+  JMP:        freeze({ id: 20, args: "jmp"      }),  // [raw target]
+  COND_JMP:    freeze({ id: 21, args: "condjmp"  }),  // [LSB cond][raw if_true][raw if_false]
+  SWITCH:     freeze({ id: 22, args: "switch_jump" }), // [LSB val][raw n][n×(raw case_val, raw target)][raw default_target]
   GET:        freeze({ id: 23, args: "member_get"  }),  // [LSB obj][LSB key][raw dest]
   SET:        freeze({ id: 24, args: "member_set"  }),  // [LSB obj][LSB key][LSB val][raw dest]
 });
@@ -47,15 +47,15 @@ export type Opcode =
   | "GT"
   | "GE"
   | "SEL"
-  | "WHILE"
-  | "IF"
+  | "JMP"
+  | "COND_JMP"
   | "SWITCH"
   | "GET"
   | "SET";
 export type OpcodeInfo = {
   id: number;
   args: "src" | "src_dest" | "dest" | "fn" | "lit32" | "array" | "object" | "call"
-      | "bool" | "binop" | "sel" | "while_block" | "if_block" | "switch_block"
+      | "bool" | "binop" | "sel" | "jmp" | "condjmp" | "switch_jump"
       | "member_get" | "member_set";
 };
 export type Handler = string;
@@ -154,48 +154,24 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
   GT:   `{ const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>b;   ip+=4; break; }`,
   GE:   `{ const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>=b;  ip+=4; break; }`,
   SEL:  `{ const c=arg(),t=arg(),e=arg(); state[code().getUint32(ip,true)]=c?t:e; ip+=4; break; }`,
-  WHILE: `{
-                // [LSB cond][raw body_len][body...][LSB next]
-                const condRaw=code().getUint32(ip,true);ip+=4;
-                const len=code().getUint32(ip,true);ip+=4;
-                const body=ip;ip+=len;
-                const nextRaw=code().getUint32(ip,true);ip+=4;
-                const evalRaw=(x:number)=> x&1 ? state[x>>>1] : x>>>1;
-                let c=evalRaw(condRaw);
-                while(c){
-                    const r=__DRIVE____SELF__(code,state,{ip:body,end:body+len,globalThis,nt,tenant,addAsync,addGen,doubleGen});
-                    if(r!==BLOCK_DONE) return r;
-                    c=evalRaw(nextRaw);
-                }
-                break;
-            }`,
-  IF:   `{
+  JMP: `ip=code().getUint32(ip,true);break;`,
+  COND_JMP: `{
                 const cond=arg();
-                const tl=code().getUint32(ip,true),el=code().getUint32(ip+4,true);ip+=8;
-                const start=cond?ip:ip+tl,len=cond?tl:el;
-                const r=__DRIVE____SELF__(code,state,{ip:start,end:start+len,globalThis,nt,tenant,addAsync,addGen,doubleGen});
-                if(r!==BLOCK_DONE) return r;
-                ip+=tl+el;
+                const ifTrue=code().getUint32(ip,true),ifFalse=code().getUint32(ip+4,true);
+                ip=cond?ifTrue:ifFalse;
                 break;
             }`,
   SWITCH: `{
                 const sv=arg();
-                let n=code().getUint32(ip,true);ip+=4;
-                // scan table to find lengths and matching case
-                let scanIp=ip;
-                let matched=false,matchStart=-1,matchLen=0;
-                while(n--){
-                    const cv=code().getUint32(scanIp,true);
-                    const cl=code().getUint32(scanIp+4,true);
-                    scanIp+=8;
-                    if(!matched&&cv===sv){matched=true;matchStart=scanIp;matchLen=cl;}
-                    scanIp+=cl;
+                const n=code().getUint32(ip,true);ip+=4;
+                let target=-1;
+                for(let i=0;i<n;i++){
+                    const cv=code().getUint32(ip,true);ip+=4;
+                    const tgt=code().getUint32(ip,true);ip+=4;
+                    if(target<0&&cv===sv)target=tgt;
                 }
-                const dl=code().getUint32(scanIp,true);scanIp+=4;
-                const start=matched?matchStart:scanIp,len=matched?matchLen:dl;
-                const r=__DRIVE____SELF__(code,state,{ip:start,end:start+len,globalThis,nt,tenant,addAsync,addGen,doubleGen});
-                if(r!==BLOCK_DONE) return r;
-                ip=scanIp+dl;
+                const defaultTarget=code().getUint32(ip,true);ip+=4;
+                ip=target>=0?target:defaultTarget;
                 break;
             }`,
   GET:  `{ const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.get(o,k); ip+=4; break; }`,

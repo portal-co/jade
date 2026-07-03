@@ -1,4 +1,4 @@
-import { pascal, LOOP_LEVEL, BLOCK_ARGS } from "./shared.ts";
+import { pascal, LOOP_LEVEL } from "./shared.ts";
 
 function opsMethod(name: string, args: string): string | null {
   const mn = `op_${name.toLowerCase()}`;
@@ -138,58 +138,11 @@ function execArm(name: string, args: string): string | null {
   }
 }
 
-function execBlockArm(name: string, args: string): string | null {
-  const v = pascal(name);
-  // Helper snippet: interpret all ops in a byte slice, threading the `&mut Ctx`
-  // (`c`) through the recursive `exec_op` call. `code` is `Copy` (&[u8]) so it is
-  // safe to capture in move closures.
-  const runOps = (slice: string) =>
-    `{ let mut rem: &[u8] = ${slice}; while let Some((op, rest)) = Operation::parse(rem) { rem = rest; exec_op(op, code, p, c)?; } }`;
-  switch (args) {
-    case "while_block":
-      return `        Operation::${v} { cond, body, next } => {
-            let init = resolve(cond, platform);
-            let result = platform.while_op(ctx, init, |p, c| {
-                ${runOps("&body")}
-                Ok(resolve(next, p))
-            })?;
-            let _ = result;
-            Ok(())
-        }`;
-    case "if_block":
-      return `        Operation::${v} { cond, then_body, else_body } => {
-            let cond_val = resolve(cond, platform);
-            let result = platform.if_op(
-                ctx,
-                cond_val,
-                |p, c| { ${runOps("&then_body")} Ok(p.undefined()) },
-                |p, c| { ${runOps("&else_body")} Ok(p.undefined()) },
-            )?;
-            let _ = result;
-            Ok(())
-        }`;
-    case "switch_block":
-      return `        Operation::${v} { val, cases, default_body } => {
-            let val_v = resolve(val, platform);
-            let result = platform.switch_op(
-                ctx,
-                val_v,
-                cases.into_iter().map(|(cv, cb)| (cv, move |p: &mut P, c: &mut Ctx| { ${runOps("&cb")} Ok(p.undefined()) })),
-                |p: &mut P, c: &mut Ctx| { ${runOps("&default_body")} Ok(p.undefined()) },
-            )?;
-            let _ = result;
-            Ok(())
-        }`;
-    default:
-      return null;
-  }
-}
-
 export function genDispatchRs(opcodes: Record<string, any>): string {
   const entries = Object.entries(opcodes) as [string, any][];
 
   const opsMethods = entries
-    .filter(([, { args }]) => !LOOP_LEVEL.has(args) && !BLOCK_ARGS.has(args))
+    .filter(([, { args }]) => !LOOP_LEVEL.has(args))
     .map(([name, { args }]) => opsMethod(name, args))
     .filter(Boolean)
     // deduplicate: lit32, sel, bool each appear once regardless of how many opcodes share the type
@@ -197,14 +150,8 @@ export function genDispatchRs(opcodes: Record<string, any>): string {
     .join("\n");
 
   const execArms = entries
-    .filter(([, { args }]) => !LOOP_LEVEL.has(args) && !BLOCK_ARGS.has(args))
+    .filter(([, { args }]) => !LOOP_LEVEL.has(args))
     .map(([name, { args }]) => execArm(name, args))
-    .filter(Boolean)
-    .join("\n");
-
-  const execBlockArms = entries
-    .filter(([, { args }]) => BLOCK_ARGS.has(args))
-    .map(([name, { args }]) => execBlockArm(name, args))
     .filter(Boolean)
     .join("\n");
 
@@ -252,50 +199,8 @@ pub trait Ops {
     /// Apply property descriptors in ${BT}props${BT} to ${BT}target${BT} in place.
     fn define_properties(&self, target: &Self::Value, props: Self::Value);
 
-    // Opcode handlers (one per non-loop, non-block opcode) ----------------
+    // Opcode handlers (one per value-producing opcode) --------------------
 ${opsMethods}
-
-    // Control-flow handlers -----------------------------------------------
-    // Ctx is a method-level generic so JIT backends can pass a compilation
-    // context without it appearing in the trait bounds.
-
-    /// Run a ${BT}while${BT} loop. ${BT}init${BT} is the initial condition value; each
-    /// ${BT}body${BT} call runs the loop body and returns the next condition value.
-    /// Iteration continues while the condition is truthy; the final condition
-    /// value is returned.
-    fn while_op<Ctx, F>(
-        &mut self,
-        ctx: &mut Ctx,
-        init: Self::Value,
-        body: F,
-    ) -> Result<Self::Value, Self::Error>
-    where
-        F: FnMut(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>;
-
-    /// Evaluate one of two branches depending on ${BT}cond${BT}, returning the branch value.
-    fn if_op<Ctx, FT, FE>(
-        &mut self,
-        ctx: &mut Ctx,
-        cond: Self::Value,
-        then_body: FT,
-        else_body: FE,
-    ) -> Result<Self::Value, Self::Error>
-    where
-        FT: FnOnce(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>,
-        FE: FnOnce(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>;
-
-    /// Match ${BT}val${BT} against ${BT}cases${BT} (by raw u32 tag), running the matching
-    /// branch or ${BT}default_body${BT}, returning the branch value.
-    fn switch_op<Ctx, F, D>(
-        &mut self,
-        ctx: &mut Ctx,
-        val: Self::Value,
-        cases: impl IntoIterator<Item = (u32, F)>,
-        default_body: D,
-    ) -> Result<Self::Value, Self::Error>
-    where
-        F: FnOnce(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>,
-        D: FnOnce(&mut Self, &mut Ctx) -> Result<Self::Value, Self::Error>;
 }
 
 /// Resolve an ${BT}Operand${BT}: literal → numeric value via ${BT}Ops::f64_val${BT},
@@ -313,29 +218,23 @@ where
 /// Dispatch an ${BT}Operation${BT} through the platform.
 ///
 /// Resolves operands, calls the appropriate ${BT}Ops${BT} method, and writes the
-/// result to the dest slot via ${BT}State::set${BT}. Block opcodes (WHILE, IF,
-/// SWITCH) carry embedded bytecode; their bodies are wrapped in closures (which
-/// recurse back into ${BT}exec_op${BT}) and forwarded to the matching ${BT}Ops${BT}
-/// control-flow method.
+/// result to the dest slot via ${BT}State::set${BT}.
 ///
-/// ${BT}ctx${BT} is threaded into the control-flow handlers as a method-level
-/// generic: the interpreter passes ${BT}&mut ()${BT}; a JIT backend passes its own
-/// compilation context.
-///
-/// Returns ${BT}Err${BT} only for the loop-level opcodes (RET/AWAIT/YIELD/YIELDSTAR),
-/// which the VM loop handles directly before reaching here.
-pub fn exec_op<P, Ctx>(
+/// Returns ${BT}Err${BT} for every "loop-level" opcode (${BT}RET${BT}/${BT}AWAIT${BT}/${BT}YIELD${BT}/
+/// ${BT}YIELDSTAR${BT}, and the jump-family control-transfer ops ${BT}JMP${BT}/${BT}CONDJMP${BT}/${BT}SWITCH${BT}) —
+/// none of these produce a value via a normal ${BT}op_*()${BT}+${BT}set()${BT} pair; each caller's own
+/// driving loop handles them directly (updating its own program counter, or
+/// returning) before ever reaching this dispatcher.
+pub fn exec_op<P>(
     op: Operation,
     code: &[u8],
     platform: &mut P,
-    ctx: &mut Ctx,
 ) -> Result<(), <P as Ops>::Error>
 where
     P: State + Ops<Value = <P as State>::Value>,
 {
     match op {
 ${execArms}
-${execBlockArms}
         _ => Err(P::err("exec_op: unexpected opcode")),
     }
 }

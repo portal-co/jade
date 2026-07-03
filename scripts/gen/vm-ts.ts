@@ -19,11 +19,10 @@ export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualize
         isAsync ? "A" : ""
       }${
         isGenerator ? "G" : ""
-      }(code: () => DataView, state: {[a: number]: any},{ip=0,end=undefined,globalThis=(0,eval)('this'),nt=undefined,tenant,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,end?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): ${
+      }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): ${
         isAsync ? (isGenerator ? `AsyncGenerator<any,any,any>` : `Promise<any>`) : `any`
       }{
     for(;;){
-        if(end!==undefined && ip>=end) return BLOCK_DONE;
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
             const val = code().getUint32(ip,true);
@@ -77,8 +76,5 @@ const {create,defineProperties,freeze} = Object;
 const {fromCodePoint} = String;
 type _globalThis = typeof globalThis;
 const unshift = Array.prototype.unshift.call.bind(Array.prototype.unshift);
-// Sentinel returned by a VM variant when it reaches its block end-bound (as
-// opposed to a RET, which returns the actual value to propagate to the caller).
-const BLOCK_DONE: unique symbol = Symbol("BLOCK_DONE");
 ${vmcode}`;
 }

@@ -473,44 +473,14 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         tenant_call(self.tenant, "set", &[obj, key, val.clone()]);
         val
     }
+}
 
-    // Run the loop body while the condition value is truthy; `init` is the
-    // initial condition and each `body` call returns the next condition value.
-    fn while_op<Ctx, F>(&mut self, ctx: &mut Ctx, init: JsValue, mut body: F) -> Result<JsValue, JsValue>
-    where F: FnMut(&mut Self, &mut Ctx) -> Result<JsValue, JsValue> {
-        let mut c = init;
-        while c.is_truthy() {
-            c = body(self, ctx)?;
-        }
-        Ok(c)
-    }
-
-    fn if_op<Ctx, FT, FE>(
-        &mut self, ctx: &mut Ctx, cond: JsValue, then_body: FT, else_body: FE,
-    ) -> Result<JsValue, JsValue>
-    where
-        FT: FnOnce(&mut Self, &mut Ctx) -> Result<JsValue, JsValue>,
-        FE: FnOnce(&mut Self, &mut Ctx) -> Result<JsValue, JsValue>,
-    {
-        if cond.is_truthy() { then_body(self, ctx) } else { else_body(self, ctx) }
-    }
-
-    fn switch_op<Ctx, F, D>(
-        &mut self, ctx: &mut Ctx, val: JsValue,
-        cases: impl IntoIterator<Item = (u32, F)>, default_body: D,
-    ) -> Result<JsValue, JsValue>
-    where
-        F: FnOnce(&mut Self, &mut Ctx) -> Result<JsValue, JsValue>,
-        D: FnOnce(&mut Self, &mut Ctx) -> Result<JsValue, JsValue>,
-    {
-        let tag = val.as_f64().map(|v| v as u32);
-        for (cv, branch) in cases {
-            if tag == Some(cv) {
-                return branch(self, ctx);
-            }
-        }
-        default_body(self, ctx)
-    }
+/// Resolve a `Switch` discriminant `val` against `cases`, returning the matching
+/// case's target offset or `default_target` — same truthy/numeric-tag comparison
+/// semantics the old (now-removed) `switch_op` used.
+fn switch_target(val: &JsValue, cases: &[(u32, u32)], default_target: u32) -> u32 {
+    let tag = val.as_f64().map(|v| v as u32);
+    cases.iter().find(|(cv, _)| Some(*cv) == tag).map(|(_, tgt)| *tgt).unwrap_or(default_target)
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +594,18 @@ fn run_sync(
                 platform.flush();
                 return create_sync_gen(code, state, old_ip, global_this, nt, tenant, add_gen, false);
             }
-            _ => jade_vm_core::exec_op(op, code, &mut platform, &mut ())?,
+            Operation::Jmp { target } => {
+                ip = target as usize;
+            }
+            Operation::CondJmp { cond, if_true, if_false } => {
+                let cond_val = jade_vm_core::resolve(cond, &mut platform);
+                ip = if cond_val.is_truthy() { if_true as usize } else { if_false as usize };
+            }
+            Operation::Switch { val, cases, default_target } => {
+                let val_v = jade_vm_core::resolve(val, &mut platform);
+                ip = switch_target(&val_v, &cases, default_target) as usize;
+            }
+            _ => jade_vm_core::exec_op(op, code, &mut platform)?,
         }
     }
 }
@@ -668,7 +649,18 @@ async fn run_async_internal(
                 platform.flush();
                 return Ok(create_async_gen(code, state, old_ip, global_this, nt, tenant, add_gen, false)?);
             }
-            _ => jade_vm_core::exec_op(op, code, &mut platform, &mut ())?,
+            Operation::Jmp { target } => {
+                ip = target as usize;
+            }
+            Operation::CondJmp { cond, if_true, if_false } => {
+                let cond_val = jade_vm_core::resolve(cond, &mut platform);
+                ip = if cond_val.is_truthy() { if_true as usize } else { if_false as usize };
+            }
+            Operation::Switch { val, cases, default_target } => {
+                let val_v = jade_vm_core::resolve(val, &mut platform);
+                ip = switch_target(&val_v, &cases, default_target) as usize;
+            }
+            _ => jade_vm_core::exec_op(op, code, &mut platform)?,
         }
     }
 }
@@ -745,7 +737,18 @@ fn gen_step_sync(m: &mut GenMachine, sent: JsValue) -> Result<StepResult, JsValu
                 m.delegating = Some((sub, dest));
                 return gen_step_sync(m, JsValue::UNDEFINED);
             }
-            _ => jade_vm_core::exec_op(op, &code, &mut platform, &mut ())?,
+            Operation::Jmp { target } => {
+                m.ip = target as usize;
+            }
+            Operation::CondJmp { cond, if_true, if_false } => {
+                let cond_val = jade_vm_core::resolve(cond, &mut platform);
+                m.ip = if cond_val.is_truthy() { if_true as usize } else { if_false as usize };
+            }
+            Operation::Switch { val, cases, default_target } => {
+                let val_v = jade_vm_core::resolve(val, &mut platform);
+                m.ip = switch_target(&val_v, &cases, default_target) as usize;
+            }
+            _ => jade_vm_core::exec_op(op, &code, &mut platform)?,
         }
     }
 }
@@ -820,8 +823,22 @@ async fn gen_step_async(
                 }
                 let _ = old_ip;
             }
+            Operation::Jmp { target } => {
+                ip = target as usize;
+                let _ = old_ip;
+            }
+            Operation::CondJmp { cond, if_true, if_false } => {
+                let cond_val = jade_vm_core::resolve(cond, &mut platform);
+                ip = if cond_val.is_truthy() { if_true as usize } else { if_false as usize };
+                let _ = old_ip;
+            }
+            Operation::Switch { val, cases, default_target } => {
+                let val_v = jade_vm_core::resolve(val, &mut platform);
+                ip = switch_target(&val_v, &cases, default_target) as usize;
+                let _ = old_ip;
+            }
             _ => {
-                jade_vm_core::exec_op(op, &code, &mut platform, &mut ())?;
+                jade_vm_core::exec_op(op, &code, &mut platform)?;
                 let _ = old_ip;
             }
         }

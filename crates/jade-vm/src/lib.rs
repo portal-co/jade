@@ -265,26 +265,65 @@ mod tests {
     }
 
     #[test]
-    fn test_while_operation() {
+    fn test_jmp_operation() {
         use alloc::vec::Vec;
 
-        // Body is an arbitrary inner op block (a Lit32 here).
-        let body: Vec<u8> = Operation::Lit32 { dest: 3, val: 7 }.emit().collect();
-        let while_op = Operation::While {
-            cond: Operand::StateRef(0),
-            body: body.clone(),
-            next: Operand::StateRef(0),
-        };
-
-        let bytes: Vec<u8> = while_op.emit().collect();
+        let jmp_op = Operation::Jmp { target: 42 };
+        let bytes: Vec<u8> = jmp_op.emit().collect();
+        // opcode(2) + target(4) = 6 bytes
+        assert_eq!(bytes.len(), 6);
         let (parsed_op, remaining) = Operation::parse(&bytes).unwrap();
         assert!(remaining.is_empty());
-        if let Operation::While { cond, body: pbody, next } = parsed_op {
-            assert_eq!(cond, Operand::StateRef(0));
-            assert_eq!(next, Operand::StateRef(0));
-            assert_eq!(pbody, body);
+        if let Operation::Jmp { target } = parsed_op {
+            assert_eq!(target, 42);
         } else {
-            panic!("Expected While");
+            panic!("Expected Jmp");
+        }
+    }
+
+    #[test]
+    fn test_condjmp_operation() {
+        use alloc::vec::Vec;
+
+        let condjmp_op = Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 10,
+            if_false: 20,
+        };
+        let bytes: Vec<u8> = condjmp_op.emit().collect();
+        // opcode(2) + LSB cond(4) + if_true(4) + if_false(4) = 14 bytes
+        assert_eq!(bytes.len(), 14);
+        let (parsed_op, remaining) = Operation::parse(&bytes).unwrap();
+        assert!(remaining.is_empty());
+        if let Operation::CondJmp { cond, if_true, if_false } = parsed_op {
+            assert_eq!(cond, Operand::StateRef(0));
+            assert_eq!(if_true, 10);
+            assert_eq!(if_false, 20);
+        } else {
+            panic!("Expected CondJmp");
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn test_switch_operation() {
+        use alloc::vec;
+        use alloc::vec::Vec;
+
+        let switch_op = Operation::Switch {
+            val: Operand::StateRef(1),
+            cases: vec![(2, 100), (3, 200)],
+            default_target: 300,
+        };
+        let bytes: Vec<u8> = switch_op.emit().collect();
+        let (parsed_op, remaining) = Operation::parse(&bytes).unwrap();
+        assert!(remaining.is_empty());
+        if let Operation::Switch { val, cases, default_target } = parsed_op {
+            assert_eq!(val, Operand::StateRef(1));
+            assert_eq!(cases, vec![(2, 100), (3, 200)]);
+            assert_eq!(default_target, 300);
+        } else {
+            panic!("Expected Switch");
         }
     }
 

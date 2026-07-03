@@ -1,25 +1,28 @@
 //! JS-source-to-Jade-bytecode frontend.
 //!
 //! Pipeline: source text -> SWC AST (`swc_ecma_parser`) -> TAC (`portal_jsc_swc_tac`,
-//! which internally lowers through `portal_jsc_swc_cfg`) -> structured control flow
-//! (`ssa_reloop2`, a from-scratch Stackifier that — unlike the older `ssa-reloop` crate —
-//! doesn't wrap the external `relooper` crate, whose original design assumed a bytecode
-//! target rather than a generic CFG) -> Jade `Operation`s (`portal_solutions_jade_vm`).
+//! which internally lowers through `portal_jsc_swc_cfg`) -> Jade `Operation`s
+//! (`portal_solutions_jade_vm`).
+//!
+//! Jade bytecode is now itself a flat, jump-based CFG (`JMP`/`CONDJMP`/`SWITCH` name
+//! byte-offset targets directly; `RET` is valid in any block) — see
+//! `docs/bytecode-cfg-plan.md`. TAC's own blocks/terminators
+//! (`TBlock`/`TTerm::{Jmp,CondJmp,Switch,Return}`) map almost 1:1 onto Jade's, so this
+//! frontend just walks `TCfg` directly: no restructuring step, no flag-passing
+//! workarounds for `return` — every TAC block becomes one Jade block at its own byte
+//! offset, and every TAC terminator becomes the matching Jade terminator.
 //!
 //! **Scope**: only lowers constructs that have a direct Jade bytecode opcode — see
 //! `packages/jade-data/index.ts` for the authoritative opcode list. Notably, Jade bytecode
 //! currently has no arithmetic opcodes (only the six comparisons), no way to bind function
 //! parameters to state slots, no exception handling, and no opcode for `undefined` as a
 //! produced value. Everything without a direct mapping is an explicit
-//! [`FrontendError::Unsupported`], never a silent miscompile. See
-//! `docs/bytecode-cfg-plan.md` for future plans to move the bytecode format itself to a
-//! CFG-native representation, which would remove the need for the structuring step here.
+//! [`FrontendError::Unsupported`], never a silent miscompile.
 
 use std::collections::HashMap;
 
-use portal_jsc_swc_tac::{Item, LId, TBlock, TCallee, TCatch, TCfg, TFunc, TPostecedent, TStmt, TTerm};
+use portal_jsc_swc_tac::{Item, LId, TBlock, TBlockId, TCallee, TCatch, TCfg, TFunc, TStmt, TTerm};
 use portal_solutions_jade_vm::{Operand, Operation, SignedOperand};
-use ssa_reloop2::{BranchMode, StructuredBlock};
 use swc_common::sync::Lrc;
 use swc_common::{FileName, SourceMap};
 use swc_ecma_ast::{BinaryOp, BlockStmt, Function, Lit, MetaPropKind};
@@ -115,16 +118,13 @@ fn parse_script(src: &str) -> Result<Vec<swc_ecma_ast::Stmt>, FrontendError> {
     Ok(script.body)
 }
 
-/// Per-function lowering state: a fresh Jade state-slot numbering (parameters and
-/// temporaries alike), plus the loop-nesting context needed to translate
-/// `ssa_reloop2::BranchMode::{LoopBreak,LoopContinue}` into Jade's structured (no
-/// break/continue) `WHILE`.
 #[derive(Default)]
 struct Compiler {
     /// Byte-encoded bodies of nested functions, appended after the top-level code.
     /// Each entry's start offset (relative to the *final* buffer, after the caller
     /// concatenates `main ++ trailer`) is threaded back into the `FN` opcode that
-    /// references it.
+    /// references it. Unused for now — nested closures (`Item::Func`) aren't wired up
+    /// yet (see `lower_item`), so this is always empty in practice.
     trailer: Vec<u8>,
 }
 
@@ -136,30 +136,6 @@ struct FnLowering<'a> {
     /// therefore yields `undefined`, used for e.g. `return;` (Jade has no dedicated
     /// "produce undefined" opcode).
     undefined_slot: Option<u32>,
-    /// Lazily-allocated "control-flow flag" slot, used to encode which branch of an
-    /// `if`/`Multiple` dispatch was taken so a Jade `SWITCH` can pick the matching arm.
-    cff_slot: Option<u32>,
-    /// Innermost-first stack of `(loop_id, break_flag_slot)` for currently-open loops.
-    loop_stack: Vec<(u32, u32)>,
-    /// Lazily-allocated slot holding the function's eventual return value. Jade's `RET`
-    /// opcode is only valid as the very last op of the *whole* function body — nested
-    /// `IF`/`WHILE`/`SWITCH` bodies dispatch through `exec_op`, which has no arm for it
-    /// (see `jade-vm-core::dispatch::exec_op`'s catch-all `"unexpected opcode"`). So a
-    /// `return` reached from inside any nested body writes here and sets
-    /// `not_returned_flag` instead of emitting `RET` directly; the real `RET` is emitted
-    /// once, by `compile_function`, after the whole structured tree has been lowered.
-    return_slot: Option<u32>,
-    /// Eagerly-allocated bool flag, `true` until an early return sets it `false`.
-    ///
-    /// This is needed even for a plain, non-loop `if (c) { return a; } else { return b; }`:
-    /// `ssa-reloop2`'s reconverge heuristic (`find_reconverge`), when every branch is a
-    /// dead end (no further targets, as any `return`-terminated block is), can only own
-    /// one branch's region and hoists the *other* branch's content into the Multiple's
-    /// shared, unconditionally-run `next` — so without this flag that branch's value would
-    /// be silently overwritten after the switch. Every loop's `WHILE` condition is also
-    /// gated by its own break flag (see `loop_stack` above), and the code following a loop
-    /// is additionally gated by this flag.
-    not_returned_flag: u32,
 }
 
 impl Compiler {
@@ -172,90 +148,132 @@ impl Compiler {
             slots: HashMap::new(),
             next_slot: 0,
             undefined_slot: None,
-            cff_slot: None,
-            loop_stack: Vec::new(),
-            return_slot: None,
-            not_returned_flag: 0,
         };
-        lowering.not_returned_flag = lowering.fresh_slot();
         // `compile_to_bytecode` always synthesizes a zero-parameter function (see
         // `compile_to_bytecode`), so `tfunc.params` is always empty here — nothing to bind.
-        let structured = ssa_reloop2::go(tfunc);
-        reject_return_inside_loop(&structured, &tfunc.cfg)?;
-        let mut main = Operation::Bool { val: true, dest: lowering.not_returned_flag }.emit().collect::<Vec<_>>();
-        lowering.lower_block(&structured, &mut self.trailer, &mut main)?;
-        let ret_op = match lowering.return_slot {
-            Some(slot) => Operand::StateRef(slot),
-            None => lowering.undefined_operand(),
-        };
-        main.extend(Operation::Ret(ret_op).emit());
+        let main = lowering.compile_blocks(tfunc.entry, &mut self.trailer)?;
         Ok((main, std::mem::take(&mut self.trailer)))
     }
 }
 
-/// Conservative pre-check: reject a function outright if it contains any loop *and* more
-/// than one distinct `return`-terminated block.
-///
-/// `ssa-reloop2`'s reconverge heuristic (`find_reconverge` in the `ssa-reloop2` crate)
-/// assumes every edge leaving a loop's structural slice converges on that loop's single
-/// shared `next`. A `return` reached via a branch nested inside a loop body breaks that
-/// assumption — its content ends up neither in its own arm nor in `next`, so it's silently
-/// never emitted at all. Detecting the exact unsafe shape precisely would need the same
-/// dominance analysis `ssa-reloop2` does internally; this over-approximates instead
-/// (rejecting some loops that would actually be fine, e.g. an early return positioned
-/// entirely before a loop starts) until the bytecode format itself moves to a CFG — see
-/// `docs/bytecode-cfg-plan.md`.
-fn reject_return_inside_loop(
-    sb: &StructuredBlock<portal_jsc_swc_tac::TBlockId>,
-    cfg: &TCfg,
-) -> Result<(), FrontendError> {
-    let mut has_loop = false;
-    let mut return_labels = std::collections::BTreeSet::new();
-    walk(sb, &mut has_loop, &mut return_labels, cfg);
-
-    fn walk(
-        sb: &StructuredBlock<portal_jsc_swc_tac::TBlockId>,
-        has_loop: &mut bool,
-        return_labels: &mut std::collections::BTreeSet<portal_jsc_swc_tac::TBlockId>,
-        cfg: &TCfg,
-    ) {
-        match sb {
-            StructuredBlock::Simple(s) => {
-                if matches!(cfg.blocks[s.label].post.term, TTerm::Return(_)) {
-                    return_labels.insert(s.label);
-                }
-                if let Some(im) = &s.immediate {
-                    walk(im, has_loop, return_labels, cfg);
-                }
-                if let Some(nx) = &s.next {
-                    walk(nx, has_loop, return_labels, cfg);
-                }
-            }
-            StructuredBlock::Loop(l) => {
-                *has_loop = true;
-                walk(&l.inner, has_loop, return_labels, cfg);
-                if let Some(nx) = &l.next {
-                    walk(nx, has_loop, return_labels, cfg);
-                }
-            }
-            StructuredBlock::Multiple(m) => {
-                for h in &m.handled {
-                    walk(&h.inner, has_loop, return_labels, cfg);
-                }
-            }
-        }
-    }
-
-    if has_loop && return_labels.len() > 1 {
-        return unsupported(
-            "return from inside a loop body, alongside another return elsewhere in the \
-             same function (not yet supported by this frontend — see docs/bytecode-cfg-plan.md)",
-        );
-    }
-    Ok(())
+/// One TAC block, lowered to Jade bytecode: the straight-line ops as bytes, plus its
+/// terminator lowered *twice* — once with placeholder (`0`) jump targets purely to learn
+/// its encoded byte length (`Jmp`/`CondJmp`/`Switch`'s target fields are fixed-width
+/// regardless of value), and once for real once every block's offset is known. See
+/// `FnLowering::compile_blocks`.
+struct LoweredBlock {
+    ops_bytes: Vec<u8>,
+    term: TTerm,
 }
 
 impl<'a> FnLowering<'a> {
+    /// Discover every TAC block reachable from `entry`, lower each one's straight-line
+    /// ops, assign each a stable byte offset (a simple prefix sum over emission order —
+    /// `entry` always first, so it always lands at offset `0`), then lower every block's
+    /// terminator with the now-known real target offsets and concatenate.
+    fn compile_blocks(&mut self, entry: TBlockId, trailer: &mut Vec<u8>) -> Result<Vec<u8>, FrontendError> {
+        let order = self.discover_reachable(entry)?;
+        let mut lowered: Vec<(TBlockId, LoweredBlock)> = Vec::with_capacity(order.len());
+        for id in &order {
+            let block: &TBlock = &self.tcfg.blocks[*id];
+            let mut ops_bytes = Vec::new();
+            for stmt in &block.stmts {
+                self.lower_stmt(stmt, &mut ops_bytes)?;
+            }
+            if !matches!(block.post.catch, TCatch::Throw) {
+                return unsupported("try/catch (Jade bytecode has no exception-handling opcode)");
+            }
+            lowered.push((*id, LoweredBlock { ops_bytes, term: block.post.term.clone() }));
+        }
+
+        // Placeholder-target terminator lengths, to compute each block's byte offset.
+        let mut offsets: HashMap<TBlockId, u32> = HashMap::with_capacity(lowered.len());
+        let mut cursor = 0u32;
+        for (id, block) in &lowered {
+            offsets.insert(*id, cursor);
+            let term_len = self.emit_terminator(&block.term, &offsets, true)?.len() as u32;
+            cursor += block.ops_bytes.len() as u32 + term_len;
+        }
+
+        let mut out = Vec::with_capacity(cursor as usize);
+        for (_, block) in &lowered {
+            out.extend_from_slice(&block.ops_bytes);
+            out.extend(self.emit_terminator(&block.term, &offsets, false)?);
+        }
+        let _ = trailer; // nested functions aren't wired up yet; see `Compiler::trailer`.
+        Ok(out)
+    }
+
+    /// BFS over `TTerm`'s jump targets, starting at `entry`. `entry` is always first in
+    /// the returned order (so it always ends up at byte offset `0`); the rest follow in
+    /// discovery order. Unreachable TAC blocks (dead code from AST/TAC lowering) are
+    /// never visited, matching how a well-formed compiler naturally drops them.
+    fn discover_reachable(&self, entry: TBlockId) -> Result<Vec<TBlockId>, FrontendError> {
+        let mut order = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        let mut worklist = std::collections::VecDeque::new();
+        worklist.push_back(entry);
+        visited.insert(entry);
+        while let Some(id) = worklist.pop_front() {
+            order.push(id);
+            let block = &self.tcfg.blocks[id];
+            for target in Self::targets_of(&block.post.term)? {
+                if visited.insert(target) {
+                    worklist.push_back(target);
+                }
+            }
+        }
+        Ok(order)
+    }
+
+    /// The set of blocks a terminator can jump to (empty for `Return`/error terminators).
+    fn targets_of(term: &TTerm) -> Result<Vec<TBlockId>, FrontendError> {
+        Ok(match term {
+            TTerm::Return(_) => vec![],
+            TTerm::Jmp(id) => vec![*id],
+            TTerm::CondJmp { if_true, if_false, .. } => vec![*if_true, *if_false],
+            TTerm::Switch { .. } => return unsupported("`switch` statement (JS `switch`, not yet lowered)"),
+            TTerm::Throw(_) => return unsupported("`throw` (Jade bytecode has no exception-handling opcode)"),
+            TTerm::Tail { .. } => return unsupported("tail call"),
+            TTerm::Default => return unsupported("internal invariant: unreachable TAC terminator"),
+        })
+    }
+
+    /// Lower `term` to Jade bytecode. When `placeholder` is set, every jump target is
+    /// encoded as `0` — used only to measure the terminator's byte length (fixed-width
+    /// regardless of target value) before real offsets are known; `offsets` is ignored
+    /// in that mode (may be incomplete).
+    fn emit_terminator(
+        &mut self,
+        term: &TTerm,
+        offsets: &HashMap<TBlockId, u32>,
+        placeholder: bool,
+    ) -> Result<Vec<u8>, FrontendError> {
+        let target = |id: &TBlockId| -> u32 {
+            if placeholder { 0 } else { offsets[id] }
+        };
+        Ok(match term {
+            TTerm::Return(val) => {
+                let op = match val {
+                    Some(id) => self.operand_for(id),
+                    None => self.undefined_operand(),
+                };
+                Operation::Ret(op).emit().collect()
+            }
+            TTerm::Jmp(id) => Operation::Jmp { target: target(id) }.emit().collect(),
+            TTerm::CondJmp { cond, if_true, if_false } => {
+                let cond_op = self.operand_for(cond);
+                Operation::CondJmp { cond: cond_op, if_true: target(if_true), if_false: target(if_false) }
+                    .emit()
+                    .collect()
+            }
+            TTerm::Switch { .. } | TTerm::Throw(_) | TTerm::Tail { .. } | TTerm::Default => {
+                // `discover_reachable` already rejects these before we ever get here.
+                return unsupported("internal invariant: unreachable TAC terminator reached emit_terminator");
+            }
+        })
+    }
+
     fn slot_for(&mut self, id: &Ident) -> u32 {
         if let Some(&s) = self.slots.get(id) {
             return s;
@@ -286,43 +304,6 @@ impl<'a> FnLowering<'a> {
             self.next_slot += 1;
         }
         Operand::StateRef(slot)
-    }
-
-    fn cff_slot(&mut self) -> u32 {
-        if let Some(s) = self.cff_slot {
-            return s;
-        }
-        let s = self.fresh_slot();
-        self.cff_slot = Some(s);
-        s
-    }
-
-    fn return_slot(&mut self) -> u32 {
-        if let Some(s) = self.return_slot {
-            return s;
-        }
-        let s = self.fresh_slot();
-        self.return_slot = Some(s);
-        s
-    }
-
-    /// Lower `next` (the code that structurally follows a block/loop), guarded by
-    /// `not_returned_flag` — see the field's doc comment for why this guard is required
-    /// even outside of loops.
-    fn lower_continuation(
-        &mut self,
-        next: &Option<Box<StructuredBlock<portal_jsc_swc_tac::TBlockId>>>,
-        trailer: &mut Vec<u8>,
-        out: &mut Vec<u8>,
-    ) -> Result<(), FrontendError> {
-        let Some(nx) = next else { return Ok(()) };
-        let mut body = Vec::new();
-        self.lower_block(nx, trailer, &mut body)?;
-        out.extend(
-            Operation::If { cond: Operand::StateRef(self.not_returned_flag), then_body: body, else_body: Vec::new() }
-                .emit(),
-        );
-        Ok(())
     }
 
     /// Lower a single TAC statement, materializing its value into a slot determined by
@@ -532,197 +513,6 @@ impl<'a> FnLowering<'a> {
         out.extend(bytes);
         Ok(())
     }
-
-    /// Lower a structured-control-flow node into Jade bytecode, appending nested-function
-    /// bodies to `trailer` and emitting the current function's own code into `out`.
-    fn lower_block(
-        &mut self,
-        sb: &StructuredBlock<portal_jsc_swc_tac::TBlockId>,
-        trailer: &mut Vec<u8>,
-        out: &mut Vec<u8>,
-    ) -> Result<(), FrontendError> {
-        match sb {
-            StructuredBlock::Simple(s) => {
-                let block: &TBlock = &self.tcfg.blocks[s.label];
-                for stmt in &block.stmts {
-                    self.lower_stmt(stmt, out)?;
-                }
-                if !matches!(block.post.catch, TCatch::Throw) {
-                    return unsupported("try/catch (Jade bytecode has no exception-handling opcode)");
-                }
-                // `lower_terminator` fully handles `s.immediate` itself (it is always either
-                // `None` or `Some(Multiple)` — ssa-reloop2 never puts a plain fallthrough
-                // block there, only the reconvergence-via-switch case — and the switch is
-                // built directly from `branches`/`immediate` inside `lower_terminator`).
-                let terminated = self.lower_terminator(&block.post, &s.branches, &s.immediate, trailer, out)?;
-                if !terminated {
-                    self.lower_continuation(&s.next, trailer, out)?;
-                }
-                Ok(())
-            }
-            StructuredBlock::Loop(l) => {
-                let break_flag = self.fresh_slot();
-                out.extend(Operation::Bool { val: true, dest: break_flag }.emit());
-                self.loop_stack.push((l.loop_id, break_flag));
-                let mut body = Vec::new();
-                self.lower_block(&l.inner, trailer, &mut body)?;
-                self.loop_stack.pop();
-                out.extend(
-                    Operation::While {
-                        cond: Operand::StateRef(break_flag),
-                        body,
-                        next: Operand::StateRef(break_flag),
-                    }
-                    .emit(),
-                );
-                self.lower_continuation(&l.next, trailer, out)?;
-                Ok(())
-            }
-            StructuredBlock::Multiple(_) => {
-                unsupported("Multiple block reached outside of terminator dispatch (internal invariant)")
-            }
-        }
-    }
-
-    /// Handle one `branches`-mapped target during terminator lowering: `None` output
-    /// means "nothing to emit here, the continuation lives in `next`/the `Multiple`
-    /// dispatch"; `Some` early-returns from the current arm.
-    fn lower_branch_arm(&mut self, target: portal_jsc_swc_tac::TBlockId, branches: &std::collections::BTreeMap<portal_jsc_swc_tac::TBlockId, BranchMode>) -> Result<Vec<u8>, FrontendError> {
-        match branches.get(&target) {
-            None | Some(BranchMode::MergedBranch) => Ok(Vec::new()),
-            Some(BranchMode::LoopContinue(_)) => Ok(Vec::new()),
-            Some(BranchMode::LoopBreak(id)) => {
-                let flag = self
-                    .loop_stack
-                    .iter()
-                    .rev()
-                    .find(|(lid, _)| lid == id)
-                    .map(|(_, slot)| *slot)
-                    .ok_or_else(|| FrontendError::Tac("LoopBreak with no matching enclosing loop".into()))?;
-                Ok(Operation::Bool { val: false, dest: flag }.emit().collect())
-            }
-            Some(other) => unsupported(format!("{other:?} branch mode")),
-        }
-    }
-
-    /// Handle one target during a *Multiple*-dispatch terminator: as above, but on the
-    /// `MergedBranch`/unlisted path we additionally set the `cff` slot so the following
-    /// `SWITCH` picks the right arm.
-    fn lower_branch_arm_with_cff(
-        &mut self,
-        target: portal_jsc_swc_tac::TBlockId,
-        branches: &std::collections::BTreeMap<portal_jsc_swc_tac::TBlockId, BranchMode>,
-    ) -> Result<Vec<u8>, FrontendError> {
-        match branches.get(&target) {
-            None | Some(BranchMode::MergedBranch) => {
-                let cff = self.cff_slot();
-                Ok(Operation::Lit32 { dest: cff, val: target.index() as u32 }.emit().collect())
-            }
-            _ => self.lower_branch_arm(target, branches),
-        }
-    }
-
-    /// Lower `post`'s terminator. Returns `Ok(true)` if it fully terminates this arm of
-    /// control flow — currently only a bare `Return` (so the caller must not additionally
-    /// process `next`, which would be unreachable dead code after it anyway).
-    fn lower_terminator(
-        &mut self,
-        post: &TPostecedent,
-        branches: &std::collections::BTreeMap<portal_jsc_swc_tac::TBlockId, BranchMode>,
-        immediate: &Option<Box<StructuredBlock<portal_jsc_swc_tac::TBlockId>>>,
-        trailer: &mut Vec<u8>,
-        out: &mut Vec<u8>,
-    ) -> Result<bool, FrontendError> {
-        match &post.term {
-            TTerm::Return(val) => {
-                if !self.loop_stack.is_empty() {
-                    // `ssa-reloop2`'s reconverge heuristic doesn't own a `return`'s content
-                    // as a distinct exit target when it's nested inside a loop's own
-                    // conditional (unlike the non-loop case, `not_returned_flag` gating
-                    // alone isn't enough here — the content silently never gets emitted
-                    // at all). Reject rather than silently miscompile; see
-                    // `docs/bytecode-cfg-plan.md`.
-                    return unsupported(
-                        "return from inside a loop body (not yet supported by this frontend)",
-                    );
-                }
-                // Can't emit `RET` here — see the doc comment on `FnLowering::return_slot`.
-                if let Some(id) = val {
-                    let val_op = self.operand_for(id);
-                    let slot = self.return_slot();
-                    out.extend(Operation::Sel { cond: Operand::Literal(1), then: val_op, else_: val_op, dest: slot }.emit());
-                }
-                out.extend(Operation::Bool { val: false, dest: self.not_returned_flag }.emit());
-                Ok(true)
-            }
-            TTerm::Default => Ok(false),
-            TTerm::Jmp(target) => {
-                let uses_multi = matches!(immediate.as_deref(), Some(StructuredBlock::Multiple(_)));
-                let bytes = if uses_multi {
-                    self.lower_branch_arm_with_cff(*target, branches)?
-                } else {
-                    self.lower_branch_arm(*target, branches)?
-                };
-                out.extend(bytes);
-                if let Some(im) = immediate {
-                    self.lower_dispatch(im, trailer, out)?;
-                }
-                // Every switch case `break_after`s, so control always falls through past
-                // the dispatch to whatever `next` represents — the caller must still run it.
-                Ok(false)
-            }
-            TTerm::CondJmp { cond, if_true, if_false } => {
-                let cond_op = self.operand_for(cond);
-                let uses_multi = matches!(immediate.as_deref(), Some(StructuredBlock::Multiple(_)));
-                let (then_body, else_body) = if uses_multi {
-                    (
-                        self.lower_branch_arm_with_cff(*if_true, branches)?,
-                        self.lower_branch_arm_with_cff(*if_false, branches)?,
-                    )
-                } else {
-                    (
-                        self.lower_branch_arm(*if_true, branches)?,
-                        self.lower_branch_arm(*if_false, branches)?,
-                    )
-                };
-                out.extend(Operation::If { cond: cond_op, then_body, else_body }.emit());
-                if let Some(im) = immediate {
-                    self.lower_dispatch(im, trailer, out)?;
-                }
-                Ok(false)
-            }
-            TTerm::Switch { .. } => unsupported("`switch` statement (structural Multiple-dispatch for it is not yet wired)"),
-            TTerm::Throw(_) => unsupported("`throw` (Jade bytecode has no exception-handling opcode)"),
-            TTerm::Tail { .. } => unsupported("tail call"),
-        }
-    }
-
-    /// Lower the `Multiple` dispatch reached via `immediate`, as a Jade `SWITCH` on the
-    /// `cff` slot (one case per `HandledBlock`, matched on its (sole) label's index).
-    fn lower_dispatch(
-        &mut self,
-        im: &StructuredBlock<portal_jsc_swc_tac::TBlockId>,
-        trailer: &mut Vec<u8>,
-        out: &mut Vec<u8>,
-    ) -> Result<(), FrontendError> {
-        let StructuredBlock::Multiple(m) = im else {
-            return unsupported("terminator's `immediate` was not a Multiple block (internal invariant)");
-        };
-        let cff = self.cff_slot();
-        let mut cases = Vec::with_capacity(m.handled.len());
-        for h in &m.handled {
-            let &[label] = h.labels.as_slice() else {
-                return unsupported("Multiple arm with zero or multiple labels (not produced by ssa-reloop2 today, but not handled here)");
-            };
-            let mut body = Vec::new();
-            self.lower_block(&h.inner, trailer, &mut body)?;
-            cases.push((label.index() as u32, body));
-        }
-        out.extend(
-            Operation::Switch { val: Operand::StateRef(cff), cases, default_body: Vec::new() }.emit(),
-        );
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -730,49 +520,15 @@ mod tests {
     use super::*;
     use portal_solutions_jade_vm_jit::{compile, Config, VecRegistry};
 
-    /// Compile `src` end-to-end (parse -> TAC -> reloop -> bytecode -> JIT) and return the
-    /// emitted JS source. Structural assertions on this string are the same style already
-    /// used by `jade-vm-jit`'s own unit tests; full runtime semantics are covered by the
-    /// browser end-to-end test in `jade-vm-e2e-tests`.
+    /// Compile `src` end-to-end (parse -> TAC -> bytecode -> JIT) and return the emitted
+    /// JS source. Structural assertions on this string are the same style already used by
+    /// `jade-vm-jit`'s own unit tests; full runtime semantics are covered by the
+    /// real-Node-execution tests below and the browser end-to-end test in
+    /// `jade-vm-e2e-tests`.
     fn jit_js(src: &str) -> String {
         let bytecode = compile_to_bytecode(src).expect("frontend compile failed");
         let (js, _reg) = compile(&bytecode, VecRegistry::new(), Config::default()).expect("JIT compile failed");
         js
-    }
-
-    #[test]
-    fn compiles_return_literal() {
-        let js = jit_js("return 42;");
-        assert!(js.contains("return state["), "got:\n{js}");
-    }
-
-    #[test]
-    fn compiles_if_else_via_cff_switch() {
-        // Two non-trivial, reconverging arms force the structural Multiple/cff dispatch.
-        let js = jit_js("if (true) { var x = 1; } else { var x = 2; } return x;");
-        assert!(js.contains("switch"), "expected a structural switch dispatch, got:\n{js}");
-    }
-
-    #[test]
-    fn compiles_while_loop() {
-        // A literal `true` condition is compile-time-foldable and never produces a genuine
-        // back-edge (the CFG proves there's no second iteration); a re-assigned variable
-        // condition forces a real merge point at the loop header instead.
-        let js = jit_js("var x = true; while (x) { x = false; } return x;");
-        assert!(js.contains("while (v"), "got:\n{js}");
-    }
-
-    #[test]
-    fn compiles_nested_if_in_while() {
-        let js = jit_js("var x = true; while (x) { x = false; if (true) { var y = 1; } else { var y = 2; } } return x;");
-        assert!(js.contains("while (v"), "got:\n{js}");
-        assert!(js.contains("switch"), "got:\n{js}");
-    }
-
-    #[test]
-    fn rejects_unsupported_switch_statement() {
-        let err = compile_to_bytecode("switch (1) { case 1: return 1; default: return 0; }").unwrap_err();
-        assert!(matches!(err, FrontendError::Unsupported(_)), "got: {err:?}");
     }
 
     /// Actually *run* the JIT-emitted JS via Node (rather than just checking its shape),
@@ -810,15 +566,49 @@ mod tests {
     }
 
     #[test]
-    fn rejects_return_inside_loop_body() {
-        // See `reject_return_inside_loop`'s doc comment: `ssa-reloop2`'s reconverge
-        // heuristic silently drops this specific shape's content instead of miscompiling
-        // predictably, so it's rejected outright at compile time.
-        let err = compile_to_bytecode(
-            "var x = true; while (x) { if (true) { return 7; } else { x = false; } } return 99;",
-        )
-        .unwrap_err();
+    fn compiles_return_literal() {
+        assert_eq!(run_js("return 42;"), "42");
+    }
+
+    #[test]
+    fn compiles_if_else() {
+        assert_eq!(run_js("if (true) { return 1; } else { return 2; }"), "1");
+        assert_eq!(run_js("if (false) { return 1; } else { return 2; }"), "2");
+    }
+
+    #[test]
+    fn compiles_while_loop() {
+        assert_eq!(run_js("var x = true; while (x) { x = false; } return x;"), "false");
+    }
+
+    #[test]
+    fn compiles_nested_if_in_while() {
+        let js = jit_js(
+            "var x = true; while (x) { x = false; if (true) { var y = 1; } else { var y = 2; } } return x;",
+        );
+        assert!(js.contains("__ip"), "expected a jump-based dispatch loop, got:\n{js}");
+        assert_eq!(
+            run_js("var x = true; while (x) { x = false; if (true) { var y = 1; } else { var y = 2; } } return x;"),
+            "false"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_switch_statement() {
+        let err = compile_to_bytecode("switch (1) { case 1: return 1; default: return 0; }").unwrap_err();
         assert!(matches!(err, FrontendError::Unsupported(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn return_inside_while_loop_now_works_correctly() {
+        // Previously rejected outright (`rejects_return_inside_loop_body`): the old
+        // structured (`ssa-reloop2`-based) lowering silently dropped this pattern's
+        // content. Jade bytecode is jump-based now, so `return` is valid in any block —
+        // this compiles *and* executes correctly, with no special-casing at all.
+        assert_eq!(
+            run_js("var x = true; while (x) { if (true) { return 7; } else { x = false; } } return 99;"),
+            "7"
+        );
     }
 
     #[test]

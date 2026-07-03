@@ -11,11 +11,14 @@
 //! - **`Value`s are variable IDs.** Each produced value is either a freshly
 //!   minted `v{n}` JS variable (for computed ops) or an inline leaf expression
 //!   (literals, `state[idx]` reads).
-//! - **All branches are emitted.** `if_op` emits *both* arms; `switch_op` emits
-//!   every case and the default — the branch closures are all invoked once so
-//!   their code is captured.
-//! - **`while` bodies are emitted once.** `while_op` invokes the body closure a
-//!   single time, wrapping the emitted statements in a real JS `while`.
+//! - **Control flow is a block-dispatch loop (Tier 0).** Jade bytecode is a flat
+//!   sequence of basic blocks ending in `JMP`/`CONDJMP`/`SWITCH`/`RET` (byte-offset
+//!   targets, no nested bodies). `emit_program` discovers all blocks reachable from
+//!   the entry point and emits `let __ip = ...; while (true) { switch (__ip) { case
+//!   <offset>: { ...; __ip = <target>; continue; } ... } }` — always correct, since a
+//!   `return` now works from any block (there's no more "nested body" context to be
+//!   inside of). See `docs/bytecode-cfg-plan.md` for the planned nicer-output tiers
+//!   layered on top of this always-correct baseline.
 //! - **Function registration is delegated.** `op_fn` compiles the function body
 //!   into its own source string and hands it to a user-supplied [`FnRegistry`];
 //!   registered functions always take the implicit `tenant` and `nt` parameters
@@ -465,122 +468,166 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
         }
         val
     }
+}
 
-    fn while_op<Ctx, F>(&mut self, ctx: &mut Ctx, init: JsVar, mut body: F) -> Result<JsVar, String>
-    where
-        F: FnMut(&mut Self, &mut Ctx) -> Result<JsVar, String>,
-    {
-        // Bind the loop's condition variable, then emit a real JS `while` whose
-        // body is emitted exactly once.
-        let n = self.fresh();
-        self.line(format!("let v{n} = {init};"));
-        self.line(format!("while (v{n}) {{"));
-        let next = body(self, ctx)?;
-        self.line(format!("v{n} = {next};"));
-        self.line("}");
-        Ok(JsVar::Var(n))
-    }
+/// One basic block discovered from the bytecode: a straight-line run of
+/// value-producing ops followed by exactly one terminator (`Ret`/`Jmp`/`CondJmp`/
+/// `Switch`).
+struct Block {
+    ops: Vec<Operation>,
+    term: Operation,
+}
 
-    fn if_op<Ctx, FT, FE>(
-        &mut self,
-        ctx: &mut Ctx,
-        cond: JsVar,
-        then_body: FT,
-        else_body: FE,
-    ) -> Result<JsVar, String>
-    where
-        FT: FnOnce(&mut Self, &mut Ctx) -> Result<JsVar, String>,
-        FE: FnOnce(&mut Self, &mut Ctx) -> Result<JsVar, String>,
-    {
-        // Both arms are always emitted.
-        self.line(format!("if ({cond}) {{"));
-        then_body(self, ctx)?;
-        self.line("} else {");
-        else_body(self, ctx)?;
-        self.line("}");
-        Ok(self.undefined())
-    }
-
-    fn switch_op<Ctx, F, D>(
-        &mut self,
-        ctx: &mut Ctx,
-        val: JsVar,
-        cases: impl IntoIterator<Item = (u32, F)>,
-        default_body: D,
-    ) -> Result<JsVar, String>
-    where
-        F: FnOnce(&mut Self, &mut Ctx) -> Result<JsVar, String>,
-        D: FnOnce(&mut Self, &mut Ctx) -> Result<JsVar, String>,
-    {
-        // Every case and the default are always emitted.
-        self.line(format!("switch ({val}) {{"));
-        for (cv, branch) in cases {
-            self.line(format!("case {cv}: {{"));
-            branch(self, ctx)?;
-            self.line("break; }");
+/// Discover every basic block reachable from `start_ip`, keyed by start byte offset.
+///
+/// This is a reachability walk (follows `Jmp`/`CondJmp`/`Switch` targets), not a
+/// fixed-range scan — it naturally stops at the current function's own boundary
+/// without needing to know where the next function's bytecode begins. Assumes
+/// well-formed input (as produced by `jade-vm-frontend`): every jump target names the
+/// *start* offset of some block, and blocks never overlap.
+fn discover_blocks(code: &[u8], start_ip: usize) -> Result<alloc::collections::BTreeMap<usize, Block>, String> {
+    let mut blocks = alloc::collections::BTreeMap::new();
+    let mut worklist = alloc::vec![start_ip];
+    while let Some(start) = worklist.pop() {
+        if blocks.contains_key(&start) {
+            continue;
         }
-        self.line("default: {");
-        default_body(self, ctx)?;
-        self.line("}");
-        self.line("}");
-        Ok(self.undefined())
+        let mut ip = start;
+        let mut ops = Vec::new();
+        loop {
+            let (op, rest) = Operation::parse(&code[ip..]).ok_or("jit: unexpected end of bytecode")?;
+            ip = code.len() - rest.len();
+            match &op {
+                Operation::Jmp { target } => {
+                    worklist.push(*target as usize);
+                    blocks.insert(start, Block { ops, term: op });
+                    break;
+                }
+                Operation::CondJmp { if_true, if_false, .. } => {
+                    worklist.push(*if_true as usize);
+                    worklist.push(*if_false as usize);
+                    blocks.insert(start, Block { ops, term: op });
+                    break;
+                }
+                Operation::Switch { cases, default_target, .. } => {
+                    for (_, target) in cases {
+                        worklist.push(*target as usize);
+                    }
+                    worklist.push(*default_target as usize);
+                    blocks.insert(start, Block { ops, term: op });
+                    break;
+                }
+                Operation::Ret(_) => {
+                    blocks.insert(start, Block { ops, term: op });
+                    break;
+                }
+                _ => ops.push(op),
+            }
+        }
+    }
+    Ok(blocks)
+}
+
+/// Emit one non-terminator op: `AWAIT`/`YIELD`/`YIELDSTAR` are special-cased (checked
+/// against the function's declared capabilities), everything else goes through the
+/// shared `exec_op`.
+fn emit_op<R: FnRegistry>(jit: &mut JsJit<'_, R>, code: &[u8], op: Operation) -> Result<(), String> {
+    match op {
+        Operation::Await { val: val_op, dest } => {
+            if !jit.is_async {
+                return Err("jit: AWAIT in non-async function".to_string());
+            }
+            let val = resolve(val_op, jit);
+            jit.line(format!("state[{dest}] = await {val};"));
+            Ok(())
+        }
+        Operation::Yield { val: val_op, dest } => {
+            if !jit.is_gen {
+                return Err("jit: YIELD in non-generator function".to_string());
+            }
+            let val = resolve(val_op, jit);
+            if jit.double_gen {
+                // doubleGen: tag native yields as pass-throughs.
+                jit.line(format!(
+                    "state[{dest}] = yield {{value: {val}, [Symbol.for(\"jade.through\")]: true}};"
+                ));
+            } else {
+                jit.line(format!("state[{dest}] = yield {val};"));
+            }
+            Ok(())
+        }
+        Operation::Yieldstar { val: val_op, dest } => {
+            if !jit.is_gen {
+                return Err("jit: YIELDSTAR in non-generator function".to_string());
+            }
+            let val = resolve(val_op, jit);
+            if jit.double_gen {
+                // doubleGen: use the unpack shim to handle guest-gen protocol.
+                // `unpackGuestGen` must be in scope (imported from shims).
+                jit.line(format!("state[{dest}] = yield* unpackGuestGen({val});"));
+            } else {
+                jit.line(format!("state[{dest}] = yield* {val};"));
+            }
+            Ok(())
+        }
+        _ => exec_op(op, code, jit),
     }
 }
 
-/// Drive `exec_op` over the bytecode at `start_ip`, emitting statements into
-/// `jit` until a `RET` (which becomes a JS `return`).
+/// Emit a block's terminator: a real `return`, or an assignment to `__ip` followed by
+/// `continue` (re-entering the dispatch `switch` at the top of the `while (true)` loop).
+fn emit_terminator<R: FnRegistry>(jit: &mut JsJit<'_, R>, term: Operation) -> Result<(), String> {
+    match term {
+        Operation::Ret(val_op) => {
+            let val = resolve(val_op, jit);
+            jit.line(format!("return {val};"));
+        }
+        Operation::Jmp { target } => {
+            jit.line(format!("__ip = {target}; continue;"));
+        }
+        Operation::CondJmp { cond, if_true, if_false } => {
+            let cond_val = resolve(cond, jit);
+            jit.line(format!("__ip = ({cond_val}) ? {if_true} : {if_false}; continue;"));
+        }
+        Operation::Switch { val, cases, default_target } => {
+            let val_val = resolve(val, jit);
+            jit.line(format!("switch ({val_val}) {{"));
+            for (cv, target) in cases {
+                jit.line(format!("case {cv}: __ip = {target}; break;"));
+            }
+            jit.line(format!("default: __ip = {default_target};"));
+            jit.line("}");
+            jit.line("continue;");
+        }
+        _ => return Err("jit: block did not end in a terminator (internal invariant)".to_string()),
+    }
+    Ok(())
+}
+
+/// Drive the bytecode at `start_ip` through block discovery, then emit a
+/// `while (true) { switch (__ip) { ... } }` dispatch loop — the JIT's always-correct
+/// baseline codegen (Tier 0; see `docs/bytecode-cfg-plan.md`). A `return` now works
+/// from any block, since there's no more nested-body context to be inside of.
 fn emit_program<R: FnRegistry>(
     jit: &mut JsJit<'_, R>,
     code: &[u8],
     start_ip: usize,
 ) -> Result<(), String> {
-    let mut ip = start_ip;
-    loop {
-        let (op, rest) = Operation::parse(&code[ip..]).ok_or("jit: unexpected end of bytecode")?;
-        ip = code.len() - rest.len();
-        match op {
-            Operation::Ret(val_op) => {
-                let val = resolve(val_op, jit);
-                jit.line(format!("return {val};"));
-                return Ok(());
-            }
-            Operation::Await { val: val_op, dest } => {
-                if !jit.is_async {
-                    return Err("jit: AWAIT in non-async function".to_string());
-                }
-                let val = resolve(val_op, jit);
-                jit.line(format!("state[{dest}] = await {val};"));
-            }
-            Operation::Yield { val: val_op, dest } => {
-                if !jit.is_gen {
-                    return Err("jit: YIELD in non-generator function".to_string());
-                }
-                let val = resolve(val_op, jit);
-                if jit.double_gen {
-                    // doubleGen: tag native yields as pass-throughs.
-                    jit.line(format!(
-                        "state[{dest}] = yield {{value: {val}, [Symbol.for(\"jade.through\")]: true}};"
-                    ));
-                } else {
-                    jit.line(format!("state[{dest}] = yield {val};"));
-                }
-            }
-            Operation::Yieldstar { val: val_op, dest } => {
-                if !jit.is_gen {
-                    return Err("jit: YIELDSTAR in non-generator function".to_string());
-                }
-                let val = resolve(val_op, jit);
-                if jit.double_gen {
-                    // doubleGen: use the unpack shim to handle guest-gen protocol.
-                    // `unpackGuestGen` must be in scope (imported from shims).
-                    jit.line(format!("state[{dest}] = yield* unpackGuestGen({val});"));
-                } else {
-                    jit.line(format!("state[{dest}] = yield* {val};"));
-                }
-            }
-            _ => exec_op(op, code, jit, &mut ())?,
+    let blocks = discover_blocks(code, start_ip)?;
+    jit.line(format!("let __ip = {start_ip};"));
+    jit.line("while (true) {");
+    jit.line("switch (__ip) {");
+    for (start, block) in blocks {
+        jit.line(format!("case {start}: {{"));
+        for op in block.ops {
+            emit_op(jit, code, op)?;
         }
+        emit_terminator(jit, block.term)?;
+        jit.line("}");
     }
+    jit.line("}");
+    jit.line("}");
+    Ok(())
 }
 
 /// Compile a Jade bytecode chunk into a JavaScript statement block.
@@ -630,34 +677,73 @@ mod tests {
         assert!(js.contains("return state[2];"), "got:\n{js}");
     }
 
-    #[test]
-    fn emits_if_both_branches() {
-        let then_body = chunk(&[Operation::Lit32 { dest: 1, val: 10 }]);
-        let else_body = chunk(&[Operation::Lit32 { dest: 1, val: 20 }]);
-        let code = chunk(&[
-            Operation::If { cond: Operand::StateRef(0), then_body, else_body },
-            Operation::Ret(Operand::StateRef(1)),
-        ]);
-        let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
-        assert!(js.contains("if (state[0]) {"), "got:\n{js}");
-        assert!(js.contains("} else {"), "got:\n{js}");
-        // Both arms emitted.
-        assert!(js.contains("state[1] = 10;"), "got:\n{js}");
-        assert!(js.contains("state[1] = 20;"), "got:\n{js}");
+    /// The number of bytes `op.emit()` produces. `Jmp`/`CondJmp`'s target fields are
+    /// fixed-width `u32`s regardless of value, so a placeholder-target op has the same
+    /// length as the real one — this lets tests lay out jump targets by construction,
+    /// without a patch-after-the-fact pass.
+    fn op_len(op: &Operation) -> u32 {
+        op.emit().count() as u32
     }
 
     #[test]
-    fn emits_while_loop_once() {
-        // while (state[0]) { state[0] = (state[0] - is faked via Lit32) }
-        let body = chunk(&[Operation::Lit32 { dest: 0, val: 0 }]);
-        let code = chunk(&[
-            Operation::While { cond: Operand::StateRef(0), body, next: Operand::StateRef(0) },
-            Operation::Ret(Operand::StateRef(0)),
-        ]);
+    fn emits_condjmp_dispatch_loop() {
+        // if (state[0]) { state[1] = 10; } else { state[1] = 20; } return state[1];
+        let then_body = chunk(&[Operation::Lit32 { dest: 1, val: 10 }]);
+        let else_body = chunk(&[Operation::Lit32 { dest: 1, val: 20 }]);
+        let ret_body = chunk(&[Operation::Ret(Operand::StateRef(1))]);
+
+        let condjmp_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let jmp_len = op_len(&Operation::Jmp { target: 0 });
+
+        let then_offset = condjmp_len;
+        let jmp_offset = then_offset + then_body.len() as u32;
+        let else_offset = jmp_offset + jmp_len;
+        let ret_offset = else_offset + else_body.len() as u32;
+
+        let mut code = Vec::new();
+        code.extend(Operation::CondJmp { cond: Operand::StateRef(0), if_true: then_offset, if_false: else_offset }.emit());
+        code.extend(then_body);
+        code.extend(Operation::Jmp { target: ret_offset }.emit());
+        code.extend(else_body);
+        code.extend(ret_body);
+
         let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
-        assert!(js.contains("while (v"), "got:\n{js}");
-        // The body's single statement is emitted exactly once.
+        assert!(js.contains("while (true) {"), "got:\n{js}");
+        assert!(js.contains("switch (__ip) {"), "got:\n{js}");
+        // Both arms emitted, each in their own case.
+        assert!(js.contains("state[1] = 10;"), "got:\n{js}");
+        assert!(js.contains("state[1] = 20;"), "got:\n{js}");
+        assert!(js.contains("return state[1];"), "got:\n{js}");
+    }
+
+    #[test]
+    fn emits_loop_body_once_via_dispatch_loop() {
+        // while (state[0]) { state[0] = 0; } return state[0];
+        // header (CondJmp state[0] -> body, exit), body (Lit32 state[0]=0; Jmp header), exit (Ret).
+        let ret_body = chunk(&[Operation::Ret(Operand::StateRef(0))]);
+        let body_ops = chunk(&[Operation::Lit32 { dest: 0, val: 0 }]);
+
+        let header_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let jmp_len = op_len(&Operation::Jmp { target: 0 });
+
+        let header_offset = 0u32;
+        let body_offset = header_len;
+        let exit_offset = body_offset + body_ops.len() as u32 + jmp_len;
+
+        let mut code = Vec::new();
+        code.extend(
+            Operation::CondJmp { cond: Operand::StateRef(0), if_true: body_offset, if_false: exit_offset }.emit(),
+        );
+        code.extend(body_ops);
+        code.extend(Operation::Jmp { target: header_offset }.emit());
+        code.extend(ret_body);
+
+        let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
+        assert!(js.contains("while (true) {"), "got:\n{js}");
+        assert!(js.contains("switch (__ip) {"), "got:\n{js}");
+        // The loop body's single statement is emitted exactly once (in its own case block).
         assert_eq!(js.matches("state[0] = 0;").count(), 1, "got:\n{js}");
+        assert!(js.contains("return state[0];"), "got:\n{js}");
     }
 
     /// Build a program whose first op is `FN` (with `variant`) pointing at a
@@ -822,5 +908,65 @@ mod tests {
         );
         let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), cfg).unwrap();
         assert!(js.contains("tenant.get(state[0], state[1])"), "got:\n{js}");
+    }
+
+    /// Actually *run* the JIT-emitted JS via Node (rather than just checking its shape) —
+    /// same pattern used in `crates/jade-vm-frontend`'s test suite.
+    fn run_js(body: &str) -> String {
+        let script = format!(
+            "const fn = new Function('tenant','nt','state', {:?}); console.log(JSON.stringify(fn(undefined,undefined,[])));",
+            body
+        );
+        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
+        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn condjmp_dispatch_executes_correctly() {
+        let then_body = chunk(&[Operation::Lit32 { dest: 1, val: 10 }]);
+        let else_body = chunk(&[Operation::Lit32 { dest: 1, val: 20 }]);
+        let ret_body = chunk(&[Operation::Ret(Operand::StateRef(1))]);
+        let condjmp_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let jmp_len = op_len(&Operation::Jmp { target: 0 });
+        let then_offset = condjmp_len;
+        let jmp_offset = then_offset + then_body.len() as u32;
+        let else_offset = jmp_offset + jmp_len;
+        let ret_offset = else_offset + else_body.len() as u32;
+
+        for cond_val in [true, false] {
+            let mut code = chunk(&[Operation::Bool { val: cond_val, dest: 0 }]);
+            code.extend(Operation::CondJmp { cond: Operand::StateRef(0), if_true: then_offset + 10, if_false: else_offset + 10 }.emit());
+            code.extend(then_body.clone());
+            code.extend(Operation::Jmp { target: ret_offset + 10 }.emit());
+            code.extend(else_body.clone());
+            code.extend(ret_body.clone());
+            let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
+            let result = run_js(&js);
+            let expected = if cond_val { "10" } else { "20" };
+            assert_eq!(result, expected, "cond={cond_val}, js:\n{js}");
+        }
+    }
+
+    #[test]
+    fn loop_executes_correctly() {
+        // Loop body runs exactly once, flips the flag false, exits, returns it.
+        let ret_body = chunk(&[Operation::Ret(Operand::StateRef(0))]);
+        let body_ops = chunk(&[Operation::Bool { val: false, dest: 0 }]);
+        let header_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let jmp_len = op_len(&Operation::Jmp { target: 0 });
+
+        let mut code = chunk(&[Operation::Bool { val: true, dest: 0 }]);
+        let header_offset = code.len() as u32;
+        let body_offset = header_offset + header_len;
+        let exit_offset = body_offset + body_ops.len() as u32 + jmp_len;
+        code.extend(Operation::CondJmp { cond: Operand::StateRef(0), if_true: body_offset, if_false: exit_offset }.emit());
+        code.extend(body_ops);
+        code.extend(Operation::Jmp { target: header_offset }.emit());
+        code.extend(ret_body);
+
+        let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
+        let result = run_js(&js);
+        assert_eq!(result, "false", "js:\n{js}");
     }
 }
