@@ -71,7 +71,7 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
-                state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
+                state[code().getUint32(ip,true)]=markGuestFn(spanner(function(this: any,...args: any[]): any{
                     const o=create(null);
                     for(const a in closureArgs)o[closureArgs[a]]={
                         get:()=>state[closureArgs[a]],
@@ -95,7 +95,7 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                         }),
                         ...args
                     ]);
-                },...spans);
+                },...spans),{abi:"closure"});
                 ip += 4;
                 break;
             }`,

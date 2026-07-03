@@ -2,6 +2,7 @@
 /* This is GENERATED code by `regen.ts` */
 import {type Tenant} from "./index.ts"
 import {THROUGH, createGuestGen, unpackGuestGen} from "./shims.ts"
+import {markGuestFn} from "./narrow.ts"
 export {THROUGH} from "./shims.ts"
 const {apply} = Reflect;
 const {create,defineProperties,freeze} = Object;
@@ -36,7 +37,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
-                state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
+                state[code().getUint32(ip,true)]=markGuestFn(spanner(function(this: any,...args: any[]): any{
                     const o=create(null);
                     for(const a in closureArgs)o[closureArgs[a]]={
                         get:()=>state[closureArgs[a]],
@@ -60,7 +61,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                         }),
                         ...args
                     ]);
-                },...spans);
+                },...spans),{abi:"closure"});
                 ip += 4;
                 break;
             }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {
@@ -174,7 +175,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
-                state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
+                state[code().getUint32(ip,true)]=markGuestFn(spanner(function(this: any,...args: any[]): any{
                     const o=create(null);
                     for(const a in closureArgs)o[closureArgs[a]]={
                         get:()=>state[closureArgs[a]],
@@ -198,7 +199,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                         }),
                         ...args
                     ]);
-                },...spans);
+                },...spans),{abi:"closure"});
                 ip += 4;
                 break;
             }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {
@@ -312,7 +313,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
-                state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
+                state[code().getUint32(ip,true)]=markGuestFn(spanner(function(this: any,...args: any[]): any{
                     const o=create(null);
                     for(const a in closureArgs)o[closureArgs[a]]={
                         get:()=>state[closureArgs[a]],
@@ -336,7 +337,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                         }),
                         ...args
                     ]);
-                },...spans);
+                },...spans),{abi:"closure"});
                 ip += 4;
                 break;
             }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {
@@ -450,7 +451,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
-                state[code().getUint32(ip,true)]=spanner(function(this: any,...args: any[]): any{
+                state[code().getUint32(ip,true)]=markGuestFn(spanner(function(this: any,...args: any[]): any{
                     const o=create(null);
                     for(const a in closureArgs)o[closureArgs[a]]={
                         get:()=>state[closureArgs[a]],
@@ -474,7 +475,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                         }),
                         ...args
                     ]);
-                },...spans);
+                },...spans),{abi:"closure"});
                 ip += 4;
                 break;
             }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {

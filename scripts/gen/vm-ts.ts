@@ -70,6 +70,7 @@ export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualize
 /* This is GENERATED code by \`regen.ts\` */
 import {type Tenant} from "./index.ts"
 import {THROUGH, createGuestGen, unpackGuestGen} from "./shims.ts"
+import {markGuestFn} from "./narrow.ts"
 export {THROUGH} from "./shims.ts"
 const {apply} = Reflect;
 const {create,defineProperties,freeze} = Object;

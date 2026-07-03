@@ -1,0 +1,23 @@
+[package]
+name = "portal-solutions-jade-vm-frontend"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description.workspace = true
+
+[dependencies]
+portal-solutions-jade-vm = { path = "../jade-vm", features = ["alloc"] }
+portal-jsc-swc-cfg = { workspace = true }
+portal-jsc-swc-tac = { workspace = true }
+portal-jsc-swc-util = { workspace = true }
+ssa-reloop2 = { workspace = true }
+cfg-traits = { workspace = true }
+arena-traits = { workspace = true }
+swc_atoms = { workspace = true }
+swc_common = { workspace = true }
+swc_ecma_ast = { workspace = true }
+swc_ecma_parser = { workspace = true }
+swc_ecma_visit = { workspace = true }
+
+[dev-dependencies]
+portal-solutions-jade-vm-jit = { path = "../jade-vm-jit" }

@@ -1,4 +1,32 @@
 import type { Tenant as Tenant_ } from "./index.ts";
+import { invokeTrap, narrow, type NarrowSpec } from "./narrow.ts";
+
+/** The shape of a descriptor as stored in the shadow / read from a guest-built LITOBJ. */
+type GuestDescriptor = {
+  value: unknown;
+  writable: boolean;
+  enumerable: boolean;
+  configurable: boolean;
+  get: (() => unknown) | undefined;
+  set: ((v: unknown) => void) | undefined;
+};
+
+// Getter/setter traps are validated as functions here; their *actual* calling convention
+// (if any — they might just be plain host functions) is looked up from the guest-function
+// registry at invocation time (`invokeTrap`), never guessed while narrowing.
+const DESCRIPTOR_SPEC: NarrowSpec<GuestDescriptor> = {
+  kind: "object",
+  fields: {
+    value: { kind: "any" },
+    // Guest-authored descriptors commonly omit these (e.g. accessor descriptors have no
+    // `writable`), so they default to `false` rather than rejecting the whole descriptor.
+    writable: { kind: "defaulted", inner: { kind: "typeof", tag: "boolean" }, default: false },
+    enumerable: { kind: "defaulted", inner: { kind: "typeof", tag: "boolean" }, default: false },
+    configurable: { kind: "defaulted", inner: { kind: "typeof", tag: "boolean" }, default: false },
+    get: { kind: "optional", inner: { kind: "guestFn" } },
+    set: { kind: "optional", inner: { kind: "guestFn" } },
+  },
+};
 
 // Multi-tenant object manager: each tenant keeps a private WeakMap "shadow" of
 // every object it creates, mapping property keys to descriptors. The object the
@@ -27,11 +55,23 @@ export class Tenant implements Tenant_ {
   get(obj: object, key: PropertyKey): unknown {
     const d = this.#shadowForKey(key).get(obj);
     if (!d) return undefined;
-    return "get" in d ? d.get?.call(obj) : d.value;
+    if (!("get" in d)) return d.value;
+    // `d.get` may be a guest function (created via the FN opcode) or a plain host
+    // function; invoke it respecting whichever ABI it actually has.
+    return d.get ? invokeTrap(d.get, this, obj, []) : undefined;
   }
 
   set(obj: object, key: PropertyKey, value: unknown): void {
-    this.#shadowForKey(key).set(obj, {
+    const shadow = this.#shadowForKey(key);
+    const existing = shadow.get(obj);
+    // Symmetric with `get()`: if there's an existing accessor descriptor for this
+    // (obj, key), route through its setter trap instead of silently clobbering it
+    // with a plain data descriptor.
+    if (existing && "set" in existing) {
+      if (existing.set) invokeTrap(existing.set, this, obj, [value]);
+      return;
+    }
+    shadow.set(obj, {
       value,
       writable: true,
       enumerable: true,
@@ -48,23 +88,30 @@ export class Tenant implements Tenant_ {
   }
 
   ownKeys(obj: object): PropertyKey[] {
-    return Object.keys(this.#shadow).filter((k) => this.has(obj, k));
+    // `Object.keys(this.#shadow)` yields *internal* storage keys (non-numeric keys are
+    // `$`-prefixed by `#shadowForKey`). Undo exactly that one level of prefixing before
+    // looking the descriptor up again, which would otherwise double-prefix it and never
+    // match anything. Only *enumerable* descriptors count as "own keys" — e.g. `make()`'s
+    // internal `__proto__` bookkeeping entry is deliberately non-enumerable and must stay
+    // invisible here, matching `single_tenant.ts`'s equivalent filter.
+    const keys: PropertyKey[] = [];
+    for (const internalKey of Object.keys(this.#shadow)) {
+      const originalKey = internalKey.startsWith("$") ? internalKey.slice(1) : internalKey;
+      const d = this.#shadowForKey(originalKey).get(obj);
+      if (d?.enumerable) keys.push(originalKey);
+    }
+    return keys;
   }
 
   define(target: object, descriptors: object): void {
-
     // `descriptors` is itself a tenant-managed object whose values are
     // descriptor objects; read it through this tenant.
     for (const k of this.ownKeys(descriptors)) {
-      const d = this.get(descriptors, k);
-      if(typeof d === 'object' && d !== null) this.#shadowForKey(k).set(target, {
-        value: this.get(d, 'value'),
-        writable: (this.get(d, 'writable') ?? false) as boolean,
-        enumerable: (this.get(d, 'enumerable') ?? false) as boolean,
-        configurable: (this.get(d, 'configurable') ?? false) as boolean,
-        get: (this.get(d, 'get') ?? undefined) as (() => unknown) | undefined,
-        set: (this.get(d, 'set') ?? undefined) as ((v: unknown) => void) | undefined,
-      });
+      const raw = this.get(descriptors, k);
+      // Validate + convert the guest-controlled descriptor shape instead of `as`-casting
+      // fields sight-unseen; also registers any get/set guest-function ABI along the way.
+      const n = narrow<GuestDescriptor>(DESCRIPTOR_SPEC, raw, this);
+      if (n) this.#shadowForKey(k).set(target, n.value as PropertyDescriptor);
     }
   }
 

@@ -3,6 +3,7 @@
     "target": "esnext",
     "lib": ["ESNext"],
     "allowImportingTsExtensions": true,
-    "module": "esnext"
+    "module": "esnext",
+    "moduleResolution": "bundler"
   }
 }

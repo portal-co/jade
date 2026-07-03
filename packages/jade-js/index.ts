@@ -44,3 +44,4 @@ import * as vm from "./vm.ts";
 export { isPolyfillKey, vm };
 export * from "./gc.ts";
 export { Tenant as MultiTenant } from "./multi_tenant.ts";
+export * from "./narrow.ts";

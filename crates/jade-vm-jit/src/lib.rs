@@ -19,7 +19,11 @@
 //! - **Function registration is delegated.** `op_fn` compiles the function body
 //!   into its own source string and hands it to a user-supplied [`FnRegistry`];
 //!   registered functions always take the implicit `tenant` and `nt` parameters
-//!   first, i.e. `function(tenant, nt, ...args){ … }`.
+//!   first, i.e. `function(tenant, nt, ...args){ … }`. [`VecRegistry`] also emits a
+//!   `markGuestFn(name, {abi: "leading-tenant-nt"})` call per function so tenant-side
+//!   code (`invokeTrap` in `narrow.ts`) knows to invoke it with that ABI rather than as
+//!   a plain host function — `markGuestFn` must be in scope at the use site, same as
+//!   `createGuestGen`/`unpackGuestGen` are for the addGen path.
 //!
 //! State is modelled as a real JS object named `state` in the emitted code, so
 //! mutations made inside emitted branches and loop iterations are observed by
@@ -78,19 +82,48 @@ impl FnVariant {
     }
 }
 
+/// One tenant method extracted from its own source text, ready to be spliced into
+/// generated code as `(function(${params.join(",")})${body_block})(${args...})` instead
+/// of a `tenant.<method>(...)` call. See `docs/pluggable-tenant-interface-plan.md`.
+///
+/// This is a plain data type — parsing tenant source (SWC, private-field scanning) lives
+/// in `portal_solutions_jade_vm_frontend::tenant_inline` (this crate stays free of a full
+/// parser dependency; it only ever splices already-extracted text). Construct these via
+/// that crate's `extract_tenant_methods`, or directly for tests.
+#[derive(Clone, Default)]
+pub struct InlinableTenantMethod {
+    /// Parameter names, in declaration order.
+    pub params: Vec<String>,
+    /// The exact original source text of the method's `{ ... }` body, braces included.
+    pub body_block: String,
+}
+
+/// Splice `m`'s body into a call-once function expression bound to `args` — real JS
+/// function-parameter binding, so this is correct regardless of what identifiers `args`
+/// happen to contain (no risk of capturing/shadowing anything in the surrounding scope).
+fn inline_call(m: &InlinableTenantMethod, args: &[&str]) -> String {
+    format!("(function({}){})({})", m.params.join(", "), m.body_block, args.join(", "))
+}
+
 /// Ambient capability flags for the JIT.  Propagated into every nested function
 /// compiled in the same session so the whole program upgrades uniformly.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct Config {
     /// Add async capability on top of every function's declared variant.
     pub add_async: bool,
     /// Add generator capability on top of every function's declared variant.
     pub add_gen: bool,
+    /// Tenant methods (keyed by name — `"get"`, `"set"`, etc; see
+    /// `portal_solutions_jade_vm_frontend::tenant_inline::TENANT_METHOD_NAMES`) safe to
+    /// inline directly instead of calling through `tenant.<method>(...)`. Empty by
+    /// default, which reproduces the JIT's original (always-correct, never-inlined)
+    /// behavior exactly.
+    pub tenant_methods: alloc::collections::BTreeMap<String, InlinableTenantMethod>,
 }
 
 /// Decode a resolved `variant` value (a `JsVar`) into an [`FnVariant`], then
 /// apply the ambient `Config` flags to compute the effective variant.
-fn fn_variant(v: &JsVar, cfg: Config) -> FnVariant {
+fn fn_variant(v: &JsVar, cfg: &Config) -> FnVariant {
     let declared = if let JsVar::Expr(s) = v {
         match s.trim() {
             "1" => FnVariant::Async,
@@ -158,8 +191,14 @@ impl VecRegistry {
 impl FnRegistry for VecRegistry {
     fn register(&mut self, variant: FnVariant, params: &[&str], body: &str) -> String {
         let name = format!("__fn{}", self.decls.len());
+        // Every function this JIT compiles uses the "leading-tenant-nt" guest ABI (its
+        // `params` always lead with `tenant`, `nt`); register that with `markGuestFn` so
+        // any embedder-side code (e.g. a tenant's getter/setter trap invocation via
+        // `invokeTrap`) calls it with the correct parameters instead of a plain `.call()`.
+        // `markGuestFn` must be in scope at the use site (imported from `narrow.ts`), same
+        // as `createGuestGen`/`unpackGuestGen` are for the addGen path.
         self.decls.push(format!(
-            "const {name} = {}({}){{\n{body}\n}};",
+            "const {name} = {}({}){{\n{body}\n}};\nmarkGuestFn({name}, {{abi: \"leading-tenant-nt\"}});",
             variant.keyword(),
             params.join(", ")
         ));
@@ -305,7 +344,7 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
         j: u32,
         _parent_state: JsVar,
     ) -> Result<JsVar, String> {
-        let eff = fn_variant(&variant, self.cfg);
+        let eff = fn_variant(&variant, &self.cfg);
         // doubleGen: declared gen | add_gen → declared gen bit was set already
         let declared_is_gen = if let JsVar::Expr(s) = &variant {
             matches!(s.trim(), "2" | "3")
@@ -320,7 +359,7 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
         // context flags for the child (effective variant's gen/async/doubleGen).
         let body = {
             let mut nested = JsJit::with_config(
-                self.reg, self.cfg, child_is_gen, child_is_async, child_double_gen,
+                self.reg, self.cfg.clone(), child_is_gen, child_is_async, child_double_gen,
             );
             emit_program(&mut nested, code, j as usize)?;
             format!("const state = Object.create(null);\n{}", nested.emit.into_inner().buf)
@@ -410,12 +449,20 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
     }
 
     fn op_get(&self, obj: JsVar, key: JsVar) -> JsVar {
-        self.bind(format!("tenant.get({obj}, {key})"))
+        match self.cfg.tenant_methods.get("get") {
+            Some(m) if m.params.len() == 2 => self.bind(inline_call(m, &[&obj.to_string(), &key.to_string()])),
+            _ => self.bind(format!("tenant.get({obj}, {key})")),
+        }
     }
 
     fn op_set(&self, obj: JsVar, key: JsVar, val: JsVar) -> JsVar {
         // Write through the tenant; the assignment evaluates to the value.
-        self.line(format!("tenant.set({obj}, {key}, {val});"));
+        match self.cfg.tenant_methods.get("set") {
+            Some(m) if m.params.len() == 3 => {
+                self.line(format!("{};", inline_call(m, &[&obj.to_string(), &key.to_string(), &val.to_string()])));
+            }
+            _ => self.line(format!("tenant.set({obj}, {key}, {val});")),
+        }
         val
     }
 
@@ -646,6 +693,18 @@ mod tests {
     }
 
     #[test]
+    fn emits_mark_guest_fn_registration() {
+        // Every compiled function must register itself as a "leading-tenant-nt" guest
+        // function so tenant-side trap invocation (`invokeTrap`) calls it correctly.
+        let (_js, reg) = compile(&program_with_fn(Operand::Literal(0)), VecRegistry::new(), Config::default()).unwrap();
+        let prelude = reg.prelude();
+        assert!(
+            prelude.contains("markGuestFn(__fn0, {abi: \"leading-tenant-nt\"})"),
+            "got:\n{prelude}"
+        );
+    }
+
+    #[test]
     fn emits_variant_declaration_forms() {
         let kw = |variant: u32| {
             let (_js, reg) =
@@ -700,5 +759,68 @@ mod tests {
             js.contains("Reflect.apply(state[0], undefined, [tenant, nt, state[2]])"),
             "got:\n{js}"
         );
+    }
+
+    fn get_set_code() -> Vec<u8> {
+        // state[3] = get(state[0], state[1]); set(state[0], state[1], state[2]); return state[3];
+        chunk(&[
+            Operation::Get { obj: Operand::StateRef(0), key: Operand::StateRef(1), dest: 3 },
+            Operation::Set {
+                obj: Operand::StateRef(0),
+                key: Operand::StateRef(1),
+                val: Operand::StateRef(2),
+                dest: 4,
+            },
+            Operation::Ret(Operand::StateRef(3)),
+        ])
+    }
+
+    #[test]
+    fn get_set_fall_back_to_tenant_calls_by_default() {
+        let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), Config::default()).unwrap();
+        assert!(js.contains("tenant.get(state[0], state[1])"), "got:\n{js}");
+        assert!(js.contains("tenant.set(state[0], state[1], state[2]);"), "got:\n{js}");
+    }
+
+    #[test]
+    fn get_set_inline_when_tenant_methods_provided() {
+        let mut cfg = Config::default();
+        cfg.tenant_methods.insert(
+            "get".to_string(),
+            InlinableTenantMethod {
+                params: alloc::vec!["o".to_string(), "k".to_string()],
+                body_block: "{ return o.get(k); }".to_string(),
+            },
+        );
+        cfg.tenant_methods.insert(
+            "set".to_string(),
+            InlinableTenantMethod {
+                params: alloc::vec!["o".to_string(), "k".to_string(), "v".to_string()],
+                body_block: "{ o.set(k, v); }".to_string(),
+            },
+        );
+        let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), cfg).unwrap();
+        assert!(!js.contains("tenant.get("), "got:\n{js}");
+        assert!(!js.contains("tenant.set("), "got:\n{js}");
+        assert!(
+            js.contains("(function(o, k){ return o.get(k); })(state[0], state[1])"),
+            "got:\n{js}"
+        );
+        assert!(
+            js.contains("(function(o, k, v){ o.set(k, v); })(state[0], state[1], state[2]);"),
+            "got:\n{js}"
+        );
+    }
+
+    #[test]
+    fn get_falls_back_when_param_count_mismatches() {
+        // A malformed/unexpected entry (wrong arity) must not get spliced in blindly.
+        let mut cfg = Config::default();
+        cfg.tenant_methods.insert(
+            "get".to_string(),
+            InlinableTenantMethod { params: alloc::vec!["only_one".to_string()], body_block: "{}".to_string() },
+        );
+        let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), cfg).unwrap();
+        assert!(js.contains("tenant.get(state[0], state[1])"), "got:\n{js}");
     }
 }
