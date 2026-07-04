@@ -1,5 +1,5 @@
 [workspace]
-members=["crates/jade-vm", "crates/jade-vm-core", "crates/jade-vm-wasm", "crates/jade-vm-jit", "crates/jade-vm-frontend", "crates/jade-vm-e2e-tests", "crates/jade-cfg-opt"]
+members=["crates/jade-vm", "crates/jade-vm-core", "crates/jade-vm-wasm", "crates/jade-vm-jit", "crates/jade-vm-frontend", "crates/jade-vm-e2e-tests", "crates/jade-cfg-opt", "crates/jade-vm-jit-swc"]
 resolver="3"
 
 [workspace.package]

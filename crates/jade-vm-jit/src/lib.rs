@@ -482,10 +482,11 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
 
 /// One basic block discovered from the bytecode: a straight-line run of
 /// value-producing ops followed by exactly one terminator (`Ret`/`Jmp`/`CondJmp`/
-/// `Switch`).
-struct Block {
-    ops: Vec<Operation>,
-    term: Operation,
+/// `Switch`). Public so other tiers (e.g. `crates/jade-vm-jit-swc`'s Tier 2) can reuse
+/// Tier 0's block discovery instead of re-implementing it.
+pub struct Block {
+    pub ops: Vec<Operation>,
+    pub term: Operation,
 }
 
 /// Discover every basic block reachable from `start_ip`, keyed by start byte offset.
@@ -495,7 +496,7 @@ struct Block {
 /// without needing to know where the next function's bytecode begins. Assumes
 /// well-formed input (as produced by `jade-vm-frontend`): every jump target names the
 /// *start* offset of some block, and blocks never overlap.
-fn discover_blocks(code: &[u8], start_ip: usize) -> Result<alloc::collections::BTreeMap<usize, Block>, String> {
+pub fn discover_blocks(code: &[u8], start_ip: usize) -> Result<alloc::collections::BTreeMap<usize, Block>, String> {
     let mut blocks = alloc::collections::BTreeMap::new();
     let mut worklist = alloc::vec![start_ip];
     while let Some(start) = worklist.pop() {
@@ -667,6 +668,27 @@ pub fn compile<R: FnRegistry>(code: &[u8], reg: R, cfg: Config) -> Result<(Strin
 // Re-export the driven traits so embedders can name them without depending on
 // jade-vm-core directly.
 pub use core_vm::{Ops as JitOps, State as JitState};
+
+/// Emit a straight-line run of ops (no terminator) as a JS statement block — the same
+/// per-op emission [`compile`]'s Tier 0 uses for one discovered [`Block`]'s `ops`, exposed
+/// standalone so other tiers (e.g. Tier 2 in `crates/jade-vm-jit-swc`) can reuse it
+/// without depending on Tier 0's own dispatch-loop wrapping. `code` is the *full* bytecode
+/// buffer (needed by the `FN` opcode to locate nested function bodies by byte offset, even
+/// though `ops` itself is a sub-slice already extracted from it).
+pub fn ops_to_js<R: FnRegistry>(
+    reg: &RefCell<R>,
+    cfg: Config,
+    is_gen: bool,
+    is_async: bool,
+    ops: &[Operation],
+    code: &[u8],
+) -> Result<String, String> {
+    let mut jit = JsJit::with_config(reg, cfg, is_gen, is_async, false);
+    for op in ops {
+        emit_op(&mut jit, code, op.clone())?;
+    }
+    Ok(jit.emit.into_inner().buf)
+}
 
 #[cfg(test)]
 mod tests {
