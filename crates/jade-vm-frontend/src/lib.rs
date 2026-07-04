@@ -49,6 +49,7 @@ impl std::error::Error for Unsupported {}
 pub enum FrontendError {
     Parse(String),
     Tac(String),
+    Opt(String),
     Unsupported(Unsupported),
 }
 
@@ -57,6 +58,7 @@ impl std::fmt::Display for FrontendError {
         match self {
             FrontendError::Parse(s) => write!(f, "parse error: {s}"),
             FrontendError::Tac(s) => write!(f, "AST->TAC lowering error: {s}"),
+            FrontendError::Opt(s) => write!(f, "jade-cfg-opt error: {s}"),
             FrontendError::Unsupported(u) => write!(f, "{u}"),
         }
     }
@@ -91,6 +93,11 @@ pub fn compile_to_bytecode(src: &str) -> Result<Vec<u8>, FrontendError> {
             return_type: None,
         };
         let tfunc = TFunc::try_from(&synthetic).map_err(|e| FrontendError::Tac(format!("{e:?}")))?;
+        // Shared TAC canonicalizer + SSA constant-fold/DCE pass (see
+        // `docs/bytecode-cfg-plan.md`); the same `jade-cfg-opt::optimize_tfunc` an
+        // optional JIT plugin (Tier 2) can also apply to its own reconstructed CFG.
+        let tfunc = portal_solutions_jade_cfg_opt::optimize_tfunc(&tfunc)
+            .map_err(|e| FrontendError::Opt(format!("{e:?}")))?;
         let mut compiler = Compiler::default();
         let (main, trailer) = compiler.compile_function(&tfunc)?;
         let mut code = main;
@@ -339,6 +346,15 @@ impl<'a> FnLowering<'a> {
 
     fn lower_item(&mut self, item: &Item<Ident, TFunc>, dest: u32, out: &mut Vec<u8>) -> Result<(), FrontendError> {
         match item {
+            Item::Undef => {
+                // No-op: Jade has no "produce undefined" opcode (see `undefined_operand`),
+                // but an unwritten state slot already reads as `undefined`, so simply
+                // never writing to `dest` here is correct. `jade-cfg-opt`'s SSA round-trip
+                // (see `optimize_tfunc`) introduces explicit `Item::Undef` writes (its own
+                // shim-block sentinel) that wouldn't otherwise appear from direct AST->TAC
+                // lowering.
+                Ok(())
+            }
             Item::Just { id } => {
                 // Alias: copy the source slot's value into `dest` via a no-op SEL
                 // (`cond ? a : a` always evaluates to `a`), since there's no plain
@@ -615,5 +631,21 @@ mod tests {
     fn if_else_return_values_are_distinguishable() {
         assert_eq!(run_js("if (true) { return 1; } else { return 2; }"), "1");
         assert_eq!(run_js("if (false) { return 1; } else { return 2; }"), "2");
+    }
+
+    /// `jade-cfg-opt::optimize_tfunc`'s `simplify_conditions` pass folds a `CondJmp` whose
+    /// condition is a known boolean literal into a plain `Jmp`, dropping the untaken
+    /// branch entirely — so the untaken branch's own literal should never even be
+    /// discovered as reachable bytecode, proving the optimization pass is actually wired
+    /// in (not just a no-op round-trip).
+    #[test]
+    fn constant_condition_is_folded_away() {
+        let js = jit_js("if (true) { return 111; } else { return 222; }");
+        assert!(js.contains("111"), "got:\n{js}");
+        assert!(!js.contains("222"), "expected the untaken branch to be folded away, got:\n{js}");
+
+        let js = jit_js("if (false) { return 111; } else { return 222; }");
+        assert!(!js.contains("111"), "expected the untaken branch to be folded away, got:\n{js}");
+        assert!(js.contains("222"), "got:\n{js}");
     }
 }
