@@ -7,6 +7,15 @@
 //! Tier 0 (always on) and Tier 1 (`reloop` feature) in `crates/jade-vm-jit` are the
 //! progressively lighter-weight fallbacks this tier is optional on top of.
 //!
+//! "Proper" here means **optimizer-friendly**, not necessarily human-readable: the point
+//! of this tier is output a downstream JS engine's own optimizer/JIT can chew on
+//! effectively (real structured control flow, and IIFE-free tenant calls once inlining —
+//! see `docs/pluggable-tenant-interface-plan.md` — lands), not prose-quality source.
+//!
+//! A nested closure (a real `FN` opcode, as `jade-vm-frontend` can now emit) is compiled
+//! through *this same tier*, recursively — see `Config::nested_body_compiler`, set in
+//! `compile()` — rather than silently downgrading to Tier 0's block-dispatch loop.
+//!
 //! Each discovered block's straight-line ops are turned into statements by generating
 //! their JS text via `jade-vm-jit`'s own `ops_to_js` (the exact same per-op emission Tier
 //! 0/1 use) and re-parsing that text with `swc_ecma_parser` — reusing already-tested
@@ -44,6 +53,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use portal_jsc_swc_cfg::{Block as CBlock, BlockId, Catch, Cfg, End, Func, Term};
 use portal_jsc_swc_tac::TFunc;
@@ -62,24 +72,68 @@ use swc_ecma_parser::{Parser, StringInput, Syntax};
 /// `return`), matching the same contract as `portal_solutions_jade_vm_jit::compile`'s body
 /// output — the caller wraps it in a `function(tenant, nt, ...args){ ... }` shell exactly
 /// as Tier 0/1 do. `cfg.add_async`/`cfg.add_gen` upgrade the compiled function's own
-/// declared capability exactly as they do for Tier 0/1 (jade bytecode produced by
-/// `jade-vm-frontend` never contains the `FN` opcode yet, so there are no nested functions
-/// to propagate them into here); `cfg.tenant_methods` inlines `GET`/`SET` the same way too,
+/// declared capability exactly as they do for Tier 0/1. The returned [`VecRegistry`] holds
+/// any nested functions discovered via a real `FN` opcode (see [`Config::nested_body_compiler`],
+/// set here so a nested closure is itself reconstructed as a real CFG `Func` through this
+/// same tier, not silently downgraded) — read its `prelude()` for the `const __fnN = ...`
+/// declarations to prepend alongside the returned body, exactly as Tier 0/1's own
+/// `VecRegistry` output is used. `cfg.tenant_methods` inlines `GET`/`SET` the same way too,
 /// via the shared `ops_to_js` per-op emission.
-pub fn compile(code: &[u8], cfg: Config) -> Result<String, String> {
+pub fn compile(code: &[u8], cfg: Config) -> Result<(String, VecRegistry), String> {
     swc_common::GLOBALS.set(&swc_common::Globals::new(), || {
-        let cfg_func = build_cfg_func(code, 0, &cfg)?;
-        let tfunc =
-            TFunc::try_from(&cfg_func).map_err(|e| format!("jit-swc: Func -> TFunc: {e:?}"))?;
-        let tfunc = portal_solutions_jade_cfg_opt::optimize_tfunc(&tfunc)
-            .map_err(|e| format!("jit-swc: jade-cfg-opt: {e:?}"))?;
-        let function: swc_ecma_ast::Function = (&tfunc)
-            .try_into()
-            .map_err(|e: portal_jsc_swc_tac::Error| format!("jit-swc: TFunc -> Function: {e:?}"))?;
-        let stmts = function.body.map(|b| b.stmts).unwrap_or_default();
-        validate_labels(&stmts)?;
-        codegen_stmts(&stmts)
+        let reg = Rc::new(RefCell::new(VecRegistry::new()));
+        let is_gen = cfg.add_gen;
+        let is_async = cfg.add_async;
+        let cfg = with_nested_body_compiler(cfg, reg.clone());
+        let body = compile_body(code, 0, &cfg, is_gen, is_async, false, &reg)?;
+        // `cfg`'s own `nested_body_compiler` closure holds its own clone of `reg` — drop
+        // it before `try_unwrap`, or the refcount never drops back to 1.
+        drop(cfg);
+        let reg = Rc::try_unwrap(reg)
+            .map_err(|_| "jit-swc: internal invariant: FnRegistry Rc had lingering clones after compile finished".to_string())?
+            .into_inner();
+        Ok((body, reg))
     })
+}
+
+/// Return a clone of `cfg` with `nested_body_compiler` set to recurse into this tier's own
+/// `compile_body` pipeline (sharing `reg` across every level of nesting, so all registered
+/// functions land in one combined registry/prelude) instead of `op_fn`'s Tier 0/1 fallback.
+fn with_nested_body_compiler(mut cfg: Config, reg: Rc<RefCell<VecRegistry>>) -> Config {
+    let base_cfg = cfg.clone();
+    cfg.nested_body_compiler = Some(Rc::new(move |code: &[u8], start_ip: usize, is_gen: bool, is_async: bool, double_gen: bool| {
+        let inner_cfg = with_nested_body_compiler(base_cfg.clone(), reg.clone());
+        compile_body(code, start_ip, &inner_cfg, is_gen, is_async, double_gen, &reg)
+    }));
+    cfg
+}
+
+/// The reusable core of the Tier 2 pipeline: reconstruct a real CFG `Func` for the
+/// function at `code[start_ip..]`, run it through `jade-cfg-opt`, convert to a real
+/// `swc_ecma_ast::Function`, and codegen its body. Used for both the top-level program
+/// (`compile`) and, via `Config::nested_body_compiler`, every nested closure — `is_gen`/
+/// `is_async`/`double_gen` are that function's own already-computed *effective* variant
+/// flags (see `Config::nested_body_compiler`'s doc comment).
+fn compile_body(
+    code: &[u8],
+    start_ip: usize,
+    cfg: &Config,
+    is_gen: bool,
+    is_async: bool,
+    double_gen: bool,
+    reg: &Rc<RefCell<VecRegistry>>,
+) -> Result<String, String> {
+    let cfg_func = build_cfg_func(code, start_ip, cfg, is_gen, is_async, double_gen, reg)?;
+    let tfunc =
+        TFunc::try_from(&cfg_func).map_err(|e| format!("jit-swc: Func -> TFunc: {e:?}"))?;
+    let tfunc = portal_solutions_jade_cfg_opt::optimize_tfunc(&tfunc)
+        .map_err(|e| format!("jit-swc: jade-cfg-opt: {e:?}"))?;
+    let function: swc_ecma_ast::Function = (&tfunc)
+        .try_into()
+        .map_err(|e: portal_jsc_swc_tac::Error| format!("jit-swc: TFunc -> Function: {e:?}"))?;
+    let stmts = function.body.map(|b| b.stmts).unwrap_or_default();
+    validate_labels(&stmts)?;
+    codegen_stmts(&stmts)
 }
 
 /// Defensive backstop: reject output where a labeled `break`/`continue` doesn't lexically
@@ -156,8 +210,21 @@ fn check_label(label: Option<&Ident>, labels: &[swc_atoms::Atom], kind: &str) ->
 
 /// Reconstruct a `swc_cfg::Func` from Jade bytecode: reuses Tier 0's block discovery,
 /// then turns each block's straight-line ops into real `Stmt`s (see module docs) and its
-/// terminator into a real `Term`.
-fn build_cfg_func(code: &[u8], start_ip: usize, cfg: &Config) -> Result<Func, String> {
+/// terminator into a real `Term`. `is_gen`/`is_async`/`double_gen` are this function's own
+/// already-computed *effective* variant flags (see `compile_body`) — used both for the
+/// returned `Func`'s own `is_generator`/`is_async` and for per-block emission (in place of
+/// reading `cfg.add_gen`/`cfg.add_async` directly, which are the *ambient*, session-wide
+/// flags — correct for the top-level call, where there's no other "declared" bit, but not
+/// for a nested function, which has its own declared variant to combine with them).
+fn build_cfg_func(
+    code: &[u8],
+    start_ip: usize,
+    cfg: &Config,
+    is_gen: bool,
+    is_async: bool,
+    double_gen: bool,
+    reg: &Rc<RefCell<VecRegistry>>,
+) -> Result<Func, String> {
     let blocks = discover_blocks(code, start_ip)?;
     let mut cfg_out = Cfg::default();
     let mut offset_to_id: BTreeMap<usize, BlockId> = BTreeMap::new();
@@ -168,29 +235,28 @@ fn build_cfg_func(code: &[u8], start_ip: usize, cfg: &Config) -> Result<Func, St
         .get(&start_ip)
         .ok_or("jit-swc: entry offset was not among discovered blocks (internal invariant)")?;
 
-    // Jade bytecode produced by `jade-vm-frontend` never contains the `FN` opcode yet
-    // (nested closures are unsupported there), so a placeholder registry that's never
-    // actually invoked is sufficient here.
-    let reg = RefCell::new(VecRegistry::new());
     for (offset, block) in &blocks {
         let id = offset_to_id[offset];
-        let stmts = ops_to_stmts(&reg, cfg, &block.ops, code)?;
+        let stmts = ops_to_stmts(reg, cfg, is_gen, is_async, double_gen, &block.ops, code)?;
         let term = lower_terminator(&block.term, &offset_to_id)?;
         cfg_out.blocks[id] = CBlock { stmts, end: End { catch: Catch::Throw, term, orig_span: None } };
     }
-    Ok(Func { cfg: cfg_out, entry, params: vec![], is_generator: cfg.add_gen, is_async: cfg.add_async })
+    Ok(Func { cfg: cfg_out, entry, params: vec![], is_generator: is_gen, is_async })
 }
 
 /// Emit `ops`' JS text (via `jade-vm-jit`'s own per-op emission) and re-parse it into real
 /// `Stmt`s.
 fn ops_to_stmts(
-    reg: &RefCell<VecRegistry>,
+    reg: &Rc<RefCell<VecRegistry>>,
     cfg: &Config,
+    is_gen: bool,
+    is_async: bool,
+    double_gen: bool,
     ops: &[Operation],
     code: &[u8],
 ) -> Result<Vec<Stmt>, String> {
-    let js = ops_to_js(reg, cfg.clone(), cfg.add_gen, cfg.add_async, ops, code)?;
-    parse_block_js(&js, cfg.add_gen, cfg.add_async)
+    let js = ops_to_js(reg.clone(), cfg.clone(), is_gen, is_async, double_gen, ops, code)?;
+    parse_block_js(&js, is_gen, is_async)
 }
 
 /// Parse `src` (one block's straight-line statements) back into real `Stmt`s. `yield`/
@@ -322,7 +388,7 @@ mod tests {
     #[test]
     fn compiles_and_executes_return_literal() {
         let code = chunk(&[Operation::Ret(Operand::Literal(42))]);
-        let js = compile(&code, Config::default()).unwrap();
+        let (js, _reg) = compile(&code, Config::default()).unwrap();
         assert_eq!(run_js(&js), "42", "js:\n{js}");
     }
 
@@ -353,7 +419,7 @@ mod tests {
             code.extend(else_body.clone());
             code.extend(ret_body.clone());
 
-            let js = compile(&code, Config::default()).unwrap();
+            let (js, _reg) = compile(&code, Config::default()).unwrap();
             assert!(js.contains("if"), "got:\n{js}");
 
             let result = run_js(&js);
@@ -380,7 +446,7 @@ mod tests {
         code.extend(Operation::Jmp { target: header_offset }.emit());
         code.extend(ret_body);
 
-        let js = compile(&code, Config::default()).unwrap();
+        let (js, _reg) = compile(&code, Config::default()).unwrap();
         let result = run_js(&js);
         assert_eq!(result, "false", "js:\n{js}");
     }
@@ -422,7 +488,7 @@ mod tests {
         code.extend(Operation::Jmp { target: header_offset }.emit());
         code.extend(exit_ops);
 
-        let js = compile(&code, Config::default()).unwrap();
+        let (js, _reg) = compile(&code, Config::default()).unwrap();
         let result = run_js(&js);
         assert_eq!(result, "7", "js:\n{js}");
     }
@@ -441,7 +507,7 @@ mod tests {
         assert!(err.contains("YIELD"), "expected a YIELD-related error, got: {err}");
 
         let cfg = Config { add_gen: true, ..Config::default() };
-        let js = compile(&code, cfg).unwrap();
+        let (js, _reg) = compile(&code, cfg).unwrap();
         assert!(js.contains("yield"), "got:\n{js}");
     }
 }

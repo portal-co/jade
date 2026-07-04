@@ -40,6 +40,7 @@ mod reloop;
 pub use reloop::compile as compile_reloop;
 
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -132,7 +133,28 @@ pub struct Config {
     /// feature; ignored (Tier 0 always used) otherwise.
     #[cfg(feature = "reloop")]
     pub prefer_reloop: bool,
+    /// Recompile a nested function's own body (the bytecode at `code[start_ip..]`, the
+    /// *same* shared buffer the outer compilation is working from) through whichever tier
+    /// is driving the *current* compilation, instead of `op_fn` always falling back to
+    /// Tier 0's `emit_program`. `None` (the default) means "no override" — nested bodies
+    /// use Tier 0's block-dispatch loop (or Tier 1's `emit_reloop_program`, handled
+    /// directly in `op_fn` via `prefer_reloop` since both live in this crate). This hook
+    /// exists for a tier that can't be called directly from here without an illegal
+    /// reverse crate dependency — namely Tier 2 (`jade-vm-jit-swc`), which sets this to a
+    /// closure recursing into its own CFG reconstruction before driving `exec_op` over the
+    /// top-level bytecode, so a closure nested inside a Tier-2-compiled function is itself
+    /// reconstructed as a real CFG `Func`, not silently downgraded.
+    ///
+    /// The callee receives the nested function's already-computed *effective* variant
+    /// flags (`is_gen`/`is_async`/`double_gen` — declared bits OR'd with this same
+    /// `Config`'s ambient `add_gen`/`add_async`, exactly as `op_fn` computes them for the
+    /// Tier-0/1 fallback) and must return a JS statement block assuming a `state` local is
+    /// already (or will be) declared by the caller — it should not declare its own.
+    pub nested_body_compiler: Option<Rc<NestedBodyCompiler>>,
 }
+
+/// See [`Config::nested_body_compiler`].
+pub type NestedBodyCompiler = dyn Fn(&[u8], usize, bool, bool, bool) -> Result<String, String>;
 
 /// Decode a resolved `variant` value (a `JsVar`) into an [`FnVariant`], then
 /// apply the ambient `Config` flags to compute the effective variant.
@@ -182,7 +204,7 @@ pub trait FnRegistry {
 /// A simple [`FnRegistry`] that accumulates `const __fn{n} = function(...){...}`
 /// declarations and hands back the `__fn{n}` names. Read [`prelude`] afterwards
 /// to obtain the declarations to prepend to the emitted program.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct VecRegistry {
     decls: Vec<String>,
 }
@@ -232,8 +254,13 @@ impl Emit {
 }
 
 /// The JIT backend. Drives `exec_op` and accumulates JS statements.
-pub struct JsJit<'a, R: FnRegistry> {
-    reg: &'a RefCell<R>,
+pub struct JsJit<R: FnRegistry> {
+    /// Owned (reference-counted) rather than borrowed: `Config::nested_body_compiler`
+    /// closures must be `'static` to be stored in `Config` without giving `Config` (and
+    /// everything that holds one) a lifetime parameter — see that field's doc comment.
+    /// Cloning just bumps the refcount; every nested `JsJit` shares the same underlying
+    /// registry.
+    reg: Rc<RefCell<R>>,
     emit: RefCell<Emit>,
     cfg: Config,
     /// Whether the function currently being compiled is effectively a generator.
@@ -244,13 +271,13 @@ pub struct JsJit<'a, R: FnRegistry> {
     double_gen: bool,
 }
 
-impl<'a, R: FnRegistry> JsJit<'a, R> {
-    fn new(reg: &'a RefCell<R>) -> Self {
+impl<R: FnRegistry> JsJit<R> {
+    fn new(reg: Rc<RefCell<R>>) -> Self {
         Self::with_config(reg, Config::default(), false, false, false)
     }
 
     fn with_config(
-        reg: &'a RefCell<R>,
+        reg: Rc<RefCell<R>>,
         cfg: Config,
         is_gen: bool,
         is_async: bool,
@@ -301,7 +328,7 @@ fn js_string(s: &str) -> String {
     out
 }
 
-impl<'a, R: FnRegistry> State for JsJit<'a, R> {
+impl<R: FnRegistry> State for JsJit<R> {
     type Value = JsVar;
 
     fn get(&mut self, idx: u32) -> JsVar {
@@ -318,7 +345,7 @@ impl<'a, R: FnRegistry> State for JsJit<'a, R> {
     }
 }
 
-impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
+impl<R: FnRegistry> Ops for JsJit<R> {
     type Value = JsVar;
     type Error = String;
 
@@ -368,17 +395,33 @@ impl<'a, R: FnRegistry> Ops for JsJit<'a, R> {
         let child_is_gen = matches!(eff, FnVariant::SyncGen | FnVariant::AsyncGen);
         let child_is_async = matches!(eff, FnVariant::Async | FnVariant::AsyncGen);
 
-        // Compile the function body into its own statement block with the
-        // context flags for the child (effective variant's gen/async/doubleGen).
-        let body = {
+        // Compile the function body into its own statement block with the context flags
+        // for the child (effective variant's gen/async/doubleGen). Prefer whichever tier
+        // is driving the *current* compilation (`Config::nested_body_compiler`) over
+        // silently downgrading every nested closure to Tier 0's block-dispatch loop; fall
+        // back to Tier 0/1 (this crate's own `emit_program`/`emit_reloop_program`, chosen
+        // via `prefer_reloop`) only when no override is set.
+        let stmts = if let Some(f) = self.cfg.nested_body_compiler.clone() {
+            f(code, j as usize, child_is_gen, child_is_async, child_double_gen)?
+        } else {
             let mut nested = JsJit::with_config(
-                self.reg, self.cfg.clone(), child_is_gen, child_is_async, child_double_gen,
+                self.reg.clone(), self.cfg.clone(), child_is_gen, child_is_async, child_double_gen,
             );
-            emit_program(&mut nested, code, j as usize)?;
-            format!("const state = Object.create(null);\n{}", nested.emit.into_inner().buf)
+            #[cfg(feature = "reloop")]
+            let prefer_reloop = self.cfg.prefer_reloop;
+            #[cfg(not(feature = "reloop"))]
+            let prefer_reloop = false;
+            if prefer_reloop {
+                #[cfg(feature = "reloop")]
+                reloop::emit_reloop_program(&mut nested, code, j as usize)?;
+            } else {
+                emit_program(&mut nested, code, j as usize)?;
+            }
+            nested.emit.into_inner().buf
         };
+        let body = format!("const state = Object.create(null);\n{stmts}");
         // NOTE: closure-slot capture and decorator (`spanner`) application are
-        // not yet wired in this first backend.
+        // not yet wired in this first backend — see `docs/closure-capture-plan.md`.
         let reference = self.reg.borrow_mut().register(eff, &["tenant", "nt", "...args"], &body);
         Ok(self.bind(reference))
     }
@@ -542,7 +585,7 @@ pub fn discover_blocks(code: &[u8], start_ip: usize) -> Result<alloc::collection
 /// Emit one non-terminator op: `AWAIT`/`YIELD`/`YIELDSTAR` are special-cased (checked
 /// against the function's declared capabilities), everything else goes through the
 /// shared `exec_op`.
-fn emit_op<R: FnRegistry>(jit: &mut JsJit<'_, R>, code: &[u8], op: Operation) -> Result<(), String> {
+fn emit_op<R: FnRegistry>(jit: &mut JsJit<R>, code: &[u8], op: Operation) -> Result<(), String> {
     match op {
         Operation::Await { val: val_op, dest } => {
             if !jit.is_async {
@@ -587,7 +630,7 @@ fn emit_op<R: FnRegistry>(jit: &mut JsJit<'_, R>, code: &[u8], op: Operation) ->
 
 /// Emit a block's terminator: a real `return`, or an assignment to `__ip` followed by
 /// `continue` (re-entering the dispatch `switch` at the top of the `while (true)` loop).
-fn emit_terminator<R: FnRegistry>(jit: &mut JsJit<'_, R>, term: Operation) -> Result<(), String> {
+fn emit_terminator<R: FnRegistry>(jit: &mut JsJit<R>, term: Operation) -> Result<(), String> {
     match term {
         Operation::Ret(val_op) => {
             let val = resolve(val_op, jit);
@@ -620,7 +663,7 @@ fn emit_terminator<R: FnRegistry>(jit: &mut JsJit<'_, R>, term: Operation) -> Re
 /// baseline codegen (Tier 0; see `docs/bytecode-cfg-plan.md`). A `return` now works
 /// from any block, since there's no more nested-body context to be inside of.
 fn emit_program<R: FnRegistry>(
-    jit: &mut JsJit<'_, R>,
+    jit: &mut JsJit<R>,
     code: &[u8],
     start_ip: usize,
 ) -> Result<(), String> {
@@ -656,13 +699,16 @@ pub fn compile<R: FnRegistry>(code: &[u8], reg: R, cfg: Config) -> Result<(Strin
     if cfg.prefer_reloop {
         return reloop::compile(code, reg, cfg);
     }
-    let cell = RefCell::new(reg);
+    let cell = Rc::new(RefCell::new(reg));
     let body = {
-        let mut jit = JsJit::with_config(&cell, cfg, false, false, false);
+        let mut jit = JsJit::with_config(cell.clone(), cfg, false, false, false);
         emit_program(&mut jit, code, 0)?;
         jit.emit.into_inner().buf
     };
-    Ok((body, cell.into_inner()))
+    let reg = Rc::try_unwrap(cell)
+        .map_err(|_| "jit: internal invariant: FnRegistry Rc had lingering clones after compile finished".to_string())?
+        .into_inner();
+    Ok((body, reg))
 }
 
 // Re-export the driven traits so embedders can name them without depending on
@@ -674,16 +720,20 @@ pub use core_vm::{Ops as JitOps, State as JitState};
 /// standalone so other tiers (e.g. Tier 2 in `crates/jade-vm-jit-swc`) can reuse it
 /// without depending on Tier 0's own dispatch-loop wrapping. `code` is the *full* bytecode
 /// buffer (needed by the `FN` opcode to locate nested function bodies by byte offset, even
-/// though `ops` itself is a sub-slice already extracted from it).
+/// though `ops` itself is a sub-slice already extracted from it). `double_gen` should be
+/// `false` for a top-level call and whatever `op_fn` computed (declared-gen && ambient
+/// `add_gen`) when recompiling a nested function's own body — see
+/// `Config::nested_body_compiler`.
 pub fn ops_to_js<R: FnRegistry>(
-    reg: &RefCell<R>,
+    reg: Rc<RefCell<R>>,
     cfg: Config,
     is_gen: bool,
     is_async: bool,
+    double_gen: bool,
     ops: &[Operation],
     code: &[u8],
 ) -> Result<String, String> {
-    let mut jit = JsJit::with_config(reg, cfg, is_gen, is_async, false);
+    let mut jit = JsJit::with_config(reg, cfg, is_gen, is_async, double_gen);
     for op in ops {
         emit_op(&mut jit, code, op.clone())?;
     }

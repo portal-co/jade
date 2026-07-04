@@ -209,7 +209,7 @@ fn label_for(loop_id: u32) -> String {
 
 /// Emit `sb`'s ops/terminator, then whatever structurally follows.
 fn emit_block<R: FnRegistry>(
-    jit: &mut JsJit<'_, R>,
+    jit: &mut JsJit<R>,
     code: &[u8],
     cfg: &CfgFunc,
     sb: &StructuredBlock<BlockIdx>,
@@ -273,7 +273,7 @@ fn emit_block<R: FnRegistry>(
 /// `emit_dispatch`): unlike targeting Jade bytecode (which has no local variables to flag
 /// with), a real JS local makes this completely sound, not just a same-shaped heuristic.
 fn emit_branch_arm<R: FnRegistry>(
-    jit: &mut JsJit<'_, R>,
+    jit: &mut JsJit<R>,
     branches: &BTreeMap<BlockIdx, BranchMode>,
     target: BlockIdx,
     loops: &[(u32, String)],
@@ -312,7 +312,7 @@ fn find_label(loops: &[(u32, String)], id: u32) -> Result<String, String> {
 /// Emit `term`. A `Return` always becomes a real `return` — correct from any nesting
 /// depth, unlike the old bytecode-targeting design (see the module doc comment).
 fn emit_terminator<R: FnRegistry>(
-    jit: &mut JsJit<'_, R>,
+    jit: &mut JsJit<R>,
     code: &[u8],
     cfg: &CfgFunc,
     term: &Term,
@@ -382,7 +382,7 @@ fn emit_terminator<R: FnRegistry>(
 /// `Multiple` node shape, just with a plain JS local instead of a JS string literal
 /// switch.
 fn emit_dispatch<R: FnRegistry>(
-    jit: &mut JsJit<'_, R>,
+    jit: &mut JsJit<R>,
     code: &[u8],
     cfg: &CfgFunc,
     im: &StructuredBlock<BlockIdx>,
@@ -409,17 +409,28 @@ fn emit_dispatch<R: FnRegistry>(
 /// discovered blocks via `ssa-reloop2` into native `while`/`if`/`switch`/`return`/labeled
 /// `break`/`continue`, instead of Tier 0's flat block-dispatch loop.
 pub fn compile<R: FnRegistry>(code: &[u8], reg: R, cfg: Config) -> Result<(String, R), String> {
-    let cell = RefCell::new(reg);
+    let cell = alloc::rc::Rc::new(RefCell::new(reg));
     let body = {
-        let mut jit = JsJit::with_config(&cell, cfg, false, false, false);
+        let mut jit = JsJit::with_config(cell.clone(), cfg, false, false, false);
         emit_reloop_program(&mut jit, code, 0)?;
         jit.emit.into_inner().buf
     };
-    Ok((body, cell.into_inner()))
+    let reg = alloc::rc::Rc::try_unwrap(cell)
+        .map_err(|_| "jit(reloop): internal invariant: FnRegistry Rc had lingering clones after compile finished".to_string())?
+        .into_inner();
+    Ok((body, reg))
 }
 
-fn emit_reloop_program<R: FnRegistry>(
-    jit: &mut JsJit<'_, R>,
+/// Restructure the bytecode at `code[start_ip..]` into `jit`'s own emitted output — public
+/// to this crate (not the whole crate's public API) so `op_fn` (in `lib.rs`) can recurse
+/// into Tier 1's own pipeline for a nested closure when `Config.prefer_reloop` is set,
+/// instead of downgrading to Tier 0's `emit_program`. Nested `Config.prefer_reloop`
+/// already propagates correctly via `op_fn`'s `self.cfg.clone()`, so no
+/// `Config::nested_body_compiler` override is needed for this tier — that hook exists only
+/// for Tier 2, which cannot be called directly from `jade-vm-jit` without an illegal
+/// reverse crate dependency.
+pub(crate) fn emit_reloop_program<R: FnRegistry>(
+    jit: &mut JsJit<R>,
     code: &[u8],
     start_ip: usize,
 ) -> Result<(), String> {
