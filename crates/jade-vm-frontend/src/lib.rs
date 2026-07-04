@@ -74,7 +74,27 @@ fn unsupported<T>(msg: impl Into<String>) -> Result<T, FrontendError> {
 /// Returns the compiled byte buffer; execution should start at offset `0`. Any nested
 /// functions (`FN` opcode bodies) are appended after the top-level code, referenced by
 /// byte offset exactly like hand-encoded bytecode.
+///
+/// Equivalent to [`compile_to_bytecode_with_variant`] with `is_generator`/`is_async` both
+/// `false` — the top-level program is declared sync; a caller wanting to exercise real
+/// `yield`/`yield*`/`await` syntax at the top level (e.g. to combine with a JIT's ambient
+/// `Config.add_gen`/`add_async` upgrade for a genuine doubleGen program) needs
+/// [`compile_to_bytecode_with_variant`] instead.
 pub fn compile_to_bytecode(src: &str) -> Result<Vec<u8>, FrontendError> {
+    compile_to_bytecode_with_variant(src, false, false)
+}
+
+/// Like [`compile_to_bytecode`], but lets the top-level program itself be declared a
+/// generator and/or async function — which is what actually makes `yield`/`yield*`/
+/// `await` syntax legal at the top level (SWC's parser only recognizes `yield`/`await`
+/// expressions inside a function/script declared as such). Without this, those keywords
+/// can only be exercised via a JIT tier's *ambient* `Config.add_gen`/`add_async` upgrade
+/// applied to bytecode that was never really declared a generator/async to begin with.
+pub fn compile_to_bytecode_with_variant(
+    src: &str,
+    is_generator: bool,
+    is_async: bool,
+) -> Result<Vec<u8>, FrontendError> {
     swc_common::GLOBALS.set(&swc_common::Globals::new(), || {
         let stmts = parse_script(src)?;
         let synthetic = Function {
@@ -87,8 +107,8 @@ pub fn compile_to_bytecode(src: &str) -> Result<Vec<u8>, FrontendError> {
                 ctxt: Default::default(),
                 stmts,
             }),
-            is_generator: false,
-            is_async: false,
+            is_generator,
+            is_async,
             type_params: None,
             return_type: None,
         };
@@ -98,12 +118,79 @@ pub fn compile_to_bytecode(src: &str) -> Result<Vec<u8>, FrontendError> {
         // optional JIT plugin (Tier 2) can also apply to its own reconstructed CFG.
         let tfunc = portal_solutions_jade_cfg_opt::optimize_tfunc(&tfunc)
             .map_err(|e| FrontendError::Opt(format!("{e:?}")))?;
-        let mut compiler = Compiler::default();
-        let (main, trailer) = compiler.compile_function(&tfunc)?;
-        let mut code = main;
-        code.extend(trailer);
-        Ok(code)
+        compile_program(tfunc)
     })
+}
+
+/// Compile `entry` (and everything nested inside it, transitively — see
+/// `docs/closure-capture-plan.md` for the closure-capture-analysis follow-on this doesn't
+/// yet do) into one flat Jade bytecode buffer.
+///
+/// Every jump target in Jade bytecode — including a nested function's own `FN` opcode's
+/// `j` operand — is an absolute byte offset into *one shared buffer*; no backend rebases
+/// them (e.g. `jade-vm-jit`'s `op_fn` slices the very same `code` it was given, at `j`).
+/// That means a nested function's `j` can only be assigned once the byte length of
+/// everything *before* it in the final buffer is known — which, for a function whose own
+/// body might itself contain further nested functions, isn't known until that function's
+/// own length is measured too. This applies the same trick `FnLowering::compile_blocks`
+/// already uses for its own block offsets (measure with placeholder targets first, since
+/// every opcode's operands are fixed-width regardless of value; emit for real once real
+/// offsets are known) one level up, across the whole nested-function tree instead of just
+/// one function's own blocks:
+///
+/// 1. **Discover**: `entry` plus everything nested inside it, transitively, in a stable
+///    traversal order — measuring each function's own byte length with placeholder
+///    (`j = 0`) nested-function operands.
+/// 2. **Lay out**: assign each discovered function a region (a byte range) in the final
+///    buffer — `entry` first (so it lands at offset `0`, matching this module's existing
+///    documented invariant), then every other function in discovery order.
+/// 3. **Emit for real**: re-lower every function, now that every function's region start
+///    is known, so both its own block offsets (region start + local block offset) and any
+///    nested `Fn` op's `j` (the referenced function's region start) resolve correctly.
+fn compile_program(entry: TFunc) -> Result<Vec<u8>, FrontendError> {
+    let mut funcs: Vec<TFunc> = vec![entry];
+    let mut region_lens: Vec<u32> = Vec::new();
+    let mut children_base: Vec<u32> = Vec::new();
+
+    // Phase 1: discover + measure. Appending to `funcs` while iterating it by index is
+    // exactly how transitively-nested functions get discovered; `children_base[k]` is the
+    // global index the first of function `k`'s own (immediate) nested functions lands at.
+    let mut i = 0;
+    while i < funcs.len() {
+        let mut lowering = FnLowering::new(&funcs[i].cfg);
+        let mut discovered = Vec::new();
+        let mut phase = FnPhase::Measure { discovered: &mut discovered };
+        let len = lowering.compile_blocks(funcs[i].entry, 0, &mut phase)?.len() as u32;
+        region_lens.push(len);
+        children_base.push(funcs.len() as u32);
+        funcs.extend(discovered);
+        i += 1;
+    }
+
+    // Phase 2: lay out regions as a simple prefix sum over discovery order.
+    let mut region_offsets: Vec<u32> = Vec::with_capacity(funcs.len());
+    let mut cursor = 0u32;
+    for &len in &region_lens {
+        region_offsets.push(cursor);
+        cursor += len;
+    }
+
+    // Phase 3: emit for real.
+    let mut out = vec![0u8; cursor as usize];
+    for (k, tfunc) in funcs.iter().enumerate() {
+        let mut lowering = FnLowering::new(&tfunc.cfg);
+        let mut phase = FnPhase::Emit { children_base: children_base[k], region_offsets: &region_offsets };
+        let bytes = lowering.compile_blocks(tfunc.entry, region_offsets[k], &mut phase)?;
+        debug_assert_eq!(
+            bytes.len() as u32,
+            region_lens[k],
+            "measured (phase 1) and real (phase 3) lengths must match: every opcode's \
+             operands are fixed-width regardless of value"
+        );
+        let start = region_offsets[k] as usize;
+        out[start..start + bytes.len()].copy_from_slice(&bytes);
+    }
+    Ok(out)
 }
 
 fn parse_script(src: &str) -> Result<Vec<swc_ecma_ast::Stmt>, FrontendError> {
@@ -125,14 +212,19 @@ fn parse_script(src: &str) -> Result<Vec<swc_ecma_ast::Stmt>, FrontendError> {
     Ok(script.body)
 }
 
-#[derive(Default)]
-struct Compiler {
-    /// Byte-encoded bodies of nested functions, appended after the top-level code.
-    /// Each entry's start offset (relative to the *final* buffer, after the caller
-    /// concatenates `main ++ trailer`) is threaded back into the `FN` opcode that
-    /// references it. Unused for now — nested closures (`Item::Func`) aren't wired up
-    /// yet (see `lower_item`), so this is always empty in practice.
-    trailer: Vec<u8>,
+/// Which phase of [`compile_program`]'s two-phase (measure-then-emit) nested-function
+/// offset resolution scheme is driving a `lower_item` call. See `compile_program`'s doc
+/// comment for the full scheme; this only concerns the `Item::Func` arm of `lower_item`.
+enum FnPhase<'a> {
+    /// Phase 1: discover nested functions and measure this function's own byte length.
+    /// Nested-function `j` operands are written as `0` (safe: fixed-width regardless of
+    /// value) and the nested `TFunc`s themselves are collected in traversal order.
+    Measure { discovered: &'a mut Vec<TFunc> },
+    /// Phase 3: real emission, now that every function's region offset is known. Maps the
+    /// Nth nested `Item::Func` encountered (0-indexed, same traversal order phase 1 used
+    /// — see `FnLowering::nested_fn_counter`) to its global function index via
+    /// `children_base + N`, then to its real byte offset via `region_offsets`.
+    Emit { children_base: u32, region_offsets: &'a [u32] },
 }
 
 struct FnLowering<'a> {
@@ -143,23 +235,14 @@ struct FnLowering<'a> {
     /// therefore yields `undefined`, used for e.g. `return;` (Jade has no dedicated
     /// "produce undefined" opcode).
     undefined_slot: Option<u32>,
+    /// How many `Item::Func` nodes this function's own body has encountered so far in
+    /// this traversal — see [`FnPhase::Emit`].
+    nested_fn_counter: u32,
 }
 
-impl Compiler {
-    /// Compile `tfunc`'s body. Returns `(main_bytes, trailer_bytes)`; the caller
-    /// concatenates them (nested-function offsets in `main_bytes` are already relative
-    /// to the concatenation, i.e. `main_bytes.len() + offset_within_trailer`).
-    fn compile_function(&mut self, tfunc: &TFunc) -> Result<(Vec<u8>, Vec<u8>), FrontendError> {
-        let mut lowering = FnLowering {
-            tcfg: &tfunc.cfg,
-            slots: HashMap::new(),
-            next_slot: 0,
-            undefined_slot: None,
-        };
-        // `compile_to_bytecode` always synthesizes a zero-parameter function (see
-        // `compile_to_bytecode`), so `tfunc.params` is always empty here — nothing to bind.
-        let main = lowering.compile_blocks(tfunc.entry, &mut self.trailer)?;
-        Ok((main, std::mem::take(&mut self.trailer)))
+impl<'a> FnLowering<'a> {
+    fn new(tcfg: &'a TCfg) -> Self {
+        Self { tcfg, slots: HashMap::new(), next_slot: 0, undefined_slot: None, nested_fn_counter: 0 }
     }
 }
 
@@ -175,17 +258,26 @@ struct LoweredBlock {
 
 impl<'a> FnLowering<'a> {
     /// Discover every TAC block reachable from `entry`, lower each one's straight-line
-    /// ops, assign each a stable byte offset (a simple prefix sum over emission order —
-    /// `entry` always first, so it always lands at offset `0`), then lower every block's
-    /// terminator with the now-known real target offsets and concatenate.
-    fn compile_blocks(&mut self, entry: TBlockId, trailer: &mut Vec<u8>) -> Result<Vec<u8>, FrontendError> {
+    /// ops, assign each a stable *absolute* byte offset (`region_offset` plus a simple
+    /// local prefix sum over emission order — `entry` always first, so it always lands at
+    /// exactly `region_offset`), then lower every block's terminator with the now-known
+    /// real target offsets and concatenate. `region_offset` is this function's own region
+    /// start in the final whole-program buffer (see [`compile_program`]) — `0` is fine
+    /// during phase-1 measuring, when only the returned `Vec`'s *length* is consulted, not
+    /// any jump-target value actually written into it.
+    fn compile_blocks(
+        &mut self,
+        entry: TBlockId,
+        region_offset: u32,
+        phase: &mut FnPhase,
+    ) -> Result<Vec<u8>, FrontendError> {
         let order = self.discover_reachable(entry)?;
         let mut lowered: Vec<(TBlockId, LoweredBlock)> = Vec::with_capacity(order.len());
         for id in &order {
             let block: &TBlock = &self.tcfg.blocks[*id];
             let mut ops_bytes = Vec::new();
             for stmt in &block.stmts {
-                self.lower_stmt(stmt, &mut ops_bytes)?;
+                self.lower_stmt(stmt, phase, &mut ops_bytes)?;
             }
             if !matches!(block.post.catch, TCatch::Throw) {
                 return unsupported("try/catch (Jade bytecode has no exception-handling opcode)");
@@ -194,10 +286,15 @@ impl<'a> FnLowering<'a> {
         }
 
         // Placeholder-target terminator lengths, to compute each block's byte offset.
+        // `offsets` holds *absolute* (whole-buffer) byte offsets — `region_offset` (this
+        // function's own region start, `0` during phase 1 measuring, when only lengths
+        // matter and no real jump-target value is observed) plus the local prefix-sum
+        // `cursor` — since every jump target in Jade bytecode, including a nested `Fn`'s
+        // `j`, is absolute into the one shared buffer, never rebased by any backend.
         let mut offsets: HashMap<TBlockId, u32> = HashMap::with_capacity(lowered.len());
         let mut cursor = 0u32;
         for (id, block) in &lowered {
-            offsets.insert(*id, cursor);
+            offsets.insert(*id, region_offset + cursor);
             let term_len = self.emit_terminator(&block.term, &offsets, true)?.len() as u32;
             cursor += block.ops_bytes.len() as u32 + term_len;
         }
@@ -207,7 +304,6 @@ impl<'a> FnLowering<'a> {
             out.extend_from_slice(&block.ops_bytes);
             out.extend(self.emit_terminator(&block.term, &offsets, false)?);
         }
-        let _ = trailer; // nested functions aren't wired up yet; see `Compiler::trailer`.
         Ok(out)
     }
 
@@ -315,16 +411,17 @@ impl<'a> FnLowering<'a> {
 
     /// Lower a single TAC statement, materializing its value into a slot determined by
     /// its `LId` (a plain identifier gets its own slot; a member write also emits the
-    /// Jade `SET` and discards the write's own result slot).
-    fn lower_stmt(&mut self, stmt: &TStmt, out: &mut Vec<u8>) -> Result<(), FrontendError> {
+    /// Jade `SET` and discards the write's own result slot). `phase` is only consulted by
+    /// `lower_item`'s `Item::Func` arm; see [`FnPhase`].
+    fn lower_stmt(&mut self, stmt: &TStmt, phase: &mut FnPhase, out: &mut Vec<u8>) -> Result<(), FrontendError> {
         match &stmt.left {
             LId::Id { id } => {
                 let dest = self.slot_for(id);
-                self.lower_item(&stmt.right, dest, out)
+                self.lower_item(&stmt.right, dest, phase, out)
             }
             LId::Member { obj, mem } => {
                 let val_slot = self.fresh_slot();
-                self.lower_item(&stmt.right, val_slot, out)?;
+                self.lower_item(&stmt.right, val_slot, phase, out)?;
                 let obj_op = self.operand_for(obj);
                 let key_op = self.operand_for(&mem[0]);
                 let dest = self.fresh_slot();
@@ -344,7 +441,13 @@ impl<'a> FnLowering<'a> {
         }
     }
 
-    fn lower_item(&mut self, item: &Item<Ident, TFunc>, dest: u32, out: &mut Vec<u8>) -> Result<(), FrontendError> {
+    fn lower_item(
+        &mut self,
+        item: &Item<Ident, TFunc>,
+        dest: u32,
+        phase: &mut FnPhase,
+        out: &mut Vec<u8>,
+    ) -> Result<(), FrontendError> {
         match item {
             Item::Undef => {
                 // No-op: Jade has no "produce undefined" opcode (see `undefined_operand`),
@@ -461,7 +564,42 @@ impl<'a> FnLowering<'a> {
                 out.extend(Operation::NewTarget(dest).emit());
                 Ok(())
             }
-            Item::Func { .. } => unsupported("nested function/closure capture (not yet wired in the frontend)"),
+            Item::Func { func, .. } => {
+                // `closure_args`/`spanner` below are always literal `0` — free-variable
+                // capture isn't wired up yet; see `docs/closure-capture-plan.md`.
+                //
+                // The Nth nested `Item::Func` this function's body encounters (0-indexed,
+                // traversal order) — must match exactly between `compile_program`'s phase 1
+                // (measure/discover) and phase 3 (real emission) passes for `j` to resolve
+                // to the right function. See `FnPhase`/`compile_program`.
+                let n = self.nested_fn_counter;
+                self.nested_fn_counter += 1;
+                let j = match phase {
+                    FnPhase::Measure { discovered } => {
+                        discovered.push(func.clone());
+                        0
+                    }
+                    FnPhase::Emit { children_base, region_offsets } => {
+                        region_offsets[(*children_base + n) as usize]
+                    }
+                };
+                // 0=sync, 1=async, 2=sync generator, 3=async generator — the same 2-bit
+                // encoding every JIT tier's `fn_variant`/`effectiveVariant` decodes.
+                let variant_val = (func.is_async as u32) | ((func.is_generator as u32) << 1);
+                out.extend(
+                    Operation::Fn {
+                        variant: Operand::Literal(variant_val),
+                        // Free-variable capture (`closure_args`) and the decorator hook
+                        // (`spanner`) aren't wired up yet — see `docs/closure-capture-plan.md`.
+                        closure_args: Operand::Literal(0),
+                        spanner: Operand::Literal(0),
+                        j,
+                        dest,
+                    }
+                    .emit(),
+                );
+                Ok(())
+            }
             other => unsupported(format!("{other:?}")),
         }
     }
@@ -633,11 +771,93 @@ mod tests {
         assert_eq!(run_js("if (false) { return 1; } else { return 2; }"), "2");
     }
 
-    /// `jade-cfg-opt::optimize_tfunc`'s `simplify_conditions` pass folds a `CondJmp` whose
-    /// condition is a known boolean literal into a plain `Jmp`, dropping the untaken
-    /// branch entirely — so the untaken branch's own literal should never even be
-    /// discovered as reachable bytecode, proving the optimization pass is actually wired
-    /// in (not just a no-op round-trip).
+    /// Run compiled JS that references `tenant`/`nt` (i.e. contains at least one nested
+    /// closure and/or a `CALL` op) — unlike `run_js`, wraps `body` with a `markGuestFn`
+    /// stub and the JIT's `prelude` (nested function declarations) in scope, and threads
+    /// `undefined` for both `tenant` and `nt`.
+    fn run_js_with_tenant(src: &str) -> String {
+        let bytecode = compile_to_bytecode(src).expect("frontend compile failed");
+        let (body, reg) = compile(&bytecode, VecRegistry::new(), Config::default()).expect("JIT compile failed");
+        let script = format!(
+            "function markGuestFn(f, m) {{ return f; }}\n{prelude}\nconst fn = new Function('tenant', 'nt', 'state', {body});\nconsole.log(JSON.stringify(fn(undefined, undefined, [])));",
+            prelude = reg.prelude(),
+            body = serde_json_escape(&body),
+        );
+        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("failed to run node");
+        assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    /// `Item::Func` now actually lowers to a real `FN` opcode (previously an explicit
+    /// `Unsupported` rejection) — the simplest possible case: a nested closure with no
+    /// control flow of its own, called once.
+    #[test]
+    fn compiles_and_calls_a_nested_closure() {
+        assert_eq!(
+            run_js_with_tenant("var inner = function () { return 42; }; return inner();"),
+            "42"
+        );
+    }
+
+    /// The nested closure's own body has its own multi-block control flow (an `if`/`else`)
+    /// — exercises `compile_program`'s per-function `discover_reachable`/block-offset
+    /// machinery recursively, not just a single straight-line nested block.
+    #[test]
+    fn nested_closure_with_its_own_branch_executes_correctly() {
+        assert_eq!(
+            run_js_with_tenant(
+                "var inner = function () { if (true) { return 1; } else { return 2; } }; return inner();"
+            ),
+            "1"
+        );
+    }
+
+    /// Two independent nested closures in the same outer function: proves
+    /// `compile_program`'s region layout (each function's own `j` computed from its own
+    /// `region_offsets` entry, via `children_base + nested_fn_counter`) doesn't confuse
+    /// sibling functions with each other.
+    #[test]
+    fn two_sibling_nested_closures_do_not_collide() {
+        assert_eq!(
+            run_js_with_tenant(
+                "var a = function () { return 10; }; var b = function () { return 20; }; return a() === b();"
+            ),
+            "false"
+        );
+        assert_eq!(
+            run_js_with_tenant(
+                "var a = function () { return 10; }; var b = function () { return 10; }; return a() === b();"
+            ),
+            "true"
+        );
+    }
+
+    /// A closure nested inside another nested closure — exercises `compile_program`'s
+    /// discovery loop actually being transitive (a function discovered while measuring
+    /// function `k` can itself contain further nested functions, appended and measured in
+    /// the same pass), not just one level deep.
+    ///
+    /// Note: `inner`'s call is deliberately *not* in tail position (`var r = inner();
+    /// return r;`, not `return inner();`) — a tail-position call lowers to TAC's
+    /// `TTerm::Tail`, which this frontend already explicitly rejects as unsupported
+    /// (`targets_of`) independent of closures entirely; tail-call lowering is a separate,
+    /// unrelated gap, not something nested-closure support needs to (or does) fix.
+    #[test]
+    fn doubly_nested_closure_executes_correctly() {
+        assert_eq!(
+            run_js_with_tenant(
+                "var outer = function () { \
+                     var inner = function () { return 7; }; \
+                     var r = inner(); \
+                     return r; \
+                 }; \
+                 var r2 = outer(); \
+                 return r2;"
+            ),
+            "7"
+        );
+    }
+
     #[test]
     fn constant_condition_is_folded_away() {
         let js = jit_js("if (true) { return 111; } else { return 222; }");
