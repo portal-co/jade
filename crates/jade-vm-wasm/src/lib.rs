@@ -1150,3 +1150,42 @@ pub fn run_virtualized_ag(
 ) -> Result<JsValue, JsValue> {
     create_async_gen(&code, &state, ip as usize, &global_this, &nt, &tenant, add_gen, double_gen)
 }
+
+// ---------------------------------------------------------------------------
+// Tier 2 (opt-in, `tier2` feature): compile-then-eval instead of direct interpretation.
+// ---------------------------------------------------------------------------
+
+/// Compile `code` via Tier 2 (`jade-vm-jit-swc`'s "clean code, optimizer-friendly" CFG
+/// reconstruction — see `docs/bytecode-cfg-plan.md`) and evaluate the result, instead of
+/// interpreting bytecode op-by-op through [`WasmPlatform`]. Only supports a fresh call
+/// from the function's own entry point (Tier 2 always compiles from bytecode offset `0`,
+/// with no arbitrary-resume-point concept the way the direct interpreter's `ip` parameter
+/// has — there is no `_g`/`_ag`/resuming variant of this entry point).
+///
+/// The evaluated function body may reference `markGuestFn`, `createGuestGen`, and
+/// `unpackGuestGen` (matching `packages/jade-js/shims.ts`'s contract) if `add_gen` is set,
+/// or the produced text contains a nested closure's own guest-ABI registration — these
+/// must already be real globals in whatever JS environment hosts this WASM module; this
+/// crate does not define them itself (unlike the direct-interpretation path above, which
+/// implements the equivalent behavior natively in Rust via [`WasmPlatform`], needing no
+/// such globals).
+#[cfg(feature = "tier2")]
+#[wasm_bindgen]
+pub fn run_virtualized_tier2(
+    code: Vec<u8>,
+    tenant: JsValue,
+    nt: JsValue,
+    state: JsValue,
+    add_async: bool,
+    add_gen: bool,
+) -> Result<JsValue, JsValue> {
+    let cfg = portal_solutions_jade_vm_jit::Config { add_async, add_gen, ..Default::default() };
+    let (body, reg) = portal_solutions_jade_vm_jit_swc::compile(&code, cfg)
+        .map_err(|e| js_err(&format!("jit-swc: {e}")))?;
+    // `reg`'s nested-function declarations (if any) must be in scope alongside `body`,
+    // exactly as `VecRegistry::prelude()` is used by every other tier's own caller.
+    let full_body = format!("{}\n{}", reg.prelude(), body);
+    let func = Function::new_with_args("tenant, nt, state", &full_body);
+    let call_args = Array::of3(&tenant, &nt, &state);
+    Reflect::apply(&func, &JsValue::UNDEFINED, &call_args)
+}

@@ -12,5 +12,15 @@ crate-type = ["cdylib", "rlib"]
 js-sys = "0.3"
 portal-solutions-jade-vm = { path = "../jade-vm", features = ["alloc"] }
 portal-solutions-jade-vm-core = { path = "../jade-vm-core" }
+portal-solutions-jade-vm-jit = { path = "../jade-vm-jit", optional = true }
+portal-solutions-jade-vm-jit-swc = { path = "../jade-vm-jit-swc", optional = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+
+[features]
+# Opt-in alternative to the always-on direct interpreter (`WasmPlatform`): compiles via
+# Tier 2 (`jade-vm-jit-swc`)'s "clean code, optimizer-friendly" CFG reconstruction, then
+# `eval`s the result via `js_sys::Function`, instead of interpreting bytecode op-by-op.
+# Off by default -- Tier 2 isn't proven at the same maturity as the direct interpreter yet,
+# and isn't wired into any embedder outside this opt-in path. See `run_virtualized_tier2`.
+tier2 = ["dep:portal-solutions-jade-vm-jit", "dep:portal-solutions-jade-vm-jit-swc"]
