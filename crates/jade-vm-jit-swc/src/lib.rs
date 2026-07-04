@@ -99,11 +99,22 @@ pub fn compile(code: &[u8], cfg: Config) -> Result<(String, VecRegistry), String
 /// Return a clone of `cfg` with `nested_body_compiler` set to recurse into this tier's own
 /// `compile_body` pipeline (sharing `reg` across every level of nesting, so all registered
 /// functions land in one combined registry/prelude) instead of `op_fn`'s Tier 0/1 fallback.
+///
+/// Unlike Tier 0/1's raw per-op emission, Tier 2's `TFunc`/SSA round-trip *hoists a `var`
+/// declaration for every referenced free identifier it sees* — including `state` itself
+/// (and `tenant`, `nt`, ...), not just Jade's own `v{n}` temporaries. `op_fn`'s normal
+/// nested-body wrapping (`const state = Object.create(null);\n{stmts}`) would collide with
+/// that hoisted `var state;` (mixing `const`/`var` for the same name in the same scope is
+/// a hard `SyntaxError`, unlike `var`/`var` or a parameter/`var` pair, both of which are
+/// harmless redeclarations) — so this closure's own output initializes the *already
+/// var-hoisted* `state` via a plain assignment instead, and `op_fn` skips its usual const
+/// prefix whenever `nested_body_compiler` is in use (see `op_fn`'s doc comment).
 fn with_nested_body_compiler(mut cfg: Config, reg: Rc<RefCell<VecRegistry>>) -> Config {
     let base_cfg = cfg.clone();
     cfg.nested_body_compiler = Some(Rc::new(move |code: &[u8], start_ip: usize, is_gen: bool, is_async: bool, double_gen: bool| {
         let inner_cfg = with_nested_body_compiler(base_cfg.clone(), reg.clone());
-        compile_body(code, start_ip, &inner_cfg, is_gen, is_async, double_gen, &reg)
+        let stmts = compile_body(code, start_ip, &inner_cfg, is_gen, is_async, double_gen, &reg)?;
+        Ok(format!("state = Object.create(null);\n{stmts}"))
     }));
     cfg
 }
@@ -133,7 +144,62 @@ fn compile_body(
         .map_err(|e: portal_jsc_swc_tac::Error| format!("jit-swc: TFunc -> Function: {e:?}"))?;
     let stmts = function.body.map(|b| b.stmts).unwrap_or_default();
     validate_labels(&stmts)?;
-    codegen_stmts(&stmts)
+    Ok(strip_free_identifier_hoists(&codegen_stmts(&stmts)?))
+}
+
+/// Defensive workaround for a real bug in the `TFunc`/SSA round-trip (`portal-jsc-swc-tac`/
+/// `-ssa`, vendored — patching those is out of scope here): converting the *re-parsed* AST
+/// of Jade's own per-op-emitted text back through `TFunc -> Function` hoists a bare
+/// `var <name>;` declaration for **every** distinct identifier the reconstructed body
+/// references — not just Jade's own genuine `v{n}`/`$v{n}`/`$k{n}p{n}`/`cff` temporaries,
+/// but any free/external identifier too (`state`, `tenant`, `nt`, a nested function's own
+/// registered name, and even true JS globals like `Reflect`/`Symbol`). Since the hoisted
+/// `var` is left uninitialized, it *shadows* the real outer binding with `undefined` for
+/// the rest of the function — turning e.g. every `Reflect.apply(...)` call (emitted by
+/// every `CALL` op) into a `TypeError` the moment the reconstructed function actually runs.
+/// Strips any `var <name>;` hoist whose name doesn't match Jade's own internal temporary
+/// naming convention, leaving genuine Jade-internal hoists (needed across the `cff`-gated
+/// blocks this tier's control-flow reconstruction produces) untouched.
+fn strip_free_identifier_hoists(js: &str) -> String {
+    js.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            let Some(name) = trimmed.strip_prefix("var ").and_then(|s| s.strip_suffix(';')) else {
+                return true;
+            };
+            // Only ever drop a single, bare, uninitialized hoist (`var name;`) — anything
+            // else (a comma list, an initializer) isn't this specific hoist shape.
+            if name.is_empty() || name.contains([',', ' ', '=']) {
+                return true;
+            }
+            is_jade_internal_temp_name(name)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Whether `name` matches Jade's own internal temporary-naming convention: `cff` (the
+/// control-flow-flag local), `v{n}`/`$v{n}` (Jade value slots), or `$k{n}p{n}` (join-point
+/// phi temporaries) — see the JIT tiers' own emission (`jade-vm-jit`'s `JsJit::fresh`) and
+/// `ssa-reloop2`'s phi-node naming.
+fn is_jade_internal_temp_name(name: &str) -> bool {
+    if name == "cff" {
+        return true;
+    }
+    let name = name.strip_prefix('$').unwrap_or(name);
+    if let Some(rest) = name.strip_prefix('v') {
+        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+    }
+    if let Some(rest) = name.strip_prefix('k')
+        && let Some(p_pos) = rest.find('p')
+    {
+        let (n1, n2) = (&rest[..p_pos], &rest[p_pos + 1..]);
+        return !n1.is_empty()
+            && !n2.is_empty()
+            && n1.bytes().all(|b| b.is_ascii_digit())
+            && n2.bytes().all(|b| b.is_ascii_digit());
+    }
+    false
 }
 
 /// Defensive backstop: reject output where a labeled `break`/`continue` doesn't lexically
@@ -509,5 +575,225 @@ mod tests {
         let cfg = Config { add_gen: true, ..Config::default() };
         let (js, _reg) = compile(&code, cfg).unwrap();
         assert!(js.contains("yield"), "got:\n{js}");
+    }
+
+    /// Drive a compiled `async function` body to completion via Node (an async IIFE
+    /// `await`ing the call, `.catch` failing the process on rejection) — actually proving
+    /// the `await` suspends/resumes correctly, not just that the keyword parses.
+    fn run_js_async(body: &str) -> String {
+        let script = format!(
+            // `new Function` can only ever construct a plain (non-async) function,
+            // regardless of body content — the `AsyncFunction` constructor is not a
+            // global, but is reachable via any async function's own prototype chain.
+            "const AsyncFunction = Object.getPrototypeOf(async function(){{}}).constructor;\n\
+             const fn = new AsyncFunction('tenant','nt','state', {body:?});\n\
+             (async () => {{ console.log(JSON.stringify(await fn(undefined,undefined,[]))); }})()\n\
+             .catch(e => {{ console.error(e); process.exit(1); }});"
+        );
+        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
+        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    /// Run a compiled top-level program (whose own `op_call` wraps a generator-shaped
+    /// result via `createGuestGen` under ambient `add_gen`) via Node, unwrap the returned
+    /// guest-gen object with `unpackGuestGen`, and collect every yielded value.
+    /// `createGuestGen`/`unpackGuestGen` stubs (matching `packages/jade-js/shims.ts`'s
+    /// contract closely enough for doubleGen driving) are provided so the harness is
+    /// self-contained, not dependent on the real TS shims. `prelude` (any nested-function
+    /// declarations from `VecRegistry::prelude()`) is placed in the *outer* Node script
+    /// scope, not concatenated inside `body` — Tier 2's `TFunc`/SSA round-trip hoists a
+    /// `var` for every free identifier a reconstructed function references (including a
+    /// nested function's own registered name, `state`, etc.), which would collide with a
+    /// `const`/`let` of the same name in the very same scope (unlike the harmless
+    /// `var`/`var` or parameter/`var` pairs this never conflicts with) if `prelude` and
+    /// `body` shared one function scope.
+    fn run_js_gen_values(prelude: &str, body: &str) -> String {
+        let shims = r#"
+            const THROUGH = Symbol.for("jade.through");
+            const GUEST_NEXT = Symbol.for("jade.guest.next");
+            function markGuestFn(f) { return f; }
+            function createGuestGen(nativeGen) {
+                const obj = {};
+                const nextFn = function* (sent) {
+                    let step = nativeGen.next(sent);
+                    while (!step.done && step.value && step.value[THROUGH] !== undefined) {
+                        sent = yield step.value;
+                        step = nativeGen.next(sent);
+                    }
+                    return step;
+                };
+                obj.next = nextFn;
+                obj.return = function* (v) { return nativeGen.return ? nativeGen.return(v) : { value: v, done: true }; };
+                obj.throw = function* (e) { if (nativeGen.throw) return nativeGen.throw(e); throw e; };
+                obj[GUEST_NEXT] = nextFn;
+                return obj;
+            }
+            function* unpackGuestGen(g) {
+                const nextFn = g[GUEST_NEXT];
+                if (typeof nextFn !== "function") return yield* g;
+                let sent;
+                while (true) {
+                    const result = yield* nextFn.call(g, sent);
+                    if (result.done) return result.value;
+                    sent = yield result.value;
+                }
+            }
+        "#;
+        let script = format!(
+            "{shims}\n{prelude}\nconst make = new Function('tenant','nt','state', {body:?});\n\
+             const result = make(undefined, undefined, []);\n\
+             const out = [];\n\
+             for (const v of unpackGuestGen(result)) out.push(v);\n\
+             console.log(JSON.stringify(out));",
+        );
+        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
+        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    /// Mirrors `add_gen_config_reaches_yield_ops` for `add_async` — and, the actual
+    /// hardening over that test, drives the result through Node rather than only checking
+    /// for the `await` substring: `await 5` resolves synchronously to `5`, so this proves
+    /// real event-loop suspension/resumption round-trips correctly.
+    #[test]
+    fn add_async_config_reaches_await_ops() {
+        let code = chunk(&[
+            Operation::Await { val: Operand::Literal(5), dest: 0 },
+            Operation::Ret(Operand::StateRef(0)),
+        ]);
+
+        let err = compile(&code, Config::default()).unwrap_err();
+        assert!(err.contains("AWAIT"), "expected an AWAIT-related error, got: {err}");
+
+        let cfg = Config { add_async: true, ..Config::default() };
+        let (js, _reg) = compile(&code, cfg).unwrap();
+        assert!(js.contains("await"), "got:\n{js}");
+        assert_eq!(run_js_async(&js), "5", "js:\n{js}");
+    }
+
+    /// Nested `Fn` op inside Tier 2, compiled through Tier 2 itself (not silently
+    /// downgraded to Tier 0's block-dispatch loop): builds bytecode by hand, mirroring
+    /// `jade-vm-jit`'s own `program_with_fn` test helper, with a nested function declared
+    /// as a generator (`variant = 2`) called from the top level under ambient `add_gen` —
+    /// a genuine doubleGen combination (declared-gen nested function running under
+    /// ambient `add_gen`), only reachable for a *nested* function since Jade bytecode's
+    /// top level has no "declared variant" bit of its own.
+    #[test]
+    fn nested_gen_fn_runs_via_tier2_under_ambient_add_gen() {
+        let fn_body = chunk(&[
+            Operation::Yield { val: Operand::Literal(7), dest: 0 },
+            Operation::Ret(Operand::StateRef(0)),
+        ]);
+        let mk = |j: u32| Operation::Fn {
+            variant: Operand::Literal(2), // declared sync generator
+            closure_args: Operand::Literal(0),
+            spanner: Operand::Literal(0),
+            j,
+            dest: 0,
+        };
+        let call_op = Operation::Call { fn_op: Operand::StateRef(0), args: vec![], dest: 1 };
+        let ret_op = Operation::Ret(Operand::StateRef(1));
+        // The nested body must sit *after* the entire top-level block (Fn + Call + Ret),
+        // not right after the `Fn` op alone — the `Fn` op is a plain value-producing op,
+        // not a jump, so `discover_blocks`' straight-line parse of the top-level's own
+        // block would otherwise fall straight through into the nested body's bytes
+        // instead of stopping at the top level's own `Ret`.
+        let j = op_len(&mk(0)) + op_len(&call_op) + op_len(&ret_op);
+        let mut code: Vec<u8> = mk(j).emit().collect();
+        code.extend(call_op.emit());
+        code.extend(ret_op.emit());
+        code.extend_from_slice(&fn_body);
+
+        let cfg = Config { add_gen: true, ..Config::default() };
+        let (js, reg) = compile(&code, cfg).unwrap();
+        let prelude = reg.prelude();
+
+        assert!(prelude.contains("function*"), "expected the nested function registered as a generator, got:\n{prelude}");
+        assert!(
+            prelude.contains("markGuestFn(__fn0, {abi: \"leading-tenant-nt\"})"),
+            "expected the nested function to register its guest ABI, got:\n{prelude}"
+        );
+        // The nested body itself has no branch/loop, so there isn't much structure to
+        // prove was Tier-2-reconstructed rather than Tier-0-emitted here beyond it having
+        // compiled and registered at all (the *real* proof that recursion through Tier 2
+        // happened, not a downgrade, is `nested_fn_with_branch_is_reconstructed_by_tier2`
+        // below, which has actual control flow in the nested body to tell the two apart).
+        assert!(!prelude.contains("__ip"), "did not expect a Tier 0 block-dispatch loop, got:\n{prelude}");
+
+        // Drive it: the outer program's own CALL result gets addGen-wrapped
+        // (`createGuestGen`) since ambient `add_gen` is set. The nested function is
+        // *itself* declared a generator (`variant = 2`) while ALSO running under ambient
+        // `add_gen` — the actual doubleGen combination — so its own `yield` is emitted
+        // THROUGH-tagged (`emit_op`'s `Operation::Yield` handling, gated on
+        // `jit.double_gen`), which `createGuestGen`'s `nextFn` re-yields *unchanged*
+        // rather than unwrapping (that unwrapping is `unpackGuestGen`'s caller's job one
+        // level further out — there isn't one here, since this test calls the nested
+        // generator directly) — so the value observed through `unpackGuestGen` alone is
+        // the THROUGH-tagged wrapper itself (`{value: 7, [THROUGH]: true}`; `JSON.stringify`
+        // drops the symbol-keyed `THROUGH` marker, leaving `{"value":7}`). This is the
+        // correct, distinguishing behavior of doubleGen vs. a plain (non-doubleGen)
+        // generator, which yields the bare value with no wrapper at all.
+        assert_eq!(run_js_gen_values(&prelude, &js), r#"[{"value":7}]"#, "prelude:\n{prelude}\njs:\n{js}");
+    }
+
+    /// Same as above, but the nested function's own body has real control flow (an
+    /// `if`/`else` before the `yield`) — proving the nested body was actually
+    /// reconstructed through Tier 2's own CFG/relooper pipeline (real `if`, no `switch
+    /// (__ip)` block-dispatch loop) rather than falling back to Tier 0's always-correct
+    /// but structurally different emission.
+    #[test]
+    fn nested_fn_with_branch_is_reconstructed_by_tier2() {
+        let mk = |j: u32| Operation::Fn {
+            variant: Operand::Literal(2),
+            closure_args: Operand::Literal(0),
+            spanner: Operand::Literal(0),
+            j,
+            dest: 0,
+        };
+        let call_op = Operation::Call { fn_op: Operand::StateRef(0), args: vec![], dest: 1 };
+        let ret_op = Operation::Ret(Operand::StateRef(1));
+        // The nested body must start *after* the entire top-level block (Fn + Call + Ret):
+        // every op length here is independent of any operand's actual value, so `j` (and
+        // every offset inside the nested body, all absolute into the one shared buffer —
+        // see `jade-vm-frontend`'s `compile_program` doc comment) is knowable upfront.
+        // Placing the nested body right after the `Fn` op alone (a plain value-producing
+        // op, not a jump) would let the top level's own straight-line block-discovery fall
+        // straight through into it instead of stopping at the top level's own `Ret`.
+        let j = op_len(&mk(0)) + op_len(&call_op) + op_len(&ret_op);
+
+        let bool_len = op_len(&Operation::Bool { val: true, dest: 0 });
+        let cond_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let jmp_len = op_len(&Operation::Jmp { target: 0 });
+        let then_body = chunk(&[Operation::Yield { val: Operand::Literal(1), dest: 1 }]);
+        let else_body = chunk(&[Operation::Yield { val: Operand::Literal(2), dest: 1 }]);
+        let ret_body = chunk(&[Operation::Ret(Operand::StateRef(1))]);
+
+        let then_offset = j + bool_len + cond_len;
+        let jmp_offset = then_offset + then_body.len() as u32;
+        let else_offset = jmp_offset + jmp_len;
+        let ret_offset = else_offset + else_body.len() as u32;
+
+        let mut fn_body = chunk(&[Operation::Bool { val: true, dest: 0 }]);
+        fn_body.extend(
+            Operation::CondJmp { cond: Operand::StateRef(0), if_true: then_offset, if_false: else_offset }.emit(),
+        );
+        fn_body.extend(then_body);
+        fn_body.extend(Operation::Jmp { target: ret_offset }.emit());
+        fn_body.extend(else_body);
+        fn_body.extend(ret_body);
+
+        let mut code: Vec<u8> = mk(j).emit().collect();
+        code.extend(call_op.emit());
+        code.extend(ret_op.emit());
+        assert_eq!(code.len() as u32, j, "internal test invariant: top-level block length must match the precomputed `j`");
+        code.extend_from_slice(&fn_body);
+
+        let (js, reg) = compile(&code, Config::default()).unwrap();
+        let prelude = reg.prelude();
+        assert!(prelude.contains("if ("), "expected the nested body's branch reconstructed as a real `if`, got:\n{prelude}");
+        assert!(!prelude.contains("__ip"), "did not expect a Tier 0 block-dispatch loop, got:\n{prelude}");
+
+        assert_eq!(run_js_gen_values(&prelude, &js), "[1]", "prelude:\n{prelude}\njs:\n{js}");
     }
 }

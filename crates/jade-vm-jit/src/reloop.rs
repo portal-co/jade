@@ -408,7 +408,16 @@ fn emit_dispatch<R: FnRegistry>(
 /// Tier 1 entry point: compile Jade bytecode into JS by restructuring Tier 0's
 /// discovered blocks via `ssa-reloop2` into native `while`/`if`/`switch`/`return`/labeled
 /// `break`/`continue`, instead of Tier 0's flat block-dispatch loop.
-pub fn compile<R: FnRegistry>(code: &[u8], reg: R, cfg: Config) -> Result<(String, R), String> {
+pub fn compile<R: FnRegistry>(code: &[u8], reg: R, mut cfg: Config) -> Result<(String, R), String> {
+    // Force this on regardless of what the caller passed: calling *this* function is
+    // itself the choice of Tier 1, and `op_fn` (`crates/jade-vm-jit/src/lib.rs`) reads
+    // `Config.prefer_reloop` — propagated by `Clone` into every nested `JsJit` — to decide
+    // whether a nested closure recurses through Tier 1 too, rather than downgrading to
+    // Tier 0. Without this, a caller reaching this function directly (bypassing
+    // `jade_vm_jit::compile`'s own `if cfg.prefer_reloop { return reloop::compile(...) }`
+    // dispatch, which is the only other place this flag is normally set) would silently
+    // get Tier-0-emitted nested closures despite asking for Tier 1 at the top level.
+    cfg.prefer_reloop = true;
     let cell = alloc::rc::Rc::new(RefCell::new(reg));
     let body = {
         let mut jit = JsJit::with_config(cell.clone(), cfg, false, false, false);
@@ -574,5 +583,77 @@ mod tests {
         let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
         let result = run_js(&js);
         assert_eq!(result, "7", "js:\n{js}");
+    }
+
+    /// Run compiled JS that references `tenant`/`nt`/a registered nested function — unlike
+    /// `run_js`, wraps `body` with a `markGuestFn` stub and `prelude` (nested function
+    /// declarations from `VecRegistry::prelude()`) in scope.
+    fn run_js_with_prelude(prelude: &str, body: &str) -> String {
+        let script = format!(
+            "function markGuestFn(f, m) {{ return f; }}\n{prelude}\nconst fn = new Function('tenant', 'nt', 'state', {body:?});\nconsole.log(JSON.stringify(fn(undefined, undefined, [])));",
+        );
+        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
+        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    /// A nested `Fn` op whose own body has real control flow (an `if`/`else`), compiled
+    /// via Tier 1 (this module's own `compile` entry point) — proves the nested body is
+    /// itself restructured via `ssa-reloop2` (a real `if`, no `switch (__ip)` block-
+    /// dispatch loop), not silently downgraded to Tier 0, now that `op_fn`
+    /// (`crates/jade-vm-jit/src/lib.rs`) recurses through whichever tier is driving the
+    /// *current* compilation — for Tier 1 specifically, `Config.prefer_reloop` just
+    /// propagates by `Clone` into every nested `JsJit`, so no `nested_body_compiler`
+    /// override is needed (that hook exists only for Tier 2, a separate crate). Mirrors
+    /// `jade-vm-jit-swc`'s `nested_fn_with_branch_is_reconstructed_by_tier2`.
+    #[test]
+    fn nested_fn_with_branch_is_reconstructed_by_tier1() {
+        let mk = |j: u32| Operation::Fn {
+            variant: Operand::Literal(0),
+            closure_args: Operand::Literal(0),
+            spanner: Operand::Literal(0),
+            j,
+            dest: 0,
+        };
+        let call_op = Operation::Call { fn_op: Operand::StateRef(0), args: vec![], dest: 1 };
+        let ret_op = Operation::Ret(Operand::StateRef(1));
+        // The nested body must start *after* the entire top-level block (Fn + Call +
+        // Ret), not right after the `Fn` op alone — see the identical note in
+        // `jade-vm-jit-swc`'s equivalent test.
+        let j = op_len(&mk(0)) + op_len(&call_op) + op_len(&ret_op);
+
+        let bool_len = op_len(&Operation::Bool { val: true, dest: 0 });
+        let cond_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let jmp_len = op_len(&Operation::Jmp { target: 0 });
+        let then_body = chunk(&[Operation::Lit32 { dest: 1, val: 10 }]);
+        let else_body = chunk(&[Operation::Lit32 { dest: 1, val: 20 }]);
+        let ret_body = chunk(&[Operation::Ret(Operand::StateRef(1))]);
+
+        let then_offset = j + bool_len + cond_len;
+        let jmp_offset = then_offset + then_body.len() as u32;
+        let else_offset = jmp_offset + jmp_len;
+        let ret_offset = else_offset + else_body.len() as u32;
+
+        let mut fn_body = chunk(&[Operation::Bool { val: true, dest: 0 }]);
+        fn_body.extend(
+            Operation::CondJmp { cond: Operand::StateRef(0), if_true: then_offset, if_false: else_offset }.emit(),
+        );
+        fn_body.extend(then_body);
+        fn_body.extend(Operation::Jmp { target: ret_offset }.emit());
+        fn_body.extend(else_body);
+        fn_body.extend(ret_body);
+
+        let mut code: Vec<u8> = mk(j).emit().collect();
+        code.extend(call_op.emit());
+        code.extend(ret_op.emit());
+        assert_eq!(code.len() as u32, j, "internal test invariant: top-level block length must match the precomputed `j`");
+        code.extend_from_slice(&fn_body);
+
+        let (js, reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
+        let prelude = reg.prelude();
+        assert!(prelude.contains("if ("), "expected the nested body's branch reconstructed as a real `if`, got:\n{prelude}");
+        assert!(!prelude.contains("__ip"), "did not expect a Tier 0 block-dispatch loop, got:\n{prelude}");
+
+        assert_eq!(run_js_with_prelude(&prelude, &js), "10", "prelude:\n{prelude}\njs:\n{js}");
     }
 }

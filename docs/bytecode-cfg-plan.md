@@ -114,10 +114,44 @@ pick based on what's available in its environment:
   via `swc_ecma_codegen`.
 
 All three carry `Config.add_async`/`add_gen` (ambient capability upgrades —
-tested end-to-end in Tier 2 via `add_gen_config_reaches_yield_ops`) and
-`Config.tenant_methods` (inlines `GET`/`SET` instead of calling through
-`tenant.get`/`tenant.set`, via the same `ops_to_js` per-op emission all three
-tiers share).
+tested end-to-end in Tier 2 via `add_gen_config_reaches_yield_ops`,
+`add_async_config_reaches_await_ops`, and the doubleGen-combination test
+`nested_gen_fn_runs_via_tier2_under_ambient_add_gen`) and `Config.tenant_methods`
+(inlines `GET`/`SET` instead of calling through `tenant.get`/`tenant.set`, via
+the same `ops_to_js` per-op emission all three tiers share).
+
+### Nested closures recurse through the *active* tier
+
+A nested `Fn` op's own body is compiled through whichever tier is compiling
+the *enclosing* function, not silently downgraded to Tier 0. `op_fn`
+(`crates/jade-vm-jit`) consults `Config.nested_body_compiler` — an injectable
+hook, since Tier 2 (a separate crate depending on `jade-vm-jit`, not the
+reverse) can't be called directly from `op_fn` without an illegal reverse
+dependency; Tier 2's `compile()` sets it to recurse into its own CFG
+reconstruction. Tier 1 doesn't need the hook: `Config.prefer_reloop`
+propagates by `Clone` into every nested `JsJit`, and `op_fn` checks it
+directly (both live in the same crate) — though `reloop::compile` itself
+must force `prefer_reloop = true` on entry, since a caller reaching it
+directly (bypassing `jade_vm_jit::compile`'s own dispatch, the only other
+place that flag is normally set) would otherwise silently get Tier-0-emitted
+nested closures. See `nested_fn_with_branch_is_reconstructed_by_tier1`/`_tier2`
+for the tests locking this in (a nested function whose own body has real
+control flow, proving genuine reconstruction — real `if`, no `switch (__ip)`
+— rather than a downgrade that happens to still execute correctly).
+
+Tier 2's `TFunc`/SSA round-trip (needed to reconstruct a nested body) has a
+real bug worth knowing about: converting the *re-parsed* AST of Jade's own
+per-op-emitted text hoists a bare `var <name>;` for **every** distinct
+identifier referenced — not just Jade's own `v{n}`/`$v{n}`/`$k{n}p{n}`/`cff`
+temporaries, but any free/external identifier too, including true JS globals
+like `Reflect`/`Symbol`. Left uninitialized, that hoisted `var` shadows the
+real outer binding with `undefined`, breaking e.g. every `Reflect.apply(...)`
+call a `CALL` op emits the moment the reconstructed function actually runs —
+previously unnoticed since no Tier 2 test combined a `CALL` op with actual
+Node execution before nested-closure support needed one. Worked around at the
+text level (`jade-vm-jit-swc`'s `strip_free_identifier_hoists`, applied to
+every `compile_body` call) rather than in the vendored `portal-jsc-swc-tac`/
+`-ssa` crates, which is out of scope here.
 
 ### Relooper bugs found and fixed at the source
 

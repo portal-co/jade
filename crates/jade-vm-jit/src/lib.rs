@@ -272,10 +272,6 @@ pub struct JsJit<R: FnRegistry> {
 }
 
 impl<R: FnRegistry> JsJit<R> {
-    fn new(reg: Rc<RefCell<R>>) -> Self {
-        Self::with_config(reg, Config::default(), false, false, false)
-    }
-
     fn with_config(
         reg: Rc<RefCell<R>>,
         cfg: Config,
@@ -401,7 +397,14 @@ impl<R: FnRegistry> Ops for JsJit<R> {
         // silently downgrading every nested closure to Tier 0's block-dispatch loop; fall
         // back to Tier 0/1 (this crate's own `emit_program`/`emit_reloop_program`, chosen
         // via `prefer_reloop`) only when no override is set.
-        let stmts = if let Some(f) = self.cfg.nested_body_compiler.clone() {
+        // An override (Tier 2) is responsible for its own `state` initialization — its
+        // TFunc/SSA round-trip hoists a `var` for every referenced free identifier it
+        // sees, including `state` itself, so an *external* `const state = ...;` prefix
+        // here would collide with that hoisted `var` (`const`/`var` for the same name in
+        // one scope is a hard `SyntaxError`, unlike the harmless `var`/`var` or
+        // parameter/`var` pairs the Tier 0/1 fallback produces) — see
+        // `jade-vm-jit-swc`'s `with_nested_body_compiler`.
+        let body = if let Some(f) = self.cfg.nested_body_compiler.clone() {
             f(code, j as usize, child_is_gen, child_is_async, child_double_gen)?
         } else {
             let mut nested = JsJit::with_config(
@@ -417,9 +420,8 @@ impl<R: FnRegistry> Ops for JsJit<R> {
             } else {
                 emit_program(&mut nested, code, j as usize)?;
             }
-            nested.emit.into_inner().buf
+            format!("const state = Object.create(null);\n{}", nested.emit.into_inner().buf)
         };
-        let body = format!("const state = Object.create(null);\n{stmts}");
         // NOTE: closure-slot capture and decorator (`spanner`) application are
         // not yet wired in this first backend — see `docs/closure-capture-plan.md`.
         let reference = self.reg.borrow_mut().register(eff, &["tenant", "nt", "...args"], &body);
