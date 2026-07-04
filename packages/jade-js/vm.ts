@@ -97,7 +97,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 while(n--) callArgs.push(arg());
                 const _callRaw = apply(fn, undefined, callArgs);
                 state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof _callRaw.next === 'function')
-                    ? createGuestGen(_callRaw, tenant)
+                    ? tenant.createGuestGen(_callRaw)
                     : _callRaw;
                 ip += 4;
                 break;
@@ -210,7 +210,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 while(n--) callArgs.push(arg());
                 const _callRaw = apply(fn, undefined, callArgs);
                 state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof _callRaw.next === 'function')
-                    ? createGuestGen(_callRaw, tenant)
+                    ? tenant.createGuestGen(_callRaw)
                     : _callRaw;
                 ip += 4;
                 break;
@@ -323,7 +323,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 while(n--) callArgs.push(arg());
                 const _callRaw = apply(fn, undefined, callArgs);
                 state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof _callRaw.next === 'function')
-                    ? createGuestGen(_callRaw, tenant)
+                    ? tenant.createGuestGen(_callRaw)
                     : _callRaw;
                 ip += 4;
                 break;
@@ -436,7 +436,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 while(n--) callArgs.push(arg());
                 const _callRaw = apply(fn, undefined, callArgs);
                 state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof _callRaw.next === 'function')
-                    ? createGuestGen(_callRaw, tenant)
+                    ? tenant.createGuestGen(_callRaw)
                     : _callRaw;
                 ip += 4;
                 break;

@@ -1,4 +1,5 @@
 import type { Tenant } from "./index.ts";
+import { createGuestGen, unpackGuestGen } from "./shims.ts";
 
 /**
  * The calling convention a guest (Jade-VM-produced) function actually uses, as observed
@@ -31,32 +32,53 @@ export function guestFnMeta(fn: Function): GuestFnMeta | undefined {
  * leading parameters threaded; anything else (including an unregistered guest function,
  * which only the "closure"-ABI interpreter ever produces) is called as a plain function.
  * Never uses `.call()`/`.apply()` assuming host semantics without checking first.
+ *
+ * Takes the tenant via `this` (called as `tenant.invokeGuestAware(...)`, per `guestAbiMixin`)
+ * rather than an explicit parameter — see `Tenant`'s doc comment (`index.ts`) for why.
  */
-export function invokeGuestAware(
+export function invokeGuestAware<Args extends readonly unknown[], R = unknown>(
+  this: Tenant,
   fn: Function,
-  tenant: Tenant,
   thisArg: unknown,
-  args: unknown[],
-): unknown {
+  args: Args,
+): R {
   const meta = guestFnMeta(fn);
   if (meta?.abi === "leading-tenant-nt") {
-    return Reflect.apply(fn, thisArg, [tenant, undefined, ...args]);
+    return Reflect.apply(fn, thisArg, [this, undefined, ...args]) as R;
   }
-  return Reflect.apply(fn, thisArg, args);
+  return Reflect.apply(fn, thisArg, args) as R;
 }
 
 /**
  * Invoke a property-descriptor getter/setter ("trap") with the correct receiver and ABI,
- * whether it turns out to be a guest function or a plain host function.
+ * whether it turns out to be a guest function or a plain host function. Takes the tenant
+ * via `this`, same as `invokeGuestAware`.
  */
-export function invokeTrap(
+export function invokeTrap<Args extends readonly unknown[], R = unknown>(
+  this: Tenant,
   fn: Function,
-  tenant: Tenant,
   receiver: object,
-  args: unknown[],
-): unknown {
-  return invokeGuestAware(fn, tenant, receiver, args);
+  args: Args,
+): R {
+  return this.invokeGuestAware(fn, receiver, args);
 }
+
+/**
+ * Every ABI/shim helper a tenant method might need — `markGuestFn`/`invokeGuestAware`/
+ * `invokeTrap` here, plus `createGuestGen`/`unpackGuestGen` from `shims.ts` — bundled for
+ * injection onto every `Tenant` implementation (`Object.assign(Tenant.prototype,
+ * guestAbiMixin)` for a class, `Object.assign(obj, guestAbiMixin)` for an object literal).
+ * Each function keeps this single shared implementation; nothing is duplicated per tenant.
+ * See `Tenant`'s own doc comment (`index.ts`) for why these live on the tenant instance
+ * itself rather than as free module-level imports.
+ */
+export const guestAbiMixin = {
+  markGuestFn,
+  invokeGuestAware,
+  invokeTrap,
+  createGuestGen,
+  unpackGuestGen,
+};
 
 type TypeofTag<T> = T extends string
   ? "string"
@@ -162,87 +184,6 @@ export function narrow<T>(
   }
 }
 
-/**
- * Recursively remap a host-side value for guest consumption through `tenant`. Function
- * fields pass through unchanged: from the guest side, calling a host function is always a
- * plain call, and `typeof` must not change either way.
- */
-export function hostToGuest<T>(spec: NarrowSpec<T>, value: T, tenant: Tenant): unknown {
-  switch (spec.kind) {
-    case "any":
-    case "hostFn":
-    case "guestFn":
-    case "typeof":
-      return value;
-    case "optional":
-      return value === undefined
-        ? undefined
-        : hostToGuest(spec.inner, value as Exclude<T, undefined>, tenant);
-    case "defaulted":
-      return hostToGuest(
-        spec.inner,
-        (value === undefined ? spec.default : value) as Exclude<T, undefined>,
-        tenant,
-      );
-    case "object": {
-      // Build the result as a genuine tenant-managed object: guest code must only ever
-      // observe it through `tenant.get`, never via raw property access.
-      const obj = tenant.make(null);
-      for (const k of Object.keys(spec.fields)) {
-        const fieldSpec = (spec.fields as Record<string, NarrowSpec<unknown>>)[k];
-        const converted = hostToGuest(fieldSpec, (value as Record<string, unknown>)[k], tenant);
-        tenant.set(obj, k, converted);
-      }
-      return obj;
-    }
-  }
-}
-
-/**
- * The reverse: remap a guest-observed value for host consumption through `tenant`. A
- * "leading-tenant-nt"-ABI guest function is adapted into a genuinely plain-callable
- * function (still `typeof === 'function'`, never a `.call()`-style unsafe cast) so a host
- * caller can invoke it directly; a "closure"-ABI guest function (or a host function) is
- * already plain-callable and passes through unchanged.
- */
-export function guestToHost<T>(spec: NarrowSpec<T>, value: unknown, tenant: Tenant): T {
-  switch (spec.kind) {
-    case "any":
-    case "hostFn":
-      return value as T;
-    case "guestFn": {
-      if (typeof value !== "function") return value as T;
-      // Only adapt a function with a real, registered "leading-tenant-nt" ABI. An
-      // unregistered function is treated as already plain-callable (`spec.meta` is
-      // never used as a guess here, for the same reason `narrow`'s "guestFn" case
-      // doesn't speculatively register it — see there).
-      const meta = guestFnMeta(value);
-      if (!meta || meta.abi === "closure") return value as T;
-      const adapter = (...args: unknown[]) => invokeGuestAware(value, tenant, undefined, args);
-      markGuestFn(adapter, { abi: "closure" });
-      return adapter as T;
-    }
-    case "optional": {
-      if (value === undefined) return undefined as T;
-      return guestToHost(spec.inner, value, tenant) as T;
-    }
-    case "defaulted": {
-      if (value === undefined) return spec.default as T;
-      return guestToHost(spec.inner, value, tenant) as T;
-    }
-    case "object": {
-      // `value` is a tenant-managed (guest-visible) object — read its fields through the
-      // tenant; the result is a genuine plain host-side object for host consumption.
-      const isGuestObject = typeof value === "object" && value !== null;
-      const out: Record<string, unknown> = {};
-      for (const k of Object.keys(spec.fields)) {
-        const fieldSpec = (spec.fields as Record<string, NarrowSpec<unknown>>)[k];
-        const raw = isGuestObject ? tenant.get(value as object, k) : undefined;
-        out[k] = guestToHost(fieldSpec, raw, tenant);
-      }
-      return out as T;
-    }
-    case "typeof":
-      return value as T;
-  }
-}
+// `hostToGuest`/`guestToHost` (the type-*rewrite* functions, as opposed to this module's
+// validate-only `narrow`) live in `./rewrite.ts` — see that module for the recursive
+// `HostToGuest`/`GuestToHost` type functions they're typed against.

@@ -20,9 +20,13 @@ const _GUEST_NEXT: symbol = Symbol.for("jade.guest.next");
  * Because `next` is a `function*`, callers can `yield*` through its result,
  * which lets any THROUGH-tagged pass-through yields bubble up transparently
  * while the non-tagged (native) yield becomes the expression value.
+ *
+ * Takes the tenant via `this` (called as `tenant.createGuestGen(...)`, per
+ * `guestAbiMixin` in `narrow.ts`) rather than an explicit parameter — see
+ * `Tenant`'s doc comment (`index.ts`) for why.
  */
-export function createGuestGen(nativeGen: Generator, tenant: Tenant): any {
-  const obj = tenant.make(null);
+export function createGuestGen(this: Tenant, nativeGen: Generator): any {
+  const obj = this.make(null);
 
   const nextFn = function* (sent: any): Generator<any, { value: any; done: boolean }, any> {
     let step = (nativeGen as any).next(sent);
@@ -50,9 +54,9 @@ export function createGuestGen(nativeGen: Generator, tenant: Tenant): any {
     throw err;
   };
 
-  tenant.set(obj, "next", nextFn);
-  tenant.set(obj, "return", returnFn);
-  tenant.set(obj, "throw", throwFn);
+  this.set(obj, "next", nextFn);
+  this.set(obj, "return", returnFn);
+  this.set(obj, "throw", throwFn);
   // Store a direct reference for fast VM-internal access; this bypasses the
   // tenant shadow deliberately (the Symbol is not guest-visible).
   (obj as any)[_GUEST_NEXT] = nextFn;

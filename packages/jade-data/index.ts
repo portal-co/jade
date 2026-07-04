@@ -141,7 +141,7 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                 while(n--) callArgs.push(arg());
                 const _callRaw = apply(fn, undefined, callArgs);
                 state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof _callRaw.next === 'function')
-                    ? createGuestGen(_callRaw, tenant)
+                    ? tenant.createGuestGen(_callRaw)
                     : _callRaw;
                 ip += 4;
                 break;

@@ -1,5 +1,5 @@
 import type { Tenant as Tenant_ } from "./index.ts";
-import { invokeTrap, narrow, type NarrowSpec } from "./narrow.ts";
+import { narrow, type NarrowSpec, guestAbiMixin } from "./narrow.ts";
 
 /** The shape of a descriptor as stored in the shadow / read from a guest-built LITOBJ. */
 type GuestDescriptor = {
@@ -35,6 +35,15 @@ const DESCRIPTOR_SPEC: NarrowSpec<GuestDescriptor> = {
 // with the object by the native GC (no manual bookkeeping required).
 
 export class Tenant implements Tenant_ {
+  // Injected onto the prototype via `Object.assign(Tenant.prototype, guestAbiMixin)`
+  // below (single shared implementation, not duplicated here) — `declare` tells
+  // TypeScript these exist on every instance without re-initializing them per-instance.
+  declare markGuestFn: Tenant_["markGuestFn"];
+  declare invokeGuestAware: Tenant_["invokeGuestAware"];
+  declare invokeTrap: Tenant_["invokeTrap"];
+  declare createGuestGen: Tenant_["createGuestGen"];
+  declare unpackGuestGen: Tenant_["unpackGuestGen"];
+
   #shadow: Record<`$${string}` | number | symbol, WeakMap<object, PropertyDescriptor>> = Object.create(null);
 
   #shadowForKey(key: PropertyKey): WeakMap<object, PropertyDescriptor> {
@@ -52,23 +61,23 @@ export class Tenant implements Tenant_ {
     return newObject;
   }
 
-  get(obj: object, key: PropertyKey): unknown {
+  get<R = unknown>(obj: object, key: PropertyKey): R {
     const d = this.#shadowForKey(key).get(obj);
-    if (!d) return undefined;
-    if (!("get" in d)) return d.value;
+    if (!d) return undefined as R;
+    if (!("get" in d)) return d.value as R;
     // `d.get` may be a guest function (created via the FN opcode) or a plain host
     // function; invoke it respecting whichever ABI it actually has.
-    return d.get ? invokeTrap(d.get, this, obj, []) : undefined;
+    return d.get ? this.invokeTrap(d.get, obj, []) : (undefined as R);
   }
 
-  set(obj: object, key: PropertyKey, value: unknown): void {
+  set<V = unknown>(obj: object, key: PropertyKey, value: V): void {
     const shadow = this.#shadowForKey(key);
     const existing = shadow.get(obj);
     // Symmetric with `get()`: if there's an existing accessor descriptor for this
     // (obj, key), route through its setter trap instead of silently clobbering it
     // with a plain data descriptor.
     if (existing && "set" in existing) {
-      if (existing.set) invokeTrap(existing.set, this, obj, [value]);
+      if (existing.set) this.invokeTrap(existing.set, obj, [value]);
       return;
     }
     shadow.set(obj, {
@@ -122,3 +131,4 @@ export class Tenant implements Tenant_ {
   }
 
 }
+Object.assign(Tenant.prototype, guestAbiMixin);
