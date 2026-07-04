@@ -34,6 +34,11 @@
 
 extern crate alloc;
 
+#[cfg(feature = "reloop")]
+mod reloop;
+#[cfg(feature = "reloop")]
+pub use reloop::compile as compile_reloop;
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -122,6 +127,11 @@ pub struct Config {
     /// default, which reproduces the JIT's original (always-correct, never-inlined)
     /// behavior exactly.
     pub tenant_methods: alloc::collections::BTreeMap<String, InlinableTenantMethod>,
+    /// Use Tier 1 (`ssa-reloop2`-restructured native `while`/`if`/`switch`) instead of
+    /// Tier 0's always-correct block-dispatch loop. Only available with the `reloop`
+    /// feature; ignored (Tier 0 always used) otherwise.
+    #[cfg(feature = "reloop")]
+    pub prefer_reloop: bool,
 }
 
 /// Decode a resolved `variant` value (a `JsVar`) into an [`FnVariant`], then
@@ -641,6 +651,10 @@ fn emit_program<R: FnRegistry>(
 /// When `add_gen` is active the emitted calls to `createGuestGen` and
 /// `unpackGuestGen` (from `jade-js/shims.ts`) must be in scope at runtime.
 pub fn compile<R: FnRegistry>(code: &[u8], reg: R, cfg: Config) -> Result<(String, R), String> {
+    #[cfg(feature = "reloop")]
+    if cfg.prefer_reloop {
+        return reloop::compile(code, reg, cfg);
+    }
     let cell = RefCell::new(reg);
     let body = {
         let mut jit = JsJit::with_config(&cell, cfg, false, false, false);

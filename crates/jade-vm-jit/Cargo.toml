@@ -8,3 +8,12 @@ description.workspace = true
 [dependencies]
 portal-solutions-jade-vm = { path = "../jade-vm", features = ["alloc"] }
 portal-solutions-jade-vm-core = { path = "../jade-vm-core" }
+cfg-traits = { workspace = true, optional = true }
+arena-traits = { workspace = true, optional = true }
+ssa-reloop2 = { workspace = true, optional = true }
+
+[features]
+# Tier 1 (see docs/bytecode-cfg-plan.md): restructure the block-dispatch loop back into
+# native `while`/`if`/`switch`/`return`/labeled `break`/`continue` via `ssa-reloop2` —
+# deliberately depends on nothing from the `jsaw-core`/SWC stack.
+reloop = ["dep:cfg-traits", "dep:arena-traits", "dep:ssa-reloop2"]
