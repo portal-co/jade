@@ -796,4 +796,50 @@ mod tests {
 
         assert_eq!(run_js_gen_values(&prelude, &js), "[1]", "prelude:\n{prelude}\njs:\n{js}");
     }
+
+    /// End-to-end test of the `jsaw-core` IIFE-inlining pass (`SCfg::inline_iifes`, wired
+    /// into `jade-cfg-opt::optimize_tfunc`): a tenant `get` method referencing `this` is
+    /// extracted and rewritten by `jade-vm-frontend::tenant_inline` (`this` -> a leading
+    /// `__this` parameter), which `jade-vm-jit`'s `op_get` then splices as an IIFE —
+    /// `(function(__this, o, k){ ... })(tenant, o, k)` (see `inline_call`). This tier's
+    /// `TFunc`/SSA round-trip re-parses that spliced text like any other per-op JS, so the
+    /// IIFE lands as an ordinary `Item::Call` in the reconstructed `TFunc` — giving
+    /// `optimize_tfunc` a real chance to eliminate it, not a synthetic/hand-built case.
+    #[test]
+    fn tenant_method_this_rewrite_iife_is_inlined_by_tier2() {
+        use portal_solutions_jade_vm_jit::InlinableTenantMethod;
+
+        let code = chunk(&[
+            Operation::Get { obj: Operand::StateRef(0), key: Operand::StateRef(1), dest: 2 },
+            Operation::Ret(Operand::StateRef(2)),
+        ]);
+        let mut cfg = Config::default();
+        cfg.tenant_methods.insert(
+            "get".to_string(),
+            InlinableTenantMethod {
+                params: vec!["__this".to_string(), "o".to_string(), "k".to_string()],
+                body_block: "{ return __this.helper(o, k); }".to_string(),
+                needs_tenant_self: true,
+            },
+        );
+
+        let (js, _reg) = compile(&code, cfg).unwrap();
+        assert!(
+            !js.contains("(function("),
+            "expected the IIFE splice to be inlined away by jade-cfg-opt::optimize_tfunc, got:\n{js}"
+        );
+        assert!(
+            js.contains("\"helper\"") || js.contains(".helper("),
+            "should still call through to the tenant's own `helper`, got:\n{js}"
+        );
+
+        let script = format!(
+            "const tenant = {{ helper(o, k) {{ return o + ':' + k; }} }};\n\
+             const fn = new Function('tenant', 'nt', 'state', {js:?});\n\
+             console.log(JSON.stringify(fn(tenant, undefined, ['a', 'b'])));",
+        );
+        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
+        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "\"a:b\"", "js:\n{js}");
+    }
 }

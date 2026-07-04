@@ -164,7 +164,17 @@ invariant today; a later refactor could instead thread them as a separate inject
 parameter/object alongside `tenant` rather than attaching them to the tenant itself.
 
 **IIFE inlining**: the `this`-rewrite produces splices shaped like `(function(__this,
-...params){ ... })(tenantRef, ...args)` — a genuine IIFE. See the (separate,
-`portal-co/jsaw-core`-hosted) IIFE-inlining pass this motivated, wired into
-`jade-cfg-opt::optimize_tfunc` so Tier 2 actually eliminates these wrappers rather than
-merely tolerating them.
+...params){ ... })(tenantRef, ...args)` — a genuine IIFE. `SCfg::inline_iifes`
+(`crates/swc-ssa/src/simplify.rs` in the separate, vendored `jsaw-core` dependency)
+eliminates these: it walks the callee as a straight-line chain of blocks (no branching,
+loops, nested closures, or non-arrow `this`/`arguments`), splicing its body directly into
+the caller and aliasing the call's own result to whatever the callee returned (handling
+both an ordinary `Return` and the `Tail`-call shape `return f(...)` lowers to). Wired into
+`jade-cfg-opt::optimize_tfunc` (after `simplify_justs`), so Tier 2 actually eliminates these
+wrappers rather than merely tolerating them — see
+`crates/jade-vm-jit-swc`'s `tenant_method_this_rewrite_iife_is_inlined_by_tier2` test for the
+end-to-end proof (extracts + rewrites a `this`-referencing tenant method, compiles it through
+Tier 2, and asserts the IIFE wrapper is gone from the emitted JS while the call through to
+the tenant's own method still executes correctly). Anything outside that narrow shape (real
+branching, a loop, an active `catch`, a nested closure, non-arrow `this`/`arguments`) is left
+as an ordinary call — inlining is purely an optimization, never required for correctness.
