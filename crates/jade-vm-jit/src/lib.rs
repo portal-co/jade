@@ -101,17 +101,32 @@ impl FnVariant {
 /// that crate's `extract_tenant_methods`, or directly for tests.
 #[derive(Clone, Default)]
 pub struct InlinableTenantMethod {
-    /// Parameter names, in declaration order.
+    /// Parameter names, in declaration order. If `needs_tenant_self` is set, the first
+    /// entry is the rewritten `this`-parameter — the caller must pass the real tenant
+    /// reference as the corresponding leading argument (see `needs_tenant_self`).
     pub params: Vec<String>,
-    /// The exact original source text of the method's `{ ... }` body, braces included.
+    /// The exact original source text of the method's `{ ... }` body, braces included —
+    /// or, if `needs_tenant_self` is set, the body after rewriting `this` into that leading
+    /// parameter (re-serialized, not the original verbatim text).
     pub body_block: String,
+    /// Whether the original method referenced `this` (rewritten into `params`'s leading
+    /// entry by `tenant_inline::extract_tenant_methods`) — the caller must prepend the
+    /// real tenant reference to `inline_call`'s `args` when this is set, and expect
+    /// `params.len()` to be one more than the bare operation's own arity.
+    pub needs_tenant_self: bool,
 }
 
 /// Splice `m`'s body into a call-once function expression bound to `args` — real JS
 /// function-parameter binding, so this is correct regardless of what identifiers `args`
 /// happen to contain (no risk of capturing/shadowing anything in the surrounding scope).
-fn inline_call(m: &InlinableTenantMethod, args: &[&str]) -> String {
-    format!("(function({}){})({})", m.params.join(", "), m.body_block, args.join(", "))
+/// `tenant_ref` must be supplied (and becomes the leading argument) iff `m.needs_tenant_self`.
+fn inline_call(m: &InlinableTenantMethod, tenant_ref: Option<&str>, args: &[&str]) -> String {
+    let mut all_args: Vec<&str> = Vec::with_capacity(args.len() + 1);
+    if let Some(t) = tenant_ref {
+        all_args.push(t);
+    }
+    all_args.extend_from_slice(args);
+    format!("(function({}){})({})", m.params.join(", "), m.body_block, all_args.join(", "))
 }
 
 /// Ambient capability flags for the JIT.  Propagated into every nested function
@@ -507,17 +522,26 @@ impl<R: FnRegistry> Ops for JsJit<R> {
     }
 
     fn op_get(&self, obj: JsVar, key: JsVar) -> JsVar {
+        let bare_arity = 2;
         match self.cfg.tenant_methods.get("get") {
-            Some(m) if m.params.len() == 2 => self.bind(inline_call(m, &[&obj.to_string(), &key.to_string()])),
+            Some(m) if m.params.len() == bare_arity + m.needs_tenant_self as usize => {
+                let tenant_ref = m.needs_tenant_self.then_some("tenant");
+                self.bind(inline_call(m, tenant_ref, &[&obj.to_string(), &key.to_string()]))
+            }
             _ => self.bind(format!("tenant.get({obj}, {key})")),
         }
     }
 
     fn op_set(&self, obj: JsVar, key: JsVar, val: JsVar) -> JsVar {
         // Write through the tenant; the assignment evaluates to the value.
+        let bare_arity = 3;
         match self.cfg.tenant_methods.get("set") {
-            Some(m) if m.params.len() == 3 => {
-                self.line(format!("{};", inline_call(m, &[&obj.to_string(), &key.to_string(), &val.to_string()])));
+            Some(m) if m.params.len() == bare_arity + m.needs_tenant_self as usize => {
+                let tenant_ref = m.needs_tenant_self.then_some("tenant");
+                self.line(format!(
+                    "{};",
+                    inline_call(m, tenant_ref, &[&obj.to_string(), &key.to_string(), &val.to_string()])
+                ));
             }
             _ => self.line(format!("tenant.set({obj}, {key}, {val});")),
         }
@@ -964,6 +988,7 @@ mod tests {
             InlinableTenantMethod {
                 params: alloc::vec!["o".to_string(), "k".to_string()],
                 body_block: "{ return o.get(k); }".to_string(),
+                ..Default::default()
             },
         );
         cfg.tenant_methods.insert(
@@ -971,6 +996,7 @@ mod tests {
             InlinableTenantMethod {
                 params: alloc::vec!["o".to_string(), "k".to_string(), "v".to_string()],
                 body_block: "{ o.set(k, v); }".to_string(),
+                ..Default::default()
             },
         );
         let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), cfg).unwrap();
@@ -992,10 +1018,37 @@ mod tests {
         let mut cfg = Config::default();
         cfg.tenant_methods.insert(
             "get".to_string(),
-            InlinableTenantMethod { params: alloc::vec!["only_one".to_string()], body_block: "{}".to_string() },
+            InlinableTenantMethod {
+                params: alloc::vec!["only_one".to_string()],
+                body_block: "{}".to_string(),
+                ..Default::default()
+            },
         );
         let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), cfg).unwrap();
         assert!(js.contains("tenant.get(state[0], state[1])"), "got:\n{js}");
+    }
+
+    /// A method rewritten by `tenant_inline::extract_tenant_methods` to reference `this`
+    /// (`needs_tenant_self: true`, one extra leading param) must still be spliced inline —
+    /// with the real `tenant` reference threaded as that leading argument — not silently
+    /// treated as an arity mismatch and downgraded to a `tenant.get(...)` call.
+    #[test]
+    fn get_inlines_with_tenant_self_when_method_references_this() {
+        let mut cfg = Config::default();
+        cfg.tenant_methods.insert(
+            "get".to_string(),
+            InlinableTenantMethod {
+                params: alloc::vec!["__this".to_string(), "o".to_string(), "k".to_string()],
+                body_block: "{ return __this.helper(o, k); }".to_string(),
+                needs_tenant_self: true,
+            },
+        );
+        let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), cfg).unwrap();
+        assert!(!js.contains("tenant.get("), "got:\n{js}");
+        assert!(
+            js.contains("(function(__this, o, k){ return __this.helper(o, k); })(tenant, state[0], state[1])"),
+            "got:\n{js}"
+        );
     }
 
     /// Actually *run* the JIT-emitted JS via Node (rather than just checking its shape) —

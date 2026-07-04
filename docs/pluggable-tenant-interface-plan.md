@@ -124,3 +124,47 @@ But this can't be a static, always-on optimization, for two reasons:
 
 Not started; this document is the design to follow when implementing the
 `tenant_source`/`#private`-scan/splice work.
+
+## Addendum: `this`-rewrite, narrowed rejection rule, and the ABI/shim mixin
+
+`crates/jade-vm-frontend/src/tenant_inline.rs`'s `extract_tenant_methods` (and
+`InlinableTenantMethod`/`inline_call` in `crates/jade-vm-jit`) now implement a real
+(not just `#private`-checking) version of the scan above:
+
+- **`#private` references** — unchanged, still a hard rejection (no rewrite can fix it).
+- **`this` references are no longer a rejection reason.** The method body is parsed,
+  every `this` is rewritten (via an SWC `VisitMut`) into a new leading parameter
+  (`__this`), and the body is re-serialized (`swc_ecma_codegen`) rather than byte-sliced
+  verbatim. `InlinableTenantMethod` gained a `needs_tenant_self: bool` field so the JIT's
+  splice site (`op_get`/`op_set` in `jade-vm-jit`) knows to prepend the real `tenant`
+  reference as that leading argument, and to expect one more param than the bare
+  operation's own arity.
+- **Calling a captured external identifier as a function** (a free, non-parameter,
+  non-`this`-derived, non-global bare-identifier callee — e.g. a stray module-level
+  import used as a callee) is now the *other* hard rejection, alongside `#private` — the
+  JIT's splice site has no way to supply "a function we don't have."
+
+Together these mean a tenant method's only remaining legal references, once inlined, are:
+its own parameters, `this` (now `__this`, an ordinary parameter), and a small allow-list of
+JS globals (`Reflect`, `Object`, `Array`, `WeakMap`, `Symbol`, ...; see
+`ALLOWED_GLOBAL_CALLEES` in `tenant_inline.rs`).
+
+This is also why `markGuestFn`/`invokeGuestAware`/`invokeTrap` (`packages/jade-js/
+narrow.ts`) and `createGuestGen`/`unpackGuestGen` (`packages/jade-js/shims.ts`) are now
+injected onto every `Tenant` implementation as real methods (`guestAbiMixin`,
+`Object.assign`'d onto `MultiTenant.prototype` and `single_tenant`) instead of being free
+module-level imports: a tenant method (e.g. `get`/`set` invoking a getter/setter trap) can
+now reach them via `this.invokeGuestAware(...)` etc., which — after the `this`-rewrite
+above — is a reference to the `__this` parameter, not a free import the splice site
+couldn't otherwise resolve.
+
+**Future consideration** (not implemented, noted for later): baking these five directly
+onto every `Tenant` implementation is the simplest thing that satisfies the inlining
+invariant today; a later refactor could instead thread them as a separate injected
+parameter/object alongside `tenant` rather than attaching them to the tenant itself.
+
+**IIFE inlining**: the `this`-rewrite produces splices shaped like `(function(__this,
+...params){ ... })(tenantRef, ...args)` — a genuine IIFE. See the (separate,
+`portal-co/jsaw-core`-hosted) IIFE-inlining pass this motivated, wired into
+`jade-cfg-opt::optimize_tfunc` so Tier 2 actually eliminates these wrappers rather than
+merely tolerating them.

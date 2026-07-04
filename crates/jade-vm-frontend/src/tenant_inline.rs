@@ -2,9 +2,22 @@
 //!
 //! See `docs/pluggable-tenant-interface-plan.md` for the full design this supports: the
 //! JIT (`crates/jade-vm-jit`) can splice a tenant method's *actual current* body directly
-//! into compiled code instead of emitting a `tenant.<method>(...)` call, but only when the
-//! method doesn't reference any `#private` field (those are only accessible from code
-//! lexically nested inside the declaring class, so splicing the body out would break them).
+//! into compiled code instead of emitting a `tenant.<method>(...)` call. A method is only
+//! inlinable if the JIT's splice site (a plain, detached function call in a different
+//! lexical scope than the tenant class body — see `inline_call` in `jade-vm-jit`/
+//! `jade-vm-jit-swc`) can actually resolve everything the body references:
+//!
+//! - **`#private` field/method references** are a hard rejection — `#x` is only
+//!   reachable from code lexically nested inside the declaring class, so splicing the
+//!   body out would break it. No rewrite can fix this.
+//! - **`this` references** are *not* a rejection reason: the body is rewritten (parsed,
+//!   `this` replaced with a new leading parameter, re-serialized) rather than byte-sliced
+//!   verbatim, so the JIT's splice site can pass the real tenant reference as an ordinary
+//!   argument instead of needing special `this`-binding call-form support.
+//! - **Calling a captured external identifier as a function** (e.g. a stray free-standing
+//!   import used as a callee) is a hard rejection — the JIT's splice site has no way to
+//!   supply "a function we don't have." Only a call whose callee is a parameter, a
+//!   now-legal `this`-derived reference, or a known JS global is allowed.
 //!
 //! `tenant_source` is expected to be a class's own source text, as returned by
 //! `SomeTenantClass.toString()` in a real browser (see the doc above for why this is
@@ -15,25 +28,41 @@
 use std::collections::HashMap;
 
 use swc_common::sync::Lrc;
-use swc_common::{FileName, SourceMap};
-use swc_ecma_ast::{Class, ClassMember, Expr, Pat, PrivateName};
+use swc_common::{DUMMY_SP, FileName, SourceMap};
+use swc_ecma_ast::{
+    Callee, Class, ClassMember, Expr, Ident, Param, Pat, PrivateName, ThisExpr,
+};
 use swc_ecma_parser::lexer::Lexer;
 use swc_ecma_parser::{Parser, StringInput, Syntax};
-use swc_ecma_visit::{Visit, VisitWith};
+use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 
 /// The tenant interface methods the JIT knows how to call — see `TenantInterface` in
 /// `packages/jade-js` (per `docs/pluggable-tenant-interface-plan.md`).
 pub const TENANT_METHOD_NAMES: &[&str] = &["make", "get", "set", "define", "assign", "ownKeys"];
 
+/// JS globals a tenant method body may freely call without being rejected as "calling a
+/// captured external function we don't have" — not exhaustive, just the ones plausible in
+/// a tenant implementation's own bookkeeping code today; extend as real methods need more.
+const ALLOWED_GLOBAL_CALLEES: &[&str] = &[
+    "Reflect", "Object", "Array", "WeakMap", "WeakSet", "Map", "Set", "Symbol", "JSON", "Math",
+    "Promise", "String", "Number", "Boolean", "Proxy", "Function", "RegExp", "Date", "Error",
+    "TypeError", "RangeError",
+];
+
+/// The parameter name a rewritten `this` reference becomes — see the module doc comment.
+const THIS_PARAM_NAME: &str = "__this";
+
 /// One method extracted from a tenant's source, ready to be spliced into generated code
 /// as `(function(${params.join(",")})${body_block})(${args...})`.
 #[derive(Debug, Clone)]
 pub struct InlinableTenantMethod {
-    /// Parameter names, in declaration order. Only methods whose every parameter is a
-    /// plain identifier (no destructuring, defaults, or rest) are extracted at all.
+    /// Parameter names, in declaration order. If the original method referenced `this`,
+    /// its rewritten form (`THIS_PARAM_NAME`) is prepended here — the caller must pass the
+    /// real tenant reference as the corresponding leading argument.
     pub params: Vec<String>,
-    /// The exact original source text of the method's `{ ... }` body, byte-sliced
-    /// straight out of `tenant_source` (not re-serialized), braces included.
+    /// The method body's `{ ... }` text, braces included — the exact original source
+    /// byte-sliced verbatim if `this` wasn't referenced, or re-serialized (via
+    /// `swc_ecma_codegen`) after rewriting `this` into `THIS_PARAM_NAME` otherwise.
     pub body_block: String,
 }
 
@@ -52,9 +81,70 @@ fn references_private_name(body: &swc_ecma_ast::BlockStmt) -> bool {
     finder.found
 }
 
+struct ThisFinder {
+    found: bool,
+}
+impl Visit for ThisFinder {
+    fn visit_this_expr(&mut self, _node: &ThisExpr) {
+        self.found = true;
+    }
+}
+
+fn references_this(body: &swc_ecma_ast::BlockStmt) -> bool {
+    let mut finder = ThisFinder { found: false };
+    body.visit_with(&mut finder);
+    finder.found
+}
+
+/// Finds a call whose callee is a *bare identifier* (`foo(...)`, not `obj.foo(...)` or
+/// `this.foo(...)` — those are `MemberExpr` callees, unaffected by this check) that isn't
+/// one of `allowed` (the method's own parameter names, plus `THIS_PARAM_NAME` since a
+/// `this`-rewrite may introduce a call through it, plus `ALLOWED_GLOBAL_CALLEES`) — i.e. a
+/// captured external function reference the JIT's splice site has no way to supply.
+struct CapturedCalleeFinder<'a> {
+    allowed: &'a [String],
+    found: bool,
+}
+impl Visit for CapturedCalleeFinder<'_> {
+    fn visit_callee(&mut self, node: &Callee) {
+        if let Callee::Expr(callee) = node
+            && let Expr::Ident(id) = &**callee
+        {
+            let name = id.sym.as_str();
+            let is_allowed = name == THIS_PARAM_NAME
+                || self.allowed.iter().any(|p| p == name)
+                || ALLOWED_GLOBAL_CALLEES.contains(&name);
+            if !is_allowed {
+                self.found = true;
+            }
+        }
+        node.visit_children_with(self);
+    }
+}
+
+fn calls_captured_external_fn(body: &swc_ecma_ast::BlockStmt, params: &[String]) -> bool {
+    let mut finder = CapturedCalleeFinder { allowed: params, found: false };
+    body.visit_with(&mut finder);
+    finder.found
+}
+
+/// Replaces every `this` reference with an `Ident` named `THIS_PARAM_NAME`.
+struct ThisReplacer;
+impl VisitMut for ThisReplacer {
+    fn visit_mut_expr(&mut self, node: &mut Expr) {
+        if matches!(node, Expr::This(_)) {
+            *node = Expr::Ident(Ident::new(THIS_PARAM_NAME.into(), DUMMY_SP, Default::default()));
+            return;
+        }
+        node.visit_mut_children_with(self);
+    }
+}
+
 /// Parse `source` (a tenant class's own `.toString()` output) and extract the subset of
 /// `TENANT_METHOD_NAMES` that are safe to inline: present, with only plain-identifier
-/// parameters, and with no `#private` member reference anywhere in the body.
+/// parameters, no `#private` member reference anywhere in the body, and no call to a
+/// captured external function reference (see the module doc comment) — `this` references
+/// are rewritten rather than rejected.
 ///
 /// Returns an empty map (never an error) for anything that doesn't parse as a class
 /// expression/declaration, or has no recognized methods — inlining is purely an
@@ -85,21 +175,38 @@ pub fn extract_tenant_methods(source: &str) -> HashMap<String, InlinableTenantMe
             if references_private_name(body) {
                 continue;
             }
-            let lo = (body.span.lo.0 - base_pos.0) as usize;
-            let hi = (body.span.hi.0 - base_pos.0) as usize;
-            let Some(body_block) = source.get(lo..hi) else {
+            if calls_captured_external_fn(body, &params) {
                 continue;
-            };
-            out.insert(
-                name.sym.to_string(),
-                InlinableTenantMethod { params, body_block: body_block.to_string() },
-            );
+            }
+            if params.iter().any(|p| p == THIS_PARAM_NAME) {
+                // Vanishingly unlikely in practice, but a real parameter already named
+                // `THIS_PARAM_NAME` would collide with a `this`-rewrite — skip rather
+                // than risk silently shadowing it.
+                continue;
+            }
+            if references_this(body) {
+                let mut rewritten = body.clone();
+                rewritten.visit_mut_with(&mut ThisReplacer);
+                let Some(body_block) = codegen_block(&rewritten) else {
+                    continue;
+                };
+                let mut params = params;
+                params.insert(0, THIS_PARAM_NAME.to_string());
+                out.insert(name.sym.to_string(), InlinableTenantMethod { params, body_block });
+            } else {
+                let lo = (body.span.lo.0 - base_pos.0) as usize;
+                let hi = (body.span.hi.0 - base_pos.0) as usize;
+                let Some(body_block) = source.get(lo..hi) else {
+                    continue;
+                };
+                out.insert(name.sym.to_string(), InlinableTenantMethod { params, body_block: body_block.to_string() });
+            }
         }
     });
     out
 }
 
-fn simple_param_names(params: &[swc_ecma_ast::Param]) -> Option<Vec<String>> {
+fn simple_param_names(params: &[Param]) -> Option<Vec<String>> {
     params
         .iter()
         .map(|p| match &p.pat {
@@ -123,6 +230,26 @@ fn parse_class(source: &str) -> Option<(Class, swc_common::BytePos)> {
         Expr::Class(class_expr) => Some((*class_expr.class, base_pos)),
         _ => None,
     }
+}
+
+/// Serialize `block` (a rewritten method body) back to `{ ... }` source text. `None` on any
+/// codegen failure — inlining is purely an optimization, so the caller falls back to
+/// treating the method as non-inlinable rather than propagating an error.
+fn codegen_block(block: &swc_ecma_ast::BlockStmt) -> Option<String> {
+    use swc_ecma_codegen::text_writer::JsWriter;
+    use swc_ecma_codegen::{Config as CgConfig, Emitter, Node};
+    let cm: Lrc<SourceMap> = Default::default();
+    let mut buf: Vec<u8> = Vec::new();
+    {
+        let mut emitter = Emitter {
+            cfg: CgConfig::default(),
+            cm: cm.clone(),
+            comments: None,
+            wr: JsWriter::new(cm.clone(), "\n", &mut buf, None),
+        };
+        block.emit_with(&mut emitter).ok()?;
+    }
+    String::from_utf8(buf).ok()
 }
 
 #[cfg(test)]
@@ -158,5 +285,40 @@ mod tests {
         assert!(extract_tenant_methods("class T { helper() {} }").is_empty());
         assert!(extract_tenant_methods("not valid js class {{{").is_empty());
         assert!(extract_tenant_methods("({ get(o,k) { return o.get(k); } })").is_empty());
+    }
+
+    /// A method referencing `this` (but not any `#private` member) is now inlinable: `this`
+    /// is rewritten into a leading parameter instead of rejecting the method outright.
+    #[test]
+    fn rewrites_this_into_a_leading_parameter_instead_of_rejecting() {
+        let src = "class T { get(obj, key) { return this.helper(obj, key); } }";
+        let methods = extract_tenant_methods(src);
+        let get = methods.get("get").expect("method referencing `this` (no #private) should now be inlinable");
+        assert_eq!(get.params, vec!["__this", "obj", "key"], "got: {:?}", get.params);
+        assert!(get.body_block.contains("__this.helper(obj, key)"), "got: {}", get.body_block);
+        assert!(
+            !get.body_block.contains("return this."),
+            "no bare `this` reference should remain, got: {}",
+            get.body_block
+        );
+    }
+
+    /// A method calling a captured external identifier (a free function it has no access
+    /// to at the JIT's splice site) is rejected — distinct from the private-field
+    /// rejection case above.
+    #[test]
+    fn rejects_methods_calling_a_captured_external_function() {
+        let src = "class T { get(obj, key) { return invokeTrap(obj, key); } }";
+        let methods = extract_tenant_methods(src);
+        assert!(!methods.contains_key("get"), "method calling a captured external function should not be inlinable");
+    }
+
+    /// A method calling a JS global (not captured/external in any meaningful sense) is
+    /// still inlinable.
+    #[test]
+    fn allows_methods_calling_known_globals() {
+        let src = "class T { ownKeys(obj) { return Reflect.ownKeys(obj); } }";
+        let methods = extract_tenant_methods(src);
+        assert!(methods.contains_key("ownKeys"), "method calling Reflect (a known global) should be inlinable");
     }
 }
