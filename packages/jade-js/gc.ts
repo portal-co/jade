@@ -1,2 +1,2 @@
-export { GCReactor } from "@portal-solutions/semble-weak-map.factory/gc";
-export type { GCHooks as MTFlags } from "@portal-solutions/semble-weak-map.factory/gc";
+export { createWeakMapGCReactor as GCReactor } from "@portal-solutions/semble-weak-map.factory/gc-hooks";
+export type { WeakMapGcState as MTFlags } from "@portal-solutions/semble-weak-map.factory/gc-hooks";

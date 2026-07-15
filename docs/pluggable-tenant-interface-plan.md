@@ -178,3 +178,15 @@ Tier 2, and asserts the IIFE wrapper is gone from the emitted JS while the call 
 the tenant's own method still executes correctly). Anything outside that narrow shape (real
 branching, a loop, an active `catch`, a nested closure, non-arrow `this`/`arguments`) is left
 as an ordinary call — inlining is purely an optimization, never required for correctness.
+
+## Addendum: generator tenant methods and the driver splice (`docs/tenant-generator-driver.md`)
+
+After the refactor in `packages/jade-js/driver.ts`, every tenant operation is a
+generator and the JIT no longer emits bare `tenant.get(...)` / `tenant.set(...)`
+calls. Instead, inlined generator methods are emitted as `(function*(...){...})`
+and wrapped with `tenant.driveTenant(...)` at the call site. The inlining
+machinery still uses the same `this`-rewrite and `needs_tenant_self` mechanism;
+`InlinableTenantMethod` now also carries an `is_generator` flag parsed from the
+method's source. The driver protocol is documented in full in
+`docs/tenant-generator-driver.md`; add that doc to any agent prompt when touching
+tenant operations or the JIT/WASM back-ends.

@@ -35,6 +35,8 @@ const DESCRIPTOR_SPEC: NarrowSpec<GuestDescriptor> = {
 // with the object by the native GC (no manual bookkeeping required).
 
 export class Tenant implements Tenant_ {
+  // Generator method bodies yield `this.yieldTenant(...)` sentinels, so every
+  // tenant implementation needs the driver helpers available on `this`.
   // Injected onto the prototype via `Object.assign(Tenant.prototype, guestAbiMixin)`
   // below (single shared implementation, not duplicated here) — `declare` tells
   // TypeScript these exist on every instance without re-initializing them per-instance.
@@ -43,6 +45,8 @@ export class Tenant implements Tenant_ {
   declare invokeTrap: Tenant_["invokeTrap"];
   declare createGuestGen: Tenant_["createGuestGen"];
   declare unpackGuestGen: Tenant_["unpackGuestGen"];
+  declare yieldTenant: Tenant_["yieldTenant"];
+  declare driveTenant: Tenant_["driveTenant"];
 
   #shadow: Record<`$${string}` | number | symbol, WeakMap<object, PropertyDescriptor>> = Object.create(null);
 
@@ -50,7 +54,7 @@ export class Tenant implements Tenant_ {
     return (this.#shadow[(typeof key === 'string' ? key === `${+key}` ? +key : `$${key}` : key) as any] ??= new WeakMap());
   }
 
-  make(proto: object | null = null): object {
+  *make(proto: object | null = null) {
     const newObject = Object.create(null);
     this.#shadowForKey('__proto__').set(newObject, {
       value: proto,
@@ -61,23 +65,26 @@ export class Tenant implements Tenant_ {
     return newObject;
   }
 
-  get<R = unknown>(obj: object, key: PropertyKey): R {
+  *get<R = unknown>(obj: object, key: PropertyKey) {
     const d = this.#shadowForKey(key).get(obj);
     if (!d) return undefined as R;
     if (!("get" in d)) return d.value as R;
     // `d.get` may be a guest function (created via the FN opcode) or a plain host
     // function; invoke it respecting whichever ABI it actually has.
-    return d.get ? this.invokeTrap(d.get, obj, []) : (undefined as R);
+    if (!d.get) return undefined as R;
+    return (yield this.yieldTenant(this.invokeTrap(d.get as Function, obj, []))) as R;
   }
 
-  set<V = unknown>(obj: object, key: PropertyKey, value: V): void {
+  *set<V = unknown>(obj: object, key: PropertyKey, value: V) {
     const shadow = this.#shadowForKey(key);
     const existing = shadow.get(obj);
     // Symmetric with `get()`: if there's an existing accessor descriptor for this
     // (obj, key), route through its setter trap instead of silently clobbering it
     // with a plain data descriptor.
     if (existing && "set" in existing) {
-      if (existing.set) this.invokeTrap(existing.set, obj, [value]);
+      if (existing.set) {
+        yield this.yieldTenant(this.invokeTrap(existing.set as Function, obj, [value]));
+      }
       return;
     }
     shadow.set(obj, {
@@ -88,15 +95,15 @@ export class Tenant implements Tenant_ {
     });
   }
 
-  has(obj: object, key: PropertyKey): boolean {
+  *has(obj: object, key: PropertyKey) {
     return this.#shadowForKey(key).has(obj);
   }
 
-  delete(obj: object, key: PropertyKey): void {
+  *delete(obj: object, key: PropertyKey) {
     this.#shadowForKey(key).delete(obj);
   }
 
-  ownKeys(obj: object): PropertyKey[] {
+  *ownKeys(obj: object) {
     // `Object.keys(this.#shadow)` yields *internal* storage keys (non-numeric keys are
     // `$`-prefixed by `#shadowForKey`). Undo exactly that one level of prefixing before
     // looking the descriptor up again, which would otherwise double-prefix it and never
@@ -112,11 +119,12 @@ export class Tenant implements Tenant_ {
     return keys;
   }
 
-  define(target: object, descriptors: object): void {
+  *define(target: object, descriptors: object) {
     // `descriptors` is itself a tenant-managed object whose values are
     // descriptor objects; read it through this tenant.
-    for (const k of this.ownKeys(descriptors)) {
-      const raw = this.get(descriptors, k);
+    const keys = yield this.yieldTenant(this.ownKeys(descriptors));
+    for (const k of keys as PropertyKey[]) {
+      const raw = yield this.yieldTenant(this.get(descriptors, k));
       // Validate + convert the guest-controlled descriptor shape instead of `as`-casting
       // fields sight-unseen; also registers any get/set guest-function ABI along the way.
       const n = narrow<GuestDescriptor>(DESCRIPTOR_SPEC, raw, this);
@@ -124,9 +132,12 @@ export class Tenant implements Tenant_ {
     }
   }
 
-  assign(dst: object, src: object): void {
-    for (const k of this.ownKeys(src)) {
-      this.set(dst, k, this.get(src, k) as PropertyDescriptor);
+  *assign(dst: object, src: object) {
+    const keys = yield this.yieldTenant(this.ownKeys(src));
+    for (const k of keys as PropertyKey[]) {
+      yield this.yieldTenant(
+        this.set(dst, k, (yield this.yieldTenant(this.get(src, k))) as PropertyDescriptor),
+      );
     }
   }
 

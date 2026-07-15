@@ -118,15 +118,15 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
             }`,
   LITOBJ: `{
                 let c=code().getInt32(ip,true);ip+=4;
-                const obj=tenant.make(null);
-                if(c<0){c=-c;tenant.assign(obj,arg());}
+                const obj=__DRIVE__tenant.driveTenant(tenant.make(null),addAsync,addGen);
+                if(c<0){c=-c;__DRIVE__tenant.driveTenant(tenant.assign(obj,arg()),addAsync,addGen);}
                 while(c--){
                     const k=arg();
-                    tenant.set(obj,k,arg());
+                    __DRIVE__tenant.driveTenant(tenant.set(obj,k,arg()),addAsync,addGen);
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    tenant.define(state[key >>> 1],obj);
+                    __DRIVE__tenant.driveTenant(tenant.define(state[key >>> 1],obj),addAsync,addGen);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -140,8 +140,8 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
                 const _callRaw = apply(fn, undefined, callArgs);
-                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof _callRaw.next === 'function')
-                    ? tenant.createGuestGen(_callRaw)
+                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof (_callRaw as any).next === 'function')
+                    ? __DRIVE__tenant.driveTenant(tenant.createGuestGen(_callRaw as Generator),addAsync,addGen)
                     : _callRaw;
                 ip += 4;
                 break;
@@ -174,6 +174,6 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                 ip=target>=0?target:defaultTarget;
                 break;
             }`,
-  GET:  `{ const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.get(o,k); ip+=4; break; }`,
-  SET:  `{ const o=arg(),k=arg(),v=arg(); tenant.set(o,k,v); state[code().getUint32(ip,true)]=v; ip+=4; break; }`,
+  GET:  `{ const o=arg(),k=arg(); state[code().getUint32(ip,true)]=__DRIVE__tenant.driveTenant(tenant.get(o,k),addAsync,addGen); ip+=4; break; }`,
+  SET:  `{ const o=arg(),k=arg(),v=arg(); __DRIVE__tenant.driveTenant(tenant.set(o,k,v),addAsync,addGen); state[code().getUint32(ip,true)]=v; ip+=4; break; }`,
 });

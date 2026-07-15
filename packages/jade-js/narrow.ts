@@ -1,5 +1,6 @@
 import type { Tenant } from "./index.ts";
 import { createGuestGen, unpackGuestGen } from "./shims.ts";
+import { yieldTenant, driveTenant } from "./driver.ts";
 
 /**
  * The calling convention a guest (Jade-VM-produced) function actually uses, as observed
@@ -36,17 +37,28 @@ export function guestFnMeta(fn: Function): GuestFnMeta | undefined {
  * Takes the tenant via `this` (called as `tenant.invokeGuestAware(...)`, per `guestAbiMixin`)
  * rather than an explicit parameter — see `Tenant`'s doc comment (`index.ts`) for why.
  */
-export function invokeGuestAware<Args extends readonly unknown[], R = unknown>(
+export function* invokeGuestAware<Args extends readonly unknown[], R = unknown>(
   this: Tenant,
   fn: Function,
   thisArg: unknown,
   args: Args,
-): R {
+): Generator<any, R, any> {
   const meta = guestFnMeta(fn);
-  if (meta?.abi === "leading-tenant-nt") {
-    return Reflect.apply(fn, thisArg, [this, undefined, ...args]) as R;
+  const raw =
+    meta?.abi === "leading-tenant-nt"
+      ? (Reflect.apply(fn, thisArg, [this, undefined, ...args]) as R)
+      : (Reflect.apply(fn, thisArg, args) as R);
+  // If the callee produced a Promise (e.g. an async host function), hand it to
+  // the driver so an async effective variant can await it.  Sync callers will
+  // simply receive the raw Promise back from the generator's boundary.
+  if (
+    raw !== null &&
+    typeof raw === "object" &&
+    typeof (raw as any).then === "function"
+  ) {
+    return yield (raw as unknown) as PromiseLike<any>;
   }
-  return Reflect.apply(fn, thisArg, args) as R;
+  return raw;
 }
 
 /**
@@ -54,23 +66,24 @@ export function invokeGuestAware<Args extends readonly unknown[], R = unknown>(
  * whether it turns out to be a guest function or a plain host function. Takes the tenant
  * via `this`, same as `invokeGuestAware`.
  */
-export function invokeTrap<Args extends readonly unknown[], R = unknown>(
+export function* invokeTrap<Args extends readonly unknown[], R = unknown>(
   this: Tenant,
   fn: Function,
   receiver: object,
   args: Args,
-): R {
-  return this.invokeGuestAware(fn, receiver, args);
+): Generator<any, R, any> {
+  return yield this.yieldTenant(this.invokeGuestAware(fn, receiver, args));
 }
 
 /**
  * Every ABI/shim helper a tenant method might need — `markGuestFn`/`invokeGuestAware`/
- * `invokeTrap` here, plus `createGuestGen`/`unpackGuestGen` from `shims.ts` — bundled for
- * injection onto every `Tenant` implementation (`Object.assign(Tenant.prototype,
- * guestAbiMixin)` for a class, `Object.assign(obj, guestAbiMixin)` for an object literal).
- * Each function keeps this single shared implementation; nothing is duplicated per tenant.
- * See `Tenant`'s own doc comment (`index.ts`) for why these live on the tenant instance
- * itself rather than as free module-level imports.
+ * `invokeTrap`/`createGuestGen`/`unpackGuestGen` plus the new `yieldTenant`/`driveTenant`
+ * driver helpers — bundled for injection onto every `Tenant` implementation
+ * (`Object.assign(Tenant.prototype, guestAbiMixin)` for a class, `Object.assign(obj,
+ * guestAbiMixin)` for an object literal).  Each function keeps this single shared
+ * implementation; nothing is duplicated per tenant.  See `Tenant`'s own doc comment
+ * (`index.ts`) for why these live on the tenant instance itself rather than as free
+ * module-level imports.
  */
 export const guestAbiMixin = {
   markGuestFn,
@@ -78,6 +91,8 @@ export const guestAbiMixin = {
   invokeTrap,
   createGuestGen,
   unpackGuestGen,
+  yieldTenant,
+  driveTenant,
 };
 
 type TypeofTag<T> = T extends string
@@ -174,7 +189,7 @@ export function narrow<T>(
       const out: Record<string, unknown> = {};
       for (const k of Object.keys(spec.fields)) {
         const fieldSpec = (spec.fields as Record<string, NarrowSpec<unknown>>)[k];
-        const raw = tenant.get(value, k);
+        const raw = tenant.driveTenant(tenant.get(value, k), false, false);
         const inner = narrow(fieldSpec, raw, tenant);
         if (inner === undefined) return undefined;
         out[k] = inner.value;

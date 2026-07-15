@@ -65,7 +65,10 @@ function buildProgram(retOperand: number): () => DataView {
   assert(typeof obj === "object" && obj !== null, "expected an object");
   assert(Object.keys(obj).length === 0, "host should see NO own keys (foreign by nature)");
   assert(!(7 in (obj as any)), "host should not see the tenant property natively");
-  assert(tenant.get(obj, 7) === 42, "tenant.get must return the stored value");
+  assert(
+    tenant.driveTenant(tenant.get(obj, 7), false, false) === 42,
+    "tenant.get must return the stored value",
+  );
 }
 
 console.log("PASS: tenant object-manager e2e (LITOBJ/SET/GET through interpreter)");

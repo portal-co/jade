@@ -76,15 +76,15 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 break;
             }case 9: {
                 let c=code().getInt32(ip,true);ip+=4;
-                const obj=tenant.make(null);
-                if(c<0){c=-c;tenant.assign(obj,arg());}
+                const obj=yield* tenant.driveTenant(tenant.make(null),addAsync,addGen);
+                if(c<0){c=-c;yield* tenant.driveTenant(tenant.assign(obj,arg()),addAsync,addGen);}
                 while(c--){
                     const k=arg();
-                    tenant.set(obj,k,arg());
+                    yield* tenant.driveTenant(tenant.set(obj,k,arg()),addAsync,addGen);
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    tenant.define(state[key >>> 1],obj);
+                    yield* tenant.driveTenant(tenant.define(state[key >>> 1],obj),addAsync,addGen);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -96,8 +96,8 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
                 const _callRaw = apply(fn, undefined, callArgs);
-                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof _callRaw.next === 'function')
-                    ? tenant.createGuestGen(_callRaw)
+                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof (_callRaw as any).next === 'function')
+                    ? yield* tenant.driveTenant(tenant.createGuestGen(_callRaw as Generator),addAsync,addGen)
                     : _callRaw;
                 ip += 4;
                 break;
@@ -118,7 +118,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 const defaultTarget=code().getUint32(ip,true);ip+=4;
                 ip=target>=0?target:defaultTarget;
                 break;
-            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.get(o,k); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); tenant.set(o,k,v); state[code().getUint32(ip,true)]=v; ip+=4; break; }
+            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=yield* tenant.driveTenant(tenant.get(o,k),addAsync,addGen); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); yield* tenant.driveTenant(tenant.set(o,k,v),addAsync,addGen); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
     }
 }
@@ -189,15 +189,15 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 break;
             }case 9: {
                 let c=code().getInt32(ip,true);ip+=4;
-                const obj=tenant.make(null);
-                if(c<0){c=-c;tenant.assign(obj,arg());}
+                const obj=await tenant.driveTenant(tenant.make(null),addAsync,addGen);
+                if(c<0){c=-c;await tenant.driveTenant(tenant.assign(obj,arg()),addAsync,addGen);}
                 while(c--){
                     const k=arg();
-                    tenant.set(obj,k,arg());
+                    await tenant.driveTenant(tenant.set(obj,k,arg()),addAsync,addGen);
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    tenant.define(state[key >>> 1],obj);
+                    await tenant.driveTenant(tenant.define(state[key >>> 1],obj),addAsync,addGen);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -209,8 +209,8 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
                 const _callRaw = apply(fn, undefined, callArgs);
-                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof _callRaw.next === 'function')
-                    ? tenant.createGuestGen(_callRaw)
+                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof (_callRaw as any).next === 'function')
+                    ? await tenant.driveTenant(tenant.createGuestGen(_callRaw as Generator),addAsync,addGen)
                     : _callRaw;
                 ip += 4;
                 break;
@@ -231,7 +231,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 const defaultTarget=code().getUint32(ip,true);ip+=4;
                 ip=target>=0?target:defaultTarget;
                 break;
-            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.get(o,k); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); tenant.set(o,k,v); state[code().getUint32(ip,true)]=v; ip+=4; break; }
+            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=await tenant.driveTenant(tenant.get(o,k),addAsync,addGen); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); await tenant.driveTenant(tenant.set(o,k,v),addAsync,addGen); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
     }
 }
@@ -302,15 +302,15 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 break;
             }case 9: {
                 let c=code().getInt32(ip,true);ip+=4;
-                const obj=tenant.make(null);
-                if(c<0){c=-c;tenant.assign(obj,arg());}
+                const obj=yield* tenant.driveTenant(tenant.make(null),addAsync,addGen);
+                if(c<0){c=-c;yield* tenant.driveTenant(tenant.assign(obj,arg()),addAsync,addGen);}
                 while(c--){
                     const k=arg();
-                    tenant.set(obj,k,arg());
+                    yield* tenant.driveTenant(tenant.set(obj,k,arg()),addAsync,addGen);
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    tenant.define(state[key >>> 1],obj);
+                    yield* tenant.driveTenant(tenant.define(state[key >>> 1],obj),addAsync,addGen);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -322,8 +322,8 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
                 const _callRaw = apply(fn, undefined, callArgs);
-                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof _callRaw.next === 'function')
-                    ? tenant.createGuestGen(_callRaw)
+                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof (_callRaw as any).next === 'function')
+                    ? yield* tenant.driveTenant(tenant.createGuestGen(_callRaw as Generator),addAsync,addGen)
                     : _callRaw;
                 ip += 4;
                 break;
@@ -344,7 +344,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 const defaultTarget=code().getUint32(ip,true);ip+=4;
                 ip=target>=0?target:defaultTarget;
                 break;
-            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.get(o,k); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); tenant.set(o,k,v); state[code().getUint32(ip,true)]=v; ip+=4; break; }
+            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=yield* tenant.driveTenant(tenant.get(o,k),addAsync,addGen); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); yield* tenant.driveTenant(tenant.set(o,k,v),addAsync,addGen); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
     }
 }
@@ -415,15 +415,15 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 break;
             }case 9: {
                 let c=code().getInt32(ip,true);ip+=4;
-                const obj=tenant.make(null);
-                if(c<0){c=-c;tenant.assign(obj,arg());}
+                const obj=tenant.driveTenant(tenant.make(null),addAsync,addGen);
+                if(c<0){c=-c;tenant.driveTenant(tenant.assign(obj,arg()),addAsync,addGen);}
                 while(c--){
                     const k=arg();
-                    tenant.set(obj,k,arg());
+                    tenant.driveTenant(tenant.set(obj,k,arg()),addAsync,addGen);
                 }
                 const key = code().getUint32(ip,true);
                 if(key & 1){
-                    tenant.define(state[key >>> 1],obj);
+                    tenant.driveTenant(tenant.define(state[key >>> 1],obj),addAsync,addGen);
                 }else{
                     state[key >>> 1]=obj;
                 }
@@ -435,8 +435,8 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
                 const _callRaw = apply(fn, undefined, callArgs);
-                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof _callRaw.next === 'function')
-                    ? tenant.createGuestGen(_callRaw)
+                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof (_callRaw as any).next === 'function')
+                    ? tenant.driveTenant(tenant.createGuestGen(_callRaw as Generator),addAsync,addGen)
                     : _callRaw;
                 ip += 4;
                 break;
@@ -457,7 +457,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 const defaultTarget=code().getUint32(ip,true);ip+=4;
                 ip=target>=0?target:defaultTarget;
                 break;
-            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.get(o,k); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); tenant.set(o,k,v); state[code().getUint32(ip,true)]=v; ip+=4; break; }
+            }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.driveTenant(tenant.get(o,k),addAsync,addGen); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); tenant.driveTenant(tenant.set(o,k,v),addAsync,addGen); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
     }
 }

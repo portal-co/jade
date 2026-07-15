@@ -15,6 +15,11 @@ function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error("FAIL: " + msg);
 }
 
+// Helper for synchronous host-side tenant composition.
+function driveSync<T>(t: MultiTenant, gen: Generator<any, T, any>): T {
+  return t.driveTenant(gen, false, false) as T;
+}
+
 // 1) hostToGuest converts a plain host object field-by-field into a genuine tenant-managed
 //    object — guest code must only ever observe it through the tenant, never raw property
 //    access (confirms the split didn't change this existing behavior).
@@ -25,8 +30,8 @@ function assert(cond: unknown, msg: string) {
     fields: { a: { kind: "typeof", tag: "number" }, b: { kind: "typeof", tag: "string" } },
   };
   const guestObj = hostToGuest<{ a: number; b: string }>(spec, { a: 1, b: "x" }, t) as object;
-  assert(t.get(guestObj, "a") === 1, "hostToGuest should convert `a` into the tenant-managed object");
-  assert(t.get(guestObj, "b") === "x", "hostToGuest should convert `b` into the tenant-managed object");
+  assert(driveSync(t, t.get(guestObj, "a")) === 1, "hostToGuest should convert `a` into the tenant-managed object");
+  assert(driveSync(t, t.get(guestObj, "b")) === "x", "hostToGuest should convert `b` into the tenant-managed object");
   assert(Object.keys(guestObj).length === 0, "the guest object should be foreign by nature (no own keys visible)");
 }
 
@@ -35,8 +40,8 @@ function assert(cond: unknown, msg: string) {
 {
   const t = new MultiTenant();
   const spec: NarrowSpec<{ a: number }> = { kind: "object", fields: { a: { kind: "typeof", tag: "number" } } };
-  const guestObj = t.make(null);
-  t.set(guestObj, "a", 42);
+  const guestObj = driveSync(t, t.make(null));
+  driveSync(t, t.set(guestObj, "a", 42));
   const hostObj = guestToHost<{ a: number }>(spec, guestObj, t);
   assert(hostObj.a === 42, "guestToHost should read the tenant-managed field back into a plain host object");
 }
@@ -61,7 +66,7 @@ function assert(cond: unknown, msg: string) {
   assert(guestFnMeta(adapted)?.abi === "closure", "the adapter should be re-marked with the closure ABI");
 }
 
-// 4) The five ABI/shim methods are genuinely on the tenant instance (injected via
+// 4) The ABI/shim + driver methods are genuinely on the tenant instance (injected via
 //    `guestAbiMixin`), not free imports — both `MultiTenant` and `single_tenant`.
 for (const t of [new MultiTenant(), single_tenant]) {
   assert(typeof t.markGuestFn === "function", "markGuestFn should be injected onto the tenant");
@@ -69,10 +74,13 @@ for (const t of [new MultiTenant(), single_tenant]) {
   assert(typeof t.invokeTrap === "function", "invokeTrap should be injected onto the tenant");
   assert(typeof t.createGuestGen === "function", "createGuestGen should be injected onto the tenant");
   assert(typeof t.unpackGuestGen === "function", "unpackGuestGen should be injected onto the tenant");
+  assert(typeof t.yieldTenant === "function", "yieldTenant should be injected onto the tenant");
+  assert(typeof t.driveTenant === "function", "driveTenant should be injected onto the tenant");
 }
 
 // 5) createGuestGen/unpackGuestGen round-trip a native generator through the tenant-managed
-//    guest-gen object protocol, called as tenant methods.
+//    guest-gen object protocol, called as tenant methods.  Because `createGuestGen` is now
+//    a generator, host code must drive it.
 {
   const t = new MultiTenant();
   function* nativeGen() {
@@ -80,7 +88,7 @@ for (const t of [new MultiTenant(), single_tenant]) {
     yield 2;
     return 3;
   }
-  const guestGen = t.createGuestGen(nativeGen());
+  const guestGen = driveSync(t, t.createGuestGen(nativeGen()));
   const values: unknown[] = [];
   for (const v of t.unpackGuestGen(guestGen)) values.push(v);
   assert(JSON.stringify(values) === JSON.stringify([1, 2]), `expected [1,2], got ${JSON.stringify(values)}`);

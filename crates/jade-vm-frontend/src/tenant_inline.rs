@@ -29,9 +29,7 @@ use std::collections::HashMap;
 
 use swc_common::sync::Lrc;
 use swc_common::{DUMMY_SP, FileName, SourceMap};
-use swc_ecma_ast::{
-    Callee, Class, ClassMember, Expr, Ident, Param, Pat, PrivateName, ThisExpr,
-};
+use swc_ecma_ast::{Callee, Class, ClassMember, Expr, Ident, Param, Pat, PrivateName, ThisExpr};
 use swc_ecma_parser::lexer::Lexer;
 use swc_ecma_parser::{Parser, StringInput, Syntax};
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
@@ -44,9 +42,27 @@ pub const TENANT_METHOD_NAMES: &[&str] = &["make", "get", "set", "define", "assi
 /// captured external function we don't have" — not exhaustive, just the ones plausible in
 /// a tenant implementation's own bookkeeping code today; extend as real methods need more.
 const ALLOWED_GLOBAL_CALLEES: &[&str] = &[
-    "Reflect", "Object", "Array", "WeakMap", "WeakSet", "Map", "Set", "Symbol", "JSON", "Math",
-    "Promise", "String", "Number", "Boolean", "Proxy", "Function", "RegExp", "Date", "Error",
-    "TypeError", "RangeError",
+    "Reflect",
+    "Object",
+    "Array",
+    "WeakMap",
+    "WeakSet",
+    "Map",
+    "Set",
+    "Symbol",
+    "JSON",
+    "Math",
+    "Promise",
+    "String",
+    "Number",
+    "Boolean",
+    "Proxy",
+    "Function",
+    "RegExp",
+    "Date",
+    "Error",
+    "TypeError",
+    "RangeError",
 ];
 
 /// The parameter name a rewritten `this` reference becomes — see the module doc comment.
@@ -64,6 +80,10 @@ pub struct InlinableTenantMethod {
     /// byte-sliced verbatim if `this` wasn't referenced, or re-serialized (via
     /// `swc_ecma_codegen`) after rewriting `this` into `THIS_PARAM_NAME` otherwise.
     pub body_block: String,
+    /// Whether the method was declared as a generator (`*get() { ... }`). The JIT's
+    /// splice site uses this to emit `function*` for the inlined IIFE and to wrap it
+    /// with `tenant.driveTenant(...)` — every real tenant operation is a generator.
+    pub is_generator: bool,
 }
 
 struct PrivateNameFinder {
@@ -123,7 +143,10 @@ impl Visit for CapturedCalleeFinder<'_> {
 }
 
 fn calls_captured_external_fn(body: &swc_ecma_ast::BlockStmt, params: &[String]) -> bool {
-    let mut finder = CapturedCalleeFinder { allowed: params, found: false };
+    let mut finder = CapturedCalleeFinder {
+        allowed: params,
+        found: false,
+    };
     body.visit_with(&mut finder);
     finder.found
 }
@@ -133,7 +156,11 @@ struct ThisReplacer;
 impl VisitMut for ThisReplacer {
     fn visit_mut_expr(&mut self, node: &mut Expr) {
         if matches!(node, Expr::This(_)) {
-            *node = Expr::Ident(Ident::new(THIS_PARAM_NAME.into(), DUMMY_SP, Default::default()));
+            *node = Expr::Ident(Ident::new(
+                THIS_PARAM_NAME.into(),
+                DUMMY_SP,
+                Default::default(),
+            ));
             return;
         }
         node.visit_mut_children_with(self);
@@ -184,6 +211,7 @@ pub fn extract_tenant_methods(source: &str) -> HashMap<String, InlinableTenantMe
                 // than risk silently shadowing it.
                 continue;
             }
+            let is_generator = method.function.is_generator;
             if references_this(body) {
                 let mut rewritten = body.clone();
                 rewritten.visit_mut_with(&mut ThisReplacer);
@@ -192,14 +220,28 @@ pub fn extract_tenant_methods(source: &str) -> HashMap<String, InlinableTenantMe
                 };
                 let mut params = params;
                 params.insert(0, THIS_PARAM_NAME.to_string());
-                out.insert(name.sym.to_string(), InlinableTenantMethod { params, body_block });
+                out.insert(
+                    name.sym.to_string(),
+                    InlinableTenantMethod {
+                        params,
+                        body_block,
+                        is_generator,
+                    },
+                );
             } else {
                 let lo = (body.span.lo.0 - base_pos.0) as usize;
                 let hi = (body.span.hi.0 - base_pos.0) as usize;
                 let Some(body_block) = source.get(lo..hi) else {
                     continue;
                 };
-                out.insert(name.sym.to_string(), InlinableTenantMethod { params, body_block: body_block.to_string() });
+                out.insert(
+                    name.sym.to_string(),
+                    InlinableTenantMethod {
+                        params,
+                        body_block: body_block.to_string(),
+                        is_generator,
+                    },
+                );
             }
         }
     });
@@ -221,9 +263,17 @@ fn simple_param_names(params: &[Param]) -> Option<Vec<String>> {
 /// convert the AST's global byte positions back into offsets into `source` itself).
 fn parse_class(source: &str) -> Option<(Class, swc_common::BytePos)> {
     let cm: Lrc<SourceMap> = Default::default();
-    let fm = cm.new_source_file(Lrc::new(FileName::Custom("tenant.js".into())), source.to_string());
+    let fm = cm.new_source_file(
+        Lrc::new(FileName::Custom("tenant.js".into())),
+        source.to_string(),
+    );
     let base_pos = fm.start_pos;
-    let lexer = Lexer::new(Syntax::Es(Default::default()), Default::default(), StringInput::from(&*fm), None);
+    let lexer = Lexer::new(
+        Syntax::Es(Default::default()),
+        Default::default(),
+        StringInput::from(&*fm),
+        None,
+    );
     let mut parser = Parser::new_from(lexer);
     let expr = parser.parse_expr().ok()?;
     match *expr {
@@ -262,22 +312,51 @@ mod tests {
         let methods = extract_tenant_methods(src);
         let get = methods.get("get").expect("get should be inlinable");
         assert_eq!(get.params, vec!["obj", "key"]);
-        assert!(get.body_block.contains("obj.get(key)"), "got: {}", get.body_block);
+        assert!(
+            !get.is_generator,
+            "plain method should not be marked generator"
+        );
+        assert!(
+            get.body_block.contains("obj.get(key)"),
+            "got: {}",
+            get.body_block
+        );
         assert!(methods.contains_key("make"));
+    }
+
+    #[test]
+    fn extracts_generator_methods_as_inlinable() {
+        // Real tenant operations are generators (`*get`, `*set`). The parser must still
+        // extract them and set `is_generator` so the JIT can emit `function*` + drive.
+        let src =
+            "class T { *get(obj, key) { yield __this.yieldTenant(__this.invokeTrap(obj, key)); } }";
+        let methods = extract_tenant_methods(src);
+        let get = methods
+            .get("get")
+            .expect("generator get() should be inlinable");
+        assert_eq!(get.params, vec!["obj", "key"]);
+        assert!(get.is_generator, "generator method must be flagged");
+        assert!(get.body_block.contains("yield"), "got: {}", get.body_block);
     }
 
     #[test]
     fn rejects_methods_referencing_private_fields() {
         let src = "class T { get(obj, key) { return this.#slots.get(key); } }";
         let methods = extract_tenant_methods(src);
-        assert!(!methods.contains_key("get"), "method using #private should not be inlinable");
+        assert!(
+            !methods.contains_key("get"),
+            "method using #private should not be inlinable"
+        );
     }
 
     #[test]
     fn rejects_methods_with_non_ident_params() {
         let src = "class T { set(obj, { key, value }) { } }";
         let methods = extract_tenant_methods(src);
-        assert!(!methods.contains_key("set"), "destructured params should not be inlinable");
+        assert!(
+            !methods.contains_key("set"),
+            "destructured params should not be inlinable"
+        );
     }
 
     #[test]
@@ -293,9 +372,20 @@ mod tests {
     fn rewrites_this_into_a_leading_parameter_instead_of_rejecting() {
         let src = "class T { get(obj, key) { return this.helper(obj, key); } }";
         let methods = extract_tenant_methods(src);
-        let get = methods.get("get").expect("method referencing `this` (no #private) should now be inlinable");
-        assert_eq!(get.params, vec!["__this", "obj", "key"], "got: {:?}", get.params);
-        assert!(get.body_block.contains("__this.helper(obj, key)"), "got: {}", get.body_block);
+        let get = methods
+            .get("get")
+            .expect("method referencing `this` (no #private) should now be inlinable");
+        assert_eq!(
+            get.params,
+            vec!["__this", "obj", "key"],
+            "got: {:?}",
+            get.params
+        );
+        assert!(
+            get.body_block.contains("__this.helper(obj, key)"),
+            "got: {}",
+            get.body_block
+        );
         assert!(
             !get.body_block.contains("return this."),
             "no bare `this` reference should remain, got: {}",
@@ -310,7 +400,10 @@ mod tests {
     fn rejects_methods_calling_a_captured_external_function() {
         let src = "class T { get(obj, key) { return invokeTrap(obj, key); } }";
         let methods = extract_tenant_methods(src);
-        assert!(!methods.contains_key("get"), "method calling a captured external function should not be inlinable");
+        assert!(
+            !methods.contains_key("get"),
+            "method calling a captured external function should not be inlinable"
+        );
     }
 
     /// A method calling a JS global (not captured/external in any meaningful sense) is
@@ -319,6 +412,9 @@ mod tests {
     fn allows_methods_calling_known_globals() {
         let src = "class T { ownKeys(obj) { return Reflect.ownKeys(obj); } }";
         let methods = extract_tenant_methods(src);
-        assert!(methods.contains_key("ownKeys"), "method calling Reflect (a known global) should be inlinable");
+        assert!(
+            methods.contains_key("ownKeys"),
+            "method calling Reflect (a known global) should be inlinable"
+        );
     }
 }

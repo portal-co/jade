@@ -21,38 +21,42 @@ export function clean<T extends object>(object: T, a: keyof T): keyof T {
 // is injected via `Object.assign` below rather than duplicated here — see `Tenant`'s doc
 // comment (`index.ts`).
 export const single_tenant: Tenant = Object.assign({
-    make(proto: object | null = null): object {
+    *make(proto: object | null = null) {
         return Object.create(proto);
     },
-    get<R = unknown>(obj: object, key: PropertyKey): R {
-        return (obj as any)[clean(obj as any, key as any)];
+    *get<R = unknown>(obj: object, key: PropertyKey) {
+        return (obj as any)[clean(obj as any, key as any)] as R;
     },
-    set<V = unknown>(obj: object, key: PropertyKey, value: V): void {
+    *set<V = unknown>(obj: object, key: PropertyKey, value: V) {
         (obj as any)[clean(obj as any, key as any)] = value;
     },
-    has(obj: object, key: PropertyKey): boolean {
+    *has(obj: object, key: PropertyKey) {
         return clean(obj as any, key as any) in obj;
     },
-    delete(obj: object, key: PropertyKey): void {
+    *delete(obj: object, key: PropertyKey) {
         delete (obj as any)[clean(obj as any, key as any)];
     },
-    ownKeys(obj: object): PropertyKey[] {
+    *ownKeys(obj: object) {
         return Reflect.ownKeys(obj).filter((k) =>
             Object.getOwnPropertyDescriptor(obj, k)?.enumerable
         );
     },
-    define(target: object, descriptors: object): void {
-        for (const k of single_tenant.ownKeys(descriptors)) {
+    *define(target: object, descriptors: object) {
+        const keys = yield this.yieldTenant(this.ownKeys(descriptors));
+        for (const k of keys as PropertyKey[]) {
             Object.defineProperty(
                 target,
                 clean(target as any, k as any) as any,
-                single_tenant.get(descriptors, k) as PropertyDescriptor
+                (yield this.yieldTenant(this.get(descriptors, k))) as PropertyDescriptor,
             );
         }
     },
-    assign(dst: object, src: object): void {
-        for (const k of single_tenant.ownKeys(src)) {
-            single_tenant.set(dst, k, single_tenant.get(src, k));
+    *assign(dst: object, src: object) {
+        const keys = yield this.yieldTenant(this.ownKeys(src));
+        for (const k of keys as PropertyKey[]) {
+            yield this.yieldTenant(
+                this.set(dst, k, yield this.yieldTenant(this.get(src, k))),
+            );
         }
     },
 }, guestAbiMixin);

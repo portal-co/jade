@@ -111,11 +111,15 @@ pub fn compile(code: &[u8], cfg: Config) -> Result<(String, VecRegistry), String
 /// prefix whenever `nested_body_compiler` is in use (see `op_fn`'s doc comment).
 fn with_nested_body_compiler(mut cfg: Config, reg: Rc<RefCell<VecRegistry>>) -> Config {
     let base_cfg = cfg.clone();
-    cfg.nested_body_compiler = Some(Rc::new(move |code: &[u8], start_ip: usize, is_gen: bool, is_async: bool, double_gen: bool| {
-        let inner_cfg = with_nested_body_compiler(base_cfg.clone(), reg.clone());
-        let stmts = compile_body(code, start_ip, &inner_cfg, is_gen, is_async, double_gen, &reg)?;
-        Ok(format!("state = Object.create(null);\n{stmts}"))
-    }));
+    cfg.nested_body_compiler = Some(Rc::new(
+        move |code: &[u8], start_ip: usize, is_gen: bool, is_async: bool, double_gen: bool| {
+            let inner_cfg = with_nested_body_compiler(base_cfg.clone(), reg.clone());
+            let stmts = compile_body(
+                code, start_ip, &inner_cfg, is_gen, is_async, double_gen, &reg,
+            )?;
+            Ok(format!("state = Object.create(null);\n{stmts}"))
+        },
+    ));
     cfg
 }
 
@@ -135,8 +139,7 @@ fn compile_body(
     reg: &Rc<RefCell<VecRegistry>>,
 ) -> Result<String, String> {
     let cfg_func = build_cfg_func(code, start_ip, cfg, is_gen, is_async, double_gen, reg)?;
-    let tfunc =
-        TFunc::try_from(&cfg_func).map_err(|e| format!("jit-swc: Func -> TFunc: {e:?}"))?;
+    let tfunc = TFunc::try_from(&cfg_func).map_err(|e| format!("jit-swc: Func -> TFunc: {e:?}"))?;
     let tfunc = portal_solutions_jade_cfg_opt::optimize_tfunc(&tfunc)
         .map_err(|e| format!("jit-swc: jade-cfg-opt: {e:?}"))?;
     let function: swc_ecma_ast::Function = (&tfunc)
@@ -164,7 +167,10 @@ fn strip_free_identifier_hoists(js: &str) -> String {
     js.lines()
         .filter(|line| {
             let trimmed = line.trim();
-            let Some(name) = trimmed.strip_prefix("var ").and_then(|s| s.strip_suffix(';')) else {
+            let Some(name) = trimmed
+                .strip_prefix("var ")
+                .and_then(|s| s.strip_suffix(';'))
+            else {
                 return true;
             };
             // Only ever drop a single, bare, uninitialized hoist (`var name;`) — anything
@@ -261,7 +267,11 @@ fn walk_stmt(stmt: &Stmt, labels: &mut Vec<swc_atoms::Atom>) -> Result<(), Strin
     }
 }
 
-fn check_label(label: Option<&Ident>, labels: &[swc_atoms::Atom], kind: &str) -> Result<(), String> {
+fn check_label(
+    label: Option<&Ident>,
+    labels: &[swc_atoms::Atom],
+    kind: &str,
+) -> Result<(), String> {
     if let Some(id) = label
         && !labels.contains(&id.sym)
     {
@@ -305,9 +315,22 @@ fn build_cfg_func(
         let id = offset_to_id[offset];
         let stmts = ops_to_stmts(reg, cfg, is_gen, is_async, double_gen, &block.ops, code)?;
         let term = lower_terminator(&block.term, &offset_to_id)?;
-        cfg_out.blocks[id] = CBlock { stmts, end: End { catch: Catch::Throw, term, orig_span: None } };
+        cfg_out.blocks[id] = CBlock {
+            stmts,
+            end: End {
+                catch: Catch::Throw,
+                term,
+                orig_span: None,
+            },
+        };
     }
-    Ok(Func { cfg: cfg_out, entry, params: vec![], is_generator: is_gen, is_async })
+    Ok(Func {
+        cfg: cfg_out,
+        entry,
+        params: vec![],
+        is_generator: is_gen,
+        is_async,
+    })
 }
 
 /// Emit `ops`' JS text (via `jade-vm-jit`'s own per-op emission) and re-parse it into real
@@ -321,7 +344,15 @@ fn ops_to_stmts(
     ops: &[Operation],
     code: &[u8],
 ) -> Result<Vec<Stmt>, String> {
-    let js = ops_to_js(reg.clone(), cfg.clone(), is_gen, is_async, double_gen, ops, code)?;
+    let js = ops_to_js(
+        reg.clone(),
+        cfg.clone(),
+        is_gen,
+        is_async,
+        double_gen,
+        ops,
+        code,
+    )?;
     parse_block_js(&js, is_gen, is_async)
 }
 
@@ -333,7 +364,8 @@ fn ops_to_stmts(
 /// otherwise reject those keywords as a syntax error.
 fn parse_block_js(src: &str, is_gen: bool, is_async: bool) -> Result<Vec<Stmt>, String> {
     if !is_gen && !is_async {
-        return parse_script(src).map_err(|e| format!("jit-swc: failed to parse generated per-block JS: {e}"));
+        return parse_script(src)
+            .map_err(|e| format!("jit-swc: failed to parse generated per-block JS: {e}"));
     }
     let keyword = match (is_async, is_gen) {
         (true, true) => "async function*",
@@ -352,8 +384,16 @@ fn parse_block_js(src: &str, is_gen: bool, is_async: bool) -> Result<Vec<Stmt>, 
 
 fn parse_script(src: &str) -> Result<Vec<Stmt>, String> {
     let cm: Lrc<SourceMap> = Default::default();
-    let fm = cm.new_source_file(Lrc::new(FileName::Custom("jit-swc-block.js".into())), src.to_string());
-    let lexer = Lexer::new(Syntax::Es(Default::default()), Default::default(), StringInput::from(&*fm), None);
+    let fm = cm.new_source_file(
+        Lrc::new(FileName::Custom("jit-swc-block.js".into())),
+        src.to_string(),
+    );
+    let lexer = Lexer::new(
+        Syntax::Es(Default::default()),
+        Default::default(),
+        StringInput::from(&*fm),
+        None,
+    );
     let mut parser = Parser::new_from(lexer);
     let script = parser.parse_script().map_err(|e| format!("{e:?}"))?;
     Ok(script.body)
@@ -363,7 +403,11 @@ fn parse_script(src: &str) -> Result<Vec<Stmt>, String> {
 fn state_member(idx: u32) -> Expr {
     Expr::Member(MemberExpr {
         span: DUMMY_SP,
-        obj: Box::new(Expr::Ident(Ident::new("state".into(), DUMMY_SP, Default::default()))),
+        obj: Box::new(Expr::Ident(Ident::new(
+            "state".into(),
+            DUMMY_SP,
+            Default::default(),
+        ))),
         prop: MemberProp::Computed(ComputedPropName {
             span: DUMMY_SP,
             expr: Box::new(num_lit(idx as f64)),
@@ -372,7 +416,11 @@ fn state_member(idx: u32) -> Expr {
 }
 
 fn num_lit(value: f64) -> Expr {
-    Expr::Lit(Lit::Num(Number { span: DUMMY_SP, value, raw: None }))
+    Expr::Lit(Lit::Num(Number {
+        span: DUMMY_SP,
+        value,
+        raw: None,
+    }))
 }
 
 fn operand_expr(op: Operand) -> Expr {
@@ -382,7 +430,10 @@ fn operand_expr(op: Operand) -> Expr {
     }
 }
 
-fn lower_terminator(op: &Operation, offset_to_id: &BTreeMap<usize, BlockId>) -> Result<Term, String> {
+fn lower_terminator(
+    op: &Operation,
+    offset_to_id: &BTreeMap<usize, BlockId>,
+) -> Result<Term, String> {
     let target = |offset: u32| -> Result<BlockId, String> {
         offset_to_id
             .get(&(offset as usize))
@@ -392,19 +443,35 @@ fn lower_terminator(op: &Operation, offset_to_id: &BTreeMap<usize, BlockId>) -> 
     Ok(match op {
         Operation::Ret(val) => Term::Return(Some(operand_expr(*val))),
         Operation::Jmp { target: t } => Term::Jmp(target(*t)?),
-        Operation::CondJmp { cond, if_true, if_false } => Term::CondJmp {
+        Operation::CondJmp {
+            cond,
+            if_true,
+            if_false,
+        } => Term::CondJmp {
             cond: operand_expr(*cond),
             if_true: target(*if_true)?,
             if_false: target(*if_false)?,
         },
-        Operation::Switch { val, cases, default_target } => {
+        Operation::Switch {
+            val,
+            cases,
+            default_target,
+        } => {
             let mut m: HashMap<Expr, BlockId> = HashMap::with_capacity(cases.len());
             for (case_val, case_target) in cases {
                 m.insert(num_lit(*case_val as f64), target(*case_target)?);
             }
-            Term::Switch { x: operand_expr(*val), blocks: m, default: target(*default_target)? }
+            Term::Switch {
+                x: operand_expr(*val),
+                blocks: m,
+                default: target(*default_target)?,
+            }
         }
-        _ => return Err("jit-swc: block did not end in a terminator (internal invariant)".to_string()),
+        _ => {
+            return Err(
+                "jit-swc: block did not end in a terminator (internal invariant)".to_string(),
+            );
+        }
     })
 }
 
@@ -421,7 +488,11 @@ fn codegen_stmts(stmts: &[Stmt]) -> Result<String, String> {
             wr: JsWriter::new(cm.clone(), "\n", &mut buf, None),
         };
         emitter
-            .emit_script(&Script { span: DUMMY_SP, body: stmts.to_vec(), shebang: None })
+            .emit_script(&Script {
+                span: DUMMY_SP,
+                body: stmts.to_vec(),
+                shebang: None,
+            })
             .map_err(|e| format!("jit-swc: codegen: {e}"))?;
     }
     String::from_utf8(buf).map_err(|e| format!("jit-swc: codegen produced invalid utf8: {e}"))
@@ -446,8 +517,16 @@ mod tests {
             "const fn = new Function('tenant','nt','state', {:?}); console.log(JSON.stringify(fn(undefined,undefined,[])));",
             body
         );
-        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
-        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("node failed");
+        assert!(
+            output.status.success(),
+            "node stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
@@ -463,7 +542,11 @@ mod tests {
         let then_body = chunk(&[Operation::Lit32 { dest: 1, val: 10 }]);
         let else_body = chunk(&[Operation::Lit32 { dest: 1, val: 20 }]);
         let ret_body = chunk(&[Operation::Ret(Operand::StateRef(1))]);
-        let condjmp_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let condjmp_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
         let then_offset = condjmp_len;
         let jmp_offset = then_offset + then_body.len() as u32;
@@ -471,7 +554,10 @@ mod tests {
         let ret_offset = else_offset + else_body.len() as u32;
 
         for cond_val in [true, false] {
-            let mut code = chunk(&[Operation::Bool { val: cond_val, dest: 0 }]);
+            let mut code = chunk(&[Operation::Bool {
+                val: cond_val,
+                dest: 0,
+            }]);
             code.extend(
                 Operation::CondJmp {
                     cond: Operand::StateRef(0),
@@ -481,7 +567,12 @@ mod tests {
                 .emit(),
             );
             code.extend(then_body.clone());
-            code.extend(Operation::Jmp { target: ret_offset + 10 }.emit());
+            code.extend(
+                Operation::Jmp {
+                    target: ret_offset + 10,
+                }
+                .emit(),
+            );
             code.extend(else_body.clone());
             code.extend(ret_body.clone());
 
@@ -497,8 +588,15 @@ mod tests {
     #[test]
     fn loop_executes_correctly() {
         let ret_body = chunk(&[Operation::Ret(Operand::StateRef(0))]);
-        let body_ops = chunk(&[Operation::Bool { val: false, dest: 0 }]);
-        let header_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let body_ops = chunk(&[Operation::Bool {
+            val: false,
+            dest: 0,
+        }]);
+        let header_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
 
         let mut code = chunk(&[Operation::Bool { val: true, dest: 0 }]);
@@ -506,10 +604,20 @@ mod tests {
         let body_offset = header_offset + header_len;
         let exit_offset = body_offset + body_ops.len() as u32 + jmp_len;
         code.extend(
-            Operation::CondJmp { cond: Operand::StateRef(0), if_true: body_offset, if_false: exit_offset }.emit(),
+            Operation::CondJmp {
+                cond: Operand::StateRef(0),
+                if_true: body_offset,
+                if_false: exit_offset,
+            }
+            .emit(),
         );
         code.extend(body_ops);
-        code.extend(Operation::Jmp { target: header_offset }.emit());
+        code.extend(
+            Operation::Jmp {
+                target: header_offset,
+            }
+            .emit(),
+        );
         code.extend(ret_body);
 
         let (js, _reg) = compile(&code, Config::default()).unwrap();
@@ -526,11 +634,22 @@ mod tests {
     #[test]
     fn return_inside_loop_body_executes_correctly() {
         let entry_ops = chunk(&[Operation::Bool { val: true, dest: 0 }]);
-        let header_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let header_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let body_ops = chunk(&[Operation::Bool { val: true, dest: 1 }]);
-        let body_condjmp_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(1), if_true: 0, if_false: 0 });
+        let body_condjmp_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(1),
+            if_true: 0,
+            if_false: 0,
+        });
         let ret7 = chunk(&[Operation::Ret(Operand::Literal(7))]);
-        let else_ops = chunk(&[Operation::Bool { val: false, dest: 0 }]);
+        let else_ops = chunk(&[Operation::Bool {
+            val: false,
+            dest: 0,
+        }]);
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
         let exit_ops = chunk(&[Operation::Ret(Operand::Literal(99))]);
 
@@ -542,16 +661,30 @@ mod tests {
 
         let mut code = entry_ops;
         code.extend(
-            Operation::CondJmp { cond: Operand::StateRef(0), if_true: body_offset, if_false: exit_offset }.emit(),
+            Operation::CondJmp {
+                cond: Operand::StateRef(0),
+                if_true: body_offset,
+                if_false: exit_offset,
+            }
+            .emit(),
         );
         code.extend(body_ops);
         code.extend(
-            Operation::CondJmp { cond: Operand::StateRef(1), if_true: retblk_offset, if_false: elseblk_offset }
-                .emit(),
+            Operation::CondJmp {
+                cond: Operand::StateRef(1),
+                if_true: retblk_offset,
+                if_false: elseblk_offset,
+            }
+            .emit(),
         );
         code.extend(ret7);
         code.extend(else_ops);
-        code.extend(Operation::Jmp { target: header_offset }.emit());
+        code.extend(
+            Operation::Jmp {
+                target: header_offset,
+            }
+            .emit(),
+        );
         code.extend(exit_ops);
 
         let (js, _reg) = compile(&code, Config::default()).unwrap();
@@ -565,14 +698,23 @@ mod tests {
     #[test]
     fn add_gen_config_reaches_yield_ops() {
         let code = chunk(&[
-            Operation::Yield { val: Operand::Literal(5), dest: 0 },
+            Operation::Yield {
+                val: Operand::Literal(5),
+                dest: 0,
+            },
             Operation::Ret(Operand::StateRef(0)),
         ]);
 
         let err = compile(&code, Config::default()).unwrap_err();
-        assert!(err.contains("YIELD"), "expected a YIELD-related error, got: {err}");
+        assert!(
+            err.contains("YIELD"),
+            "expected a YIELD-related error, got: {err}"
+        );
 
-        let cfg = Config { add_gen: true, ..Config::default() };
+        let cfg = Config {
+            add_gen: true,
+            ..Config::default()
+        };
         let (js, _reg) = compile(&code, cfg).unwrap();
         assert!(js.contains("yield"), "got:\n{js}");
     }
@@ -590,8 +732,16 @@ mod tests {
              (async () => {{ console.log(JSON.stringify(await fn(undefined,undefined,[]))); }})()\n\
              .catch(e => {{ console.error(e); process.exit(1); }});"
         );
-        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
-        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("node failed");
+        assert!(
+            output.status.success(),
+            "node stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
@@ -613,7 +763,7 @@ mod tests {
             const THROUGH = Symbol.for("jade.through");
             const GUEST_NEXT = Symbol.for("jade.guest.next");
             function markGuestFn(f) { return f; }
-            function createGuestGen(nativeGen) {
+            function* createGuestGen(nativeGen) {
                 const obj = {};
                 const nextFn = function* (sent) {
                     let step = nativeGen.next(sent);
@@ -641,14 +791,29 @@ mod tests {
             }
         "#;
         let script = format!(
-            "{shims}\n{prelude}\nconst make = new Function('tenant','nt','state', {body:?});\n\
-             const result = make(undefined, undefined, []);\n\
+            "{shims}\n{prelude}\nconst tenant = {{ createGuestGen, unpackGuestGen, driveTenant: (v) => v }};\n\
+             const GeneratorFunction = Object.getPrototypeOf(function*(){{}}).constructor;\n\
+             const make = new GeneratorFunction('tenant','nt','state', {body:?});\n\
+             // The top-level program is itself a generator under addGen; drive it to\n\
+             // completion and unwrap the guest-gen object it returns.\n\
+             const top = make(tenant, undefined, []);\n\
+             let step = top.next();\n\
+             while (!step.done) step = top.next(step.value);\n\
+             const result = step.value;\n\
              const out = [];\n\
              for (const v of unpackGuestGen(result)) out.push(v);\n\
              console.log(JSON.stringify(out));",
         );
-        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
-        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("node failed");
+        assert!(
+            output.status.success(),
+            "node stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
@@ -659,14 +824,23 @@ mod tests {
     #[test]
     fn add_async_config_reaches_await_ops() {
         let code = chunk(&[
-            Operation::Await { val: Operand::Literal(5), dest: 0 },
+            Operation::Await {
+                val: Operand::Literal(5),
+                dest: 0,
+            },
             Operation::Ret(Operand::StateRef(0)),
         ]);
 
         let err = compile(&code, Config::default()).unwrap_err();
-        assert!(err.contains("AWAIT"), "expected an AWAIT-related error, got: {err}");
+        assert!(
+            err.contains("AWAIT"),
+            "expected an AWAIT-related error, got: {err}"
+        );
 
-        let cfg = Config { add_async: true, ..Config::default() };
+        let cfg = Config {
+            add_async: true,
+            ..Config::default()
+        };
         let (js, _reg) = compile(&code, cfg).unwrap();
         assert!(js.contains("await"), "got:\n{js}");
         assert_eq!(run_js_async(&js), "5", "js:\n{js}");
@@ -682,7 +856,10 @@ mod tests {
     #[test]
     fn nested_gen_fn_runs_via_tier2_under_ambient_add_gen() {
         let fn_body = chunk(&[
-            Operation::Yield { val: Operand::Literal(7), dest: 0 },
+            Operation::Yield {
+                val: Operand::Literal(7),
+                dest: 0,
+            },
             Operation::Ret(Operand::StateRef(0)),
         ]);
         let mk = |j: u32| Operation::Fn {
@@ -692,7 +869,11 @@ mod tests {
             j,
             dest: 0,
         };
-        let call_op = Operation::Call { fn_op: Operand::StateRef(0), args: vec![], dest: 1 };
+        let call_op = Operation::Call {
+            fn_op: Operand::StateRef(0),
+            args: vec![],
+            dest: 1,
+        };
         let ret_op = Operation::Ret(Operand::StateRef(1));
         // The nested body must sit *after* the entire top-level block (Fn + Call + Ret),
         // not right after the `Fn` op alone — the `Fn` op is a plain value-producing op,
@@ -705,11 +886,17 @@ mod tests {
         code.extend(ret_op.emit());
         code.extend_from_slice(&fn_body);
 
-        let cfg = Config { add_gen: true, ..Config::default() };
+        let cfg = Config {
+            add_gen: true,
+            ..Config::default()
+        };
         let (js, reg) = compile(&code, cfg).unwrap();
         let prelude = reg.prelude();
 
-        assert!(prelude.contains("function*"), "expected the nested function registered as a generator, got:\n{prelude}");
+        assert!(
+            prelude.contains("function*"),
+            "expected the nested function registered as a generator, got:\n{prelude}"
+        );
         assert!(
             prelude.contains("markGuestFn(__fn0, {abi: \"leading-tenant-nt\"})"),
             "expected the nested function to register its guest ABI, got:\n{prelude}"
@@ -719,7 +906,10 @@ mod tests {
         // compiled and registered at all (the *real* proof that recursion through Tier 2
         // happened, not a downgrade, is `nested_fn_with_branch_is_reconstructed_by_tier2`
         // below, which has actual control flow in the nested body to tell the two apart).
-        assert!(!prelude.contains("__ip"), "did not expect a Tier 0 block-dispatch loop, got:\n{prelude}");
+        assert!(
+            !prelude.contains("__ip"),
+            "did not expect a Tier 0 block-dispatch loop, got:\n{prelude}"
+        );
 
         // Drive it: the outer program's own CALL result gets addGen-wrapped
         // (`createGuestGen`) since ambient `add_gen` is set. The nested function is
@@ -734,7 +924,11 @@ mod tests {
         // drops the symbol-keyed `THROUGH` marker, leaving `{"value":7}`). This is the
         // correct, distinguishing behavior of doubleGen vs. a plain (non-doubleGen)
         // generator, which yields the bare value with no wrapper at all.
-        assert_eq!(run_js_gen_values(&prelude, &js), r#"[{"value":7}]"#, "prelude:\n{prelude}\njs:\n{js}");
+        assert_eq!(
+            run_js_gen_values(&prelude, &js),
+            r#"[{"value":7}]"#,
+            "prelude:\n{prelude}\njs:\n{js}"
+        );
     }
 
     /// Same as above, but the nested function's own body has real control flow (an
@@ -751,7 +945,11 @@ mod tests {
             j,
             dest: 0,
         };
-        let call_op = Operation::Call { fn_op: Operand::StateRef(0), args: vec![], dest: 1 };
+        let call_op = Operation::Call {
+            fn_op: Operand::StateRef(0),
+            args: vec![],
+            dest: 1,
+        };
         let ret_op = Operation::Ret(Operand::StateRef(1));
         // The nested body must start *after* the entire top-level block (Fn + Call + Ret):
         // every op length here is independent of any operand's actual value, so `j` (and
@@ -763,10 +961,20 @@ mod tests {
         let j = op_len(&mk(0)) + op_len(&call_op) + op_len(&ret_op);
 
         let bool_len = op_len(&Operation::Bool { val: true, dest: 0 });
-        let cond_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let cond_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
-        let then_body = chunk(&[Operation::Yield { val: Operand::Literal(1), dest: 1 }]);
-        let else_body = chunk(&[Operation::Yield { val: Operand::Literal(2), dest: 1 }]);
+        let then_body = chunk(&[Operation::Yield {
+            val: Operand::Literal(1),
+            dest: 1,
+        }]);
+        let else_body = chunk(&[Operation::Yield {
+            val: Operand::Literal(2),
+            dest: 1,
+        }]);
         let ret_body = chunk(&[Operation::Ret(Operand::StateRef(1))]);
 
         let then_offset = j + bool_len + cond_len;
@@ -776,7 +984,12 @@ mod tests {
 
         let mut fn_body = chunk(&[Operation::Bool { val: true, dest: 0 }]);
         fn_body.extend(
-            Operation::CondJmp { cond: Operand::StateRef(0), if_true: then_offset, if_false: else_offset }.emit(),
+            Operation::CondJmp {
+                cond: Operand::StateRef(0),
+                if_true: then_offset,
+                if_false: else_offset,
+            }
+            .emit(),
         );
         fn_body.extend(then_body);
         fn_body.extend(Operation::Jmp { target: ret_offset }.emit());
@@ -786,15 +999,29 @@ mod tests {
         let mut code: Vec<u8> = mk(j).emit().collect();
         code.extend(call_op.emit());
         code.extend(ret_op.emit());
-        assert_eq!(code.len() as u32, j, "internal test invariant: top-level block length must match the precomputed `j`");
+        assert_eq!(
+            code.len() as u32,
+            j,
+            "internal test invariant: top-level block length must match the precomputed `j`"
+        );
         code.extend_from_slice(&fn_body);
 
         let (js, reg) = compile(&code, Config::default()).unwrap();
         let prelude = reg.prelude();
-        assert!(prelude.contains("if ("), "expected the nested body's branch reconstructed as a real `if`, got:\n{prelude}");
-        assert!(!prelude.contains("__ip"), "did not expect a Tier 0 block-dispatch loop, got:\n{prelude}");
+        assert!(
+            prelude.contains("if ("),
+            "expected the nested body's branch reconstructed as a real `if`, got:\n{prelude}"
+        );
+        assert!(
+            !prelude.contains("__ip"),
+            "did not expect a Tier 0 block-dispatch loop, got:\n{prelude}"
+        );
 
-        assert_eq!(run_js_gen_values(&prelude, &js), "[1]", "prelude:\n{prelude}\njs:\n{js}");
+        assert_eq!(
+            run_js_gen_values(&prelude, &js),
+            "[1]",
+            "prelude:\n{prelude}\njs:\n{js}"
+        );
     }
 
     /// End-to-end test of the `jsaw-core` IIFE-inlining pass (`SCfg::inline_iifes`, wired
@@ -810,7 +1037,11 @@ mod tests {
         use portal_solutions_jade_vm_jit::InlinableTenantMethod;
 
         let code = chunk(&[
-            Operation::Get { obj: Operand::StateRef(0), key: Operand::StateRef(1), dest: 2 },
+            Operation::Get {
+                obj: Operand::StateRef(0),
+                key: Operand::StateRef(1),
+                dest: 2,
+            },
             Operation::Ret(Operand::StateRef(2)),
         ]);
         let mut cfg = Config::default();
@@ -820,6 +1051,7 @@ mod tests {
                 params: vec!["__this".to_string(), "o".to_string(), "k".to_string()],
                 body_block: "{ return __this.helper(o, k); }".to_string(),
                 needs_tenant_self: true,
+                ..Default::default()
             },
         );
 
@@ -838,8 +1070,20 @@ mod tests {
              const fn = new Function('tenant', 'nt', 'state', {js:?});\n\
              console.log(JSON.stringify(fn(tenant, undefined, ['a', 'b'])));",
         );
-        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
-        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
-        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "\"a:b\"", "js:\n{js}");
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("node failed");
+        assert!(
+            output.status.success(),
+            "node stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            "\"a:b\"",
+            "js:\n{js}"
+        );
     }
 }

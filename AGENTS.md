@@ -103,3 +103,37 @@ so a hand-written guest-side stub can be typechecked directly against `HostToGue
 
 `narrow.ts` (validation/`NarrowSpec`) and `rewrite.ts` (conversion) are deliberately separate
 modules — don't merge them back together.
+
+## Tenant generator-driver protocol (`packages/jade-js/driver.ts`)
+
+All tenant operations (`make`, `get`, `set`, `has`, `delete`, `ownKeys`, `define`,
+`assign`) are **generators**. The VM, the JIT, and the WASM backend never call
+`.next()` directly; they compose every tenant method through
+`tenant.driveTenant(gen, addAsync, addGen)`. Inside tenant methods, nested
+tenant calls are composed with `yield this.yieldTenant(innerGen)`.
+
+`driveTenant`/`yieldTenant` are part of `guestAbiMixin` (`packages/jade-js/narrow.ts`)
+— injected onto every `Tenant` implementation like the five earlier ABI/shim
+helpers. **They must stay `this`-derived method calls:** never free imports at VM
+or JIT call sites, and **never** add them to `TENANT_METHOD_NAMES`
+(`crates/jade-vm-frontend/src/tenant_inline.rs`). If they were treated as
+inlinable tenant methods, the driver could be spliced into its own body.
+
+The driver composes nested `TenantOp` sentinels, `Promise`s, and native
+iterators consistently with the declared-bits-OR-ambient-bits rule already used
+by `Config.add_async`/`add_gen` and `FnResult`. Thread the flags at exactly one
+emission site per tier, the same as `op_await`/`op_yield`/`op_yieldstar`.
+
+For inlining: real tenant methods are generators, so the JIT emits a
+`function*` IIFE and wraps it with `tenant.driveTenant(...)` at the call site.
+The inlined body itself uses `__this.yieldTenant` / `__this.driveTenant` after
+`this`-rewrite. See `docs/tenant-generator-driver.md` and
+`docs/pluggable-tenant-interface-plan.md` for the full design.
+
+- If you add a new tenant method, make it a generator and add it to the
+  `Tenant` interface in `packages/jade-js/index.ts`.
+- If you change `packages/jade-data/index.ts` handlers, run `scripts/regen.ts`
+  to update `packages/jade-js/vm.ts`.
+- If you update the inlining rules, preserve the `is_generator` flag on
+  `InlinableTenantMethod` and the "never add driver helpers to
+  `TENANT_METHOD_NAMES`" invariant.

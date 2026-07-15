@@ -114,6 +114,11 @@ pub struct InlinableTenantMethod {
     /// real tenant reference to `inline_call`'s `args` when this is set, and expect
     /// `params.len()` to be one more than the bare operation's own arity.
     pub needs_tenant_self: bool,
+    /// Whether the inlined body is a generator function (`function*`). Every real
+    /// `Tenant` operation is a generator, so live inlined methods are wrapped with
+    /// `tenant.driveTenant(...)` at the call site. Test fixtures that set this to
+    /// `false` keep the old non-generator splice shape for backwards compatibility.
+    pub is_generator: bool,
 }
 
 /// Splice `m`'s body into a call-once function expression bound to `args` — real JS
@@ -126,7 +131,36 @@ fn inline_call(m: &InlinableTenantMethod, tenant_ref: Option<&str>, args: &[&str
         all_args.push(t);
     }
     all_args.extend_from_slice(args);
-    format!("(function({}){})({})", m.params.join(", "), m.body_block, all_args.join(", "))
+    let keyword = if m.is_generator {
+        "function*"
+    } else {
+        "function"
+    };
+    format!(
+        "({keyword}({}){})({})",
+        m.params.join(", "),
+        m.body_block,
+        all_args.join(", ")
+    )
+}
+
+/// Wrap a tenant method call with `tenant.driveTenant(...)` so the emitted code
+/// composes generator-based tenant operations according to the ambient flags.
+fn tenant_drive(method_expr: impl fmt::Display, add_async: bool, add_gen: bool) -> String {
+    format!("tenant.driveTenant({method_expr}, {add_async}, {add_gen})")
+}
+
+/// Prefix a tenant-driven expression with `await` or `yield*` when the enclosing
+/// emitted function is async / generator, matching the four `runVirtualized*`
+/// variant semantics from `packages/jade-js/vm.ts`.
+fn prefix_variant(expr: String, is_async: bool, is_gen: bool) -> String {
+    if is_gen {
+        format!("yield* {expr}")
+    } else if is_async {
+        format!("await {expr}")
+    } else {
+        expr
+    }
 }
 
 /// Ambient capability flags for the JIT.  Propagated into every nested function
@@ -191,9 +225,7 @@ fn fn_variant(v: &JsVar, cfg: &Config) -> FnVariant {
         FnVariant::SyncGen => 2,
         FnVariant::AsyncGen => 3,
     };
-    let effective_idx = declared_idx
-        | (cfg.add_async as u32)
-        | ((cfg.add_gen as u32) << 1);
+    let effective_idx = declared_idx | (cfg.add_async as u32) | ((cfg.add_gen as u32) << 1);
     match effective_idx {
         1 => FnVariant::Async,
         2 => FnVariant::SyncGen,
@@ -264,7 +296,10 @@ struct Emit {
 
 impl Emit {
     fn new() -> Self {
-        Self { buf: String::new(), next: 0 }
+        Self {
+            buf: String::new(),
+            next: 0,
+        }
     }
 }
 
@@ -294,7 +329,14 @@ impl<R: FnRegistry> JsJit<R> {
         is_async: bool,
         double_gen: bool,
     ) -> Self {
-        Self { reg, emit: RefCell::new(Emit::new()), cfg, is_gen, is_async, double_gen }
+        Self {
+            reg,
+            emit: RefCell::new(Emit::new()),
+            cfg,
+            is_gen,
+            is_async,
+            double_gen,
+        }
     }
 
     /// Mint a fresh `v{n}` variable id.
@@ -379,7 +421,15 @@ impl<R: FnRegistry> Ops for JsJit<R> {
     }
 
     fn define_properties(&self, target: &JsVar, props: JsVar) {
-        self.line(format!("tenant.define({target}, {props});"));
+        let expr = tenant_drive(
+            format!("tenant.define({target}, {props})"),
+            self.cfg.add_async,
+            self.cfg.add_gen,
+        );
+        self.line(format!(
+            "{};",
+            prefix_variant(expr, self.is_async, self.is_gen)
+        ));
     }
 
     fn op_global(&self) -> JsVar {
@@ -420,10 +470,20 @@ impl<R: FnRegistry> Ops for JsJit<R> {
         // parameter/`var` pairs the Tier 0/1 fallback produces) — see
         // `jade-vm-jit-swc`'s `with_nested_body_compiler`.
         let body = if let Some(f) = self.cfg.nested_body_compiler.clone() {
-            f(code, j as usize, child_is_gen, child_is_async, child_double_gen)?
+            f(
+                code,
+                j as usize,
+                child_is_gen,
+                child_is_async,
+                child_double_gen,
+            )?
         } else {
             let mut nested = JsJit::with_config(
-                self.reg.clone(), self.cfg.clone(), child_is_gen, child_is_async, child_double_gen,
+                self.reg.clone(),
+                self.cfg.clone(),
+                child_is_gen,
+                child_is_async,
+                child_double_gen,
             );
             #[cfg(feature = "reloop")]
             let prefer_reloop = self.cfg.prefer_reloop;
@@ -435,11 +495,17 @@ impl<R: FnRegistry> Ops for JsJit<R> {
             } else {
                 emit_program(&mut nested, code, j as usize)?;
             }
-            format!("const state = Object.create(null);\n{}", nested.emit.into_inner().buf)
+            format!(
+                "const state = Object.create(null);\n{}",
+                nested.emit.into_inner().buf
+            )
         };
         // NOTE: closure-slot capture and decorator (`spanner`) application are
         // not yet wired in this first backend — see `docs/closure-capture-plan.md`.
-        let reference = self.reg.borrow_mut().register(eff, &["tenant", "nt", "...args"], &body);
+        let reference = self
+            .reg
+            .borrow_mut()
+            .register(eff, &["tenant", "nt", "...args"], &body);
         Ok(self.bind(reference))
     }
 
@@ -458,14 +524,29 @@ impl<R: FnRegistry> Ops for JsJit<R> {
     }
 
     fn op_litobj(&self, spread: Option<JsVar>, pairs: Vec<(JsVar, JsVar)>) -> JsVar {
-        // Build the object through the tenant object manager.
+        // Build the object through the tenant object manager; every tenant operation is
+        // a generator, so drive each one with the ambient variant flags.
+        let add_async = self.cfg.add_async;
+        let add_gen = self.cfg.add_gen;
         let n = self.fresh();
-        self.line(format!("const v{n} = tenant.make(null);"));
+        let make_expr = tenant_drive("tenant.make(null)", add_async, add_gen);
+        self.line(format!(
+            "const v{n} = {};",
+            prefix_variant(make_expr, self.is_async, self.is_gen)
+        ));
         if let Some(s) = spread {
-            self.line(format!("tenant.assign(v{n}, {s});"));
+            let expr = tenant_drive(format!("tenant.assign(v{n}, {s})"), add_async, add_gen);
+            self.line(format!(
+                "{};",
+                prefix_variant(expr, self.is_async, self.is_gen)
+            ));
         }
         for (k, v) in pairs {
-            self.line(format!("tenant.set(v{n}, {k}, {v});"));
+            let expr = tenant_drive(format!("tenant.set(v{n}, {k}, {v})"), add_async, add_gen);
+            self.line(format!(
+                "{};",
+                prefix_variant(expr, self.is_async, self.is_gen)
+            ));
         }
         JsVar::Var(n)
     }
@@ -484,11 +565,17 @@ impl<R: FnRegistry> Ops for JsJit<R> {
         let raw_call = format!("Reflect.apply({fn_val}, undefined, [{}])", parts.join(", "));
         if self.cfg.add_gen {
             // In addGen mode every Jade callee runs as a generator; wrap the
-            // result in a guest-side generator object via the shims helper.
-            // `createGuestGen` must be in scope at the call site (imported from shims).
+            // result in a guest-side generator object via the tenant mixin helper.
+            let add_async = self.cfg.add_async;
+            let add_gen = self.cfg.add_gen;
             let raw = self.bind(raw_call);
+            let wrapped = prefix_variant(
+                tenant_drive(format!("tenant.createGuestGen({raw})"), add_async, add_gen),
+                self.is_async,
+                self.is_gen,
+            );
             Ok(self.bind(format!(
-                "({raw} && typeof {raw}.next === 'function') ? createGuestGen({raw}, tenant) : {raw}"
+                "({raw} && typeof {raw}.next === 'function') ? {wrapped} : {raw}"
             )))
         } else {
             Ok(self.bind(raw_call))
@@ -523,28 +610,52 @@ impl<R: FnRegistry> Ops for JsJit<R> {
 
     fn op_get(&self, obj: JsVar, key: JsVar) -> JsVar {
         let bare_arity = 2;
-        match self.cfg.tenant_methods.get("get") {
+        let add_async = self.cfg.add_async;
+        let add_gen = self.cfg.add_gen;
+        let expr = match self.cfg.tenant_methods.get("get") {
             Some(m) if m.params.len() == bare_arity + m.needs_tenant_self as usize => {
                 let tenant_ref = m.needs_tenant_self.then_some("tenant");
-                self.bind(inline_call(m, tenant_ref, &[&obj.to_string(), &key.to_string()]))
+                let splice = inline_call(m, tenant_ref, &[&obj.to_string(), &key.to_string()]);
+                if m.is_generator {
+                    tenant_drive(splice, add_async, add_gen)
+                } else {
+                    splice
+                }
             }
-            _ => self.bind(format!("tenant.get({obj}, {key})")),
-        }
+            _ => tenant_drive(format!("tenant.get({obj}, {key})"), add_async, add_gen),
+        };
+        self.bind(prefix_variant(expr, self.is_async, self.is_gen))
     }
 
     fn op_set(&self, obj: JsVar, key: JsVar, val: JsVar) -> JsVar {
         // Write through the tenant; the assignment evaluates to the value.
         let bare_arity = 3;
-        match self.cfg.tenant_methods.get("set") {
+        let add_async = self.cfg.add_async;
+        let add_gen = self.cfg.add_gen;
+        let expr = match self.cfg.tenant_methods.get("set") {
             Some(m) if m.params.len() == bare_arity + m.needs_tenant_self as usize => {
                 let tenant_ref = m.needs_tenant_self.then_some("tenant");
-                self.line(format!(
-                    "{};",
-                    inline_call(m, tenant_ref, &[&obj.to_string(), &key.to_string(), &val.to_string()])
-                ));
+                let splice = inline_call(
+                    m,
+                    tenant_ref,
+                    &[&obj.to_string(), &key.to_string(), &val.to_string()],
+                );
+                if m.is_generator {
+                    tenant_drive(splice, add_async, add_gen)
+                } else {
+                    splice
+                }
             }
-            _ => self.line(format!("tenant.set({obj}, {key}, {val});")),
-        }
+            _ => tenant_drive(
+                format!("tenant.set({obj}, {key}, {val})"),
+                add_async,
+                add_gen,
+            ),
+        };
+        self.line(format!(
+            "{};",
+            prefix_variant(expr, self.is_async, self.is_gen)
+        ));
         val
     }
 }
@@ -565,7 +676,10 @@ pub struct Block {
 /// without needing to know where the next function's bytecode begins. Assumes
 /// well-formed input (as produced by `jade-vm-frontend`): every jump target names the
 /// *start* offset of some block, and blocks never overlap.
-pub fn discover_blocks(code: &[u8], start_ip: usize) -> Result<alloc::collections::BTreeMap<usize, Block>, String> {
+pub fn discover_blocks(
+    code: &[u8],
+    start_ip: usize,
+) -> Result<alloc::collections::BTreeMap<usize, Block>, String> {
     let mut blocks = alloc::collections::BTreeMap::new();
     let mut worklist = alloc::vec![start_ip];
     while let Some(start) = worklist.pop() {
@@ -575,7 +689,8 @@ pub fn discover_blocks(code: &[u8], start_ip: usize) -> Result<alloc::collection
         let mut ip = start;
         let mut ops = Vec::new();
         loop {
-            let (op, rest) = Operation::parse(&code[ip..]).ok_or("jit: unexpected end of bytecode")?;
+            let (op, rest) =
+                Operation::parse(&code[ip..]).ok_or("jit: unexpected end of bytecode")?;
             ip = code.len() - rest.len();
             match &op {
                 Operation::Jmp { target } => {
@@ -583,13 +698,19 @@ pub fn discover_blocks(code: &[u8], start_ip: usize) -> Result<alloc::collection
                     blocks.insert(start, Block { ops, term: op });
                     break;
                 }
-                Operation::CondJmp { if_true, if_false, .. } => {
+                Operation::CondJmp {
+                    if_true, if_false, ..
+                } => {
                     worklist.push(*if_true as usize);
                     worklist.push(*if_false as usize);
                     blocks.insert(start, Block { ops, term: op });
                     break;
                 }
-                Operation::Switch { cases, default_target, .. } => {
+                Operation::Switch {
+                    cases,
+                    default_target,
+                    ..
+                } => {
                     for (_, target) in cases {
                         worklist.push(*target as usize);
                     }
@@ -665,11 +786,21 @@ fn emit_terminator<R: FnRegistry>(jit: &mut JsJit<R>, term: Operation) -> Result
         Operation::Jmp { target } => {
             jit.line(format!("__ip = {target}; continue;"));
         }
-        Operation::CondJmp { cond, if_true, if_false } => {
+        Operation::CondJmp {
+            cond,
+            if_true,
+            if_false,
+        } => {
             let cond_val = resolve(cond, jit);
-            jit.line(format!("__ip = ({cond_val}) ? {if_true} : {if_false}; continue;"));
+            jit.line(format!(
+                "__ip = ({cond_val}) ? {if_true} : {if_false}; continue;"
+            ));
         }
-        Operation::Switch { val, cases, default_target } => {
+        Operation::Switch {
+            val,
+            cases,
+            default_target,
+        } => {
             let val_val = resolve(val, jit);
             jit.line(format!("switch ({val_val}) {{"));
             for (cv, target) in cases {
@@ -732,7 +863,10 @@ pub fn compile<R: FnRegistry>(code: &[u8], reg: R, cfg: Config) -> Result<(Strin
         jit.emit.into_inner().buf
     };
     let reg = Rc::try_unwrap(cell)
-        .map_err(|_| "jit: internal invariant: FnRegistry Rc had lingering clones after compile finished".to_string())?
+        .map_err(|_| {
+            "jit: internal invariant: FnRegistry Rc had lingering clones after compile finished"
+                .to_string()
+        })?
         .into_inner();
     Ok((body, reg))
 }
@@ -780,7 +914,11 @@ mod tests {
     fn emits_binop_and_return() {
         // state[2] = (state[0] === state[1]); return state[2];
         let code = chunk(&[
-            Operation::Eq { a: Operand::StateRef(0), b: Operand::StateRef(1), dest: 2 },
+            Operation::Eq {
+                a: Operand::StateRef(0),
+                b: Operand::StateRef(1),
+                dest: 2,
+            },
             Operation::Ret(Operand::StateRef(2)),
         ]);
         let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
@@ -804,7 +942,11 @@ mod tests {
         let else_body = chunk(&[Operation::Lit32 { dest: 1, val: 20 }]);
         let ret_body = chunk(&[Operation::Ret(Operand::StateRef(1))]);
 
-        let condjmp_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let condjmp_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
 
         let then_offset = condjmp_len;
@@ -813,7 +955,14 @@ mod tests {
         let ret_offset = else_offset + else_body.len() as u32;
 
         let mut code = Vec::new();
-        code.extend(Operation::CondJmp { cond: Operand::StateRef(0), if_true: then_offset, if_false: else_offset }.emit());
+        code.extend(
+            Operation::CondJmp {
+                cond: Operand::StateRef(0),
+                if_true: then_offset,
+                if_false: else_offset,
+            }
+            .emit(),
+        );
         code.extend(then_body);
         code.extend(Operation::Jmp { target: ret_offset }.emit());
         code.extend(else_body);
@@ -835,7 +984,11 @@ mod tests {
         let ret_body = chunk(&[Operation::Ret(Operand::StateRef(0))]);
         let body_ops = chunk(&[Operation::Lit32 { dest: 0, val: 0 }]);
 
-        let header_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let header_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
 
         let header_offset = 0u32;
@@ -844,10 +997,20 @@ mod tests {
 
         let mut code = Vec::new();
         code.extend(
-            Operation::CondJmp { cond: Operand::StateRef(0), if_true: body_offset, if_false: exit_offset }.emit(),
+            Operation::CondJmp {
+                cond: Operand::StateRef(0),
+                if_true: body_offset,
+                if_false: exit_offset,
+            }
+            .emit(),
         );
         code.extend(body_ops);
-        code.extend(Operation::Jmp { target: header_offset }.emit());
+        code.extend(
+            Operation::Jmp {
+                target: header_offset,
+            }
+            .emit(),
+        );
         code.extend(ret_body);
 
         let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
@@ -884,9 +1047,17 @@ mod tests {
 
     #[test]
     fn emits_function_with_tenant_nt_params() {
-        let (js, reg) = compile(&program_with_fn(Operand::Literal(0)), VecRegistry::new(), Config::default()).unwrap();
+        let (js, reg) = compile(
+            &program_with_fn(Operand::Literal(0)),
+            VecRegistry::new(),
+            Config::default(),
+        )
+        .unwrap();
         let prelude = reg.prelude();
-        assert!(prelude.contains("function(tenant, nt, ...args)"), "got:\n{prelude}");
+        assert!(
+            prelude.contains("function(tenant, nt, ...args)"),
+            "got:\n{prelude}"
+        );
         assert!(js.contains("__fn0"), "got:\n{js}");
     }
 
@@ -894,7 +1065,12 @@ mod tests {
     fn emits_mark_guest_fn_registration() {
         // Every compiled function must register itself as a "leading-tenant-nt" guest
         // function so tenant-side trap invocation (`invokeTrap`) calls it correctly.
-        let (_js, reg) = compile(&program_with_fn(Operand::Literal(0)), VecRegistry::new(), Config::default()).unwrap();
+        let (_js, reg) = compile(
+            &program_with_fn(Operand::Literal(0)),
+            VecRegistry::new(),
+            Config::default(),
+        )
+        .unwrap();
         let prelude = reg.prelude();
         assert!(
             prelude.contains("markGuestFn(__fn0, {abi: \"leading-tenant-nt\"})"),
@@ -905,13 +1081,29 @@ mod tests {
     #[test]
     fn emits_variant_declaration_forms() {
         let kw = |variant: u32| {
-            let (_js, reg) =
-                compile(&program_with_fn(Operand::Literal(variant)), VecRegistry::new(), Config::default()).unwrap();
+            let (_js, reg) = compile(
+                &program_with_fn(Operand::Literal(variant)),
+                VecRegistry::new(),
+                Config::default(),
+            )
+            .unwrap();
             reg.prelude()
         };
-        assert!(kw(1).contains("async function(tenant, nt, ...args)"), "async: {}", kw(1));
-        assert!(kw(2).contains("function*(tenant, nt, ...args)"), "gen: {}", kw(2));
-        assert!(kw(3).contains("async function*(tenant, nt, ...args)"), "asyncgen: {}", kw(3));
+        assert!(
+            kw(1).contains("async function(tenant, nt, ...args)"),
+            "async: {}",
+            kw(1)
+        );
+        assert!(
+            kw(2).contains("function*(tenant, nt, ...args)"),
+            "gen: {}",
+            kw(2)
+        );
+        assert!(
+            kw(3).contains("async function*(tenant, nt, ...args)"),
+            "asyncgen: {}",
+            kw(3)
+        );
     }
 
     #[test]
@@ -931,13 +1123,28 @@ mod tests {
                 val: Operand::StateRef(0),
                 dest: 3,
             },
-            Operation::Get { obj: Operand::StateRef(2), key: Operand::StateRef(1), dest: 4 },
+            Operation::Get {
+                obj: Operand::StateRef(2),
+                key: Operand::StateRef(1),
+                dest: 4,
+            },
             Operation::Ret(Operand::StateRef(4)),
         ]);
         let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
-        assert!(js.contains("tenant.make(null)"), "got:\n{js}");
-        assert!(js.contains("tenant.set(state[2], state[1], state[0])"), "got:\n{js}");
-        assert!(js.contains("tenant.get(state[2], state[1])"), "got:\n{js}");
+        assert!(
+            js.contains("tenant.driveTenant(tenant.make(null), false, false)"),
+            "got:\n{js}"
+        );
+        assert!(
+            js.contains(
+                "tenant.driveTenant(tenant.set(state[2], state[1], state[0]), false, false)"
+            ),
+            "got:\n{js}"
+        );
+        assert!(
+            js.contains("tenant.driveTenant(tenant.get(state[2], state[1]), false, false)"),
+            "got:\n{js}"
+        );
         assert!(!js.contains("tenant.clean"), "got:\n{js}");
     }
 
@@ -962,7 +1169,11 @@ mod tests {
     fn get_set_code() -> Vec<u8> {
         // state[3] = get(state[0], state[1]); set(state[0], state[1], state[2]); return state[3];
         chunk(&[
-            Operation::Get { obj: Operand::StateRef(0), key: Operand::StateRef(1), dest: 3 },
+            Operation::Get {
+                obj: Operand::StateRef(0),
+                key: Operand::StateRef(1),
+                dest: 3,
+            },
             Operation::Set {
                 obj: Operand::StateRef(0),
                 key: Operand::StateRef(1),
@@ -974,10 +1185,26 @@ mod tests {
     }
 
     #[test]
+    fn emitted_get_contains_drive_tenant() {
+        // Default (non-inlined) GET/SET must call through the tenant generator driver.
+        let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), Config::default()).unwrap();
+        assert!(
+            js.contains("tenant.driveTenant(tenant.get(state[0], state[1]), false, false)"),
+            "got:\n{js}"
+        );
+        assert!(
+            js.contains(
+                "tenant.driveTenant(tenant.set(state[0], state[1], state[2]), false, false);"
+            ),
+            "got:\n{js}"
+        );
+    }
+
+    #[test]
     fn get_set_fall_back_to_tenant_calls_by_default() {
         let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), Config::default()).unwrap();
-        assert!(js.contains("tenant.get(state[0], state[1])"), "got:\n{js}");
-        assert!(js.contains("tenant.set(state[0], state[1], state[2]);"), "got:\n{js}");
+        assert!(js.contains("tenant.driveTenant(tenant.get("), "got:\n{js}");
+        assert!(js.contains("tenant.driveTenant(tenant.set("), "got:\n{js}");
     }
 
     #[test]
@@ -1028,6 +1255,33 @@ mod tests {
         assert!(js.contains("tenant.get(state[0], state[1])"), "got:\n{js}");
     }
 
+    /// A live (generator) tenant method is inlined as a `function*` IIFE and then wrapped
+    /// with `tenant.driveTenant(...)` so the generator is fully driven by the JIT splice
+    /// site, not left as an undriven iterator object.
+    #[test]
+    fn get_inlines_generator_method_wrapped_with_drive_tenant() {
+        let mut cfg = Config::default();
+        cfg.tenant_methods.insert(
+            "get".to_string(),
+            InlinableTenantMethod {
+                params: alloc::vec!["__this".to_string(), "o".to_string(), "k".to_string()],
+                body_block: "{ return __this.helper(o, k); }".to_string(),
+                needs_tenant_self: true,
+                is_generator: true,
+            },
+        );
+        let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), cfg).unwrap();
+        assert!(!js.contains("tenant.get("), "got:\n{js}");
+        assert!(
+            js.contains("(function*(__this, o, k){ return __this.helper(o, k); })(tenant, state[0], state[1])"),
+            "got:\n{js}"
+        );
+        assert!(
+            js.contains("tenant.driveTenant((function*(__this, o, k)"),
+            "generator splice must be driven, got:\n{js}"
+        );
+    }
+
     /// A method rewritten by `tenant_inline::extract_tenant_methods` to reference `this`
     /// (`needs_tenant_self: true`, one extra leading param) must still be spliced inline —
     /// with the real `tenant` reference threaded as that leading argument — not silently
@@ -1041,6 +1295,7 @@ mod tests {
                 params: alloc::vec!["__this".to_string(), "o".to_string(), "k".to_string()],
                 body_block: "{ return __this.helper(o, k); }".to_string(),
                 needs_tenant_self: true,
+                ..Default::default()
             },
         );
         let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), cfg).unwrap();
@@ -1058,8 +1313,16 @@ mod tests {
             "const fn = new Function('tenant','nt','state', {:?}); console.log(JSON.stringify(fn(undefined,undefined,[])));",
             body
         );
-        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
-        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("node failed");
+        assert!(
+            output.status.success(),
+            "node stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
@@ -1068,7 +1331,11 @@ mod tests {
         let then_body = chunk(&[Operation::Lit32 { dest: 1, val: 10 }]);
         let else_body = chunk(&[Operation::Lit32 { dest: 1, val: 20 }]);
         let ret_body = chunk(&[Operation::Ret(Operand::StateRef(1))]);
-        let condjmp_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let condjmp_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
         let then_offset = condjmp_len;
         let jmp_offset = then_offset + then_body.len() as u32;
@@ -1076,10 +1343,25 @@ mod tests {
         let ret_offset = else_offset + else_body.len() as u32;
 
         for cond_val in [true, false] {
-            let mut code = chunk(&[Operation::Bool { val: cond_val, dest: 0 }]);
-            code.extend(Operation::CondJmp { cond: Operand::StateRef(0), if_true: then_offset + 10, if_false: else_offset + 10 }.emit());
+            let mut code = chunk(&[Operation::Bool {
+                val: cond_val,
+                dest: 0,
+            }]);
+            code.extend(
+                Operation::CondJmp {
+                    cond: Operand::StateRef(0),
+                    if_true: then_offset + 10,
+                    if_false: else_offset + 10,
+                }
+                .emit(),
+            );
             code.extend(then_body.clone());
-            code.extend(Operation::Jmp { target: ret_offset + 10 }.emit());
+            code.extend(
+                Operation::Jmp {
+                    target: ret_offset + 10,
+                }
+                .emit(),
+            );
             code.extend(else_body.clone());
             code.extend(ret_body.clone());
             let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
@@ -1093,17 +1375,36 @@ mod tests {
     fn loop_executes_correctly() {
         // Loop body runs exactly once, flips the flag false, exits, returns it.
         let ret_body = chunk(&[Operation::Ret(Operand::StateRef(0))]);
-        let body_ops = chunk(&[Operation::Bool { val: false, dest: 0 }]);
-        let header_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let body_ops = chunk(&[Operation::Bool {
+            val: false,
+            dest: 0,
+        }]);
+        let header_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
 
         let mut code = chunk(&[Operation::Bool { val: true, dest: 0 }]);
         let header_offset = code.len() as u32;
         let body_offset = header_offset + header_len;
         let exit_offset = body_offset + body_ops.len() as u32 + jmp_len;
-        code.extend(Operation::CondJmp { cond: Operand::StateRef(0), if_true: body_offset, if_false: exit_offset }.emit());
+        code.extend(
+            Operation::CondJmp {
+                cond: Operand::StateRef(0),
+                if_true: body_offset,
+                if_false: exit_offset,
+            }
+            .emit(),
+        );
         code.extend(body_ops);
-        code.extend(Operation::Jmp { target: header_offset }.emit());
+        code.extend(
+            Operation::Jmp {
+                target: header_offset,
+            }
+            .emit(),
+        );
         code.extend(ret_body);
 
         let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();

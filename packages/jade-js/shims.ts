@@ -10,7 +10,7 @@ export const THROUGH: symbol = Symbol.for("jade.through");
 /** Internal symbol for VM-side direct access to a guest-gen's `next` generator
  * function without going through the tenant shadow. Also in the global registry
  * so WASM can detect guest-gen objects if needed. */
-const _GUEST_NEXT: symbol = Symbol.for("jade.guest.next");
+export const GUEST_NEXT: symbol = Symbol.for("jade.guest.next");
 
 /**
  * Wrap a native generator (produced by calling a function under the gen
@@ -25,8 +25,8 @@ const _GUEST_NEXT: symbol = Symbol.for("jade.guest.next");
  * `guestAbiMixin` in `narrow.ts`) rather than an explicit parameter — see
  * `Tenant`'s doc comment (`index.ts`) for why.
  */
-export function createGuestGen(this: Tenant, nativeGen: Generator): any {
-  const obj = this.make(null);
+export function* createGuestGen(this: Tenant, nativeGen: Generator): any {
+  const obj = (yield this.yieldTenant(this.make(null))) as object;
 
   const nextFn = function* (sent: any): Generator<any, { value: any; done: boolean }, any> {
     let step = (nativeGen as any).next(sent);
@@ -54,14 +54,22 @@ export function createGuestGen(this: Tenant, nativeGen: Generator): any {
     throw err;
   };
 
-  this.set(obj, "next", nextFn);
-  this.set(obj, "return", returnFn);
-  this.set(obj, "throw", throwFn);
+  yield this.yieldTenant(this.set(obj, "next", nextFn));
+  yield this.yieldTenant(this.set(obj, "return", returnFn));
+  yield this.yieldTenant(this.set(obj, "throw", throwFn));
   // Store a direct reference for fast VM-internal access; this bypasses the
   // tenant shadow deliberately (the Symbol is not guest-visible).
-  (obj as any)[_GUEST_NEXT] = nextFn;
+  (obj as any)[GUEST_NEXT] = nextFn;
 
   return obj;
+}
+
+export function isGuestGen(g: unknown): boolean {
+  return (
+    typeof g === "object" &&
+    g !== null &&
+    typeof (g as any)[GUEST_NEXT] === "function"
+  );
 }
 
 /**
@@ -75,7 +83,7 @@ export function createGuestGen(this: Tenant, nativeGen: Generator): any {
  * caller via `yield`.
  */
 export function* unpackGuestGen(g: any): Generator {
-  const nextFn: Function = (g as any)[_GUEST_NEXT];
+  const nextFn: Function = (g as any)[GUEST_NEXT];
   if (typeof nextFn !== "function") {
     // Not a guest-gen — fall back to standard iteration.
     return yield* g;

@@ -121,11 +121,11 @@ export function hostToGuest<T>(spec: NarrowSpec<T>, value: T, tenant: Tenant): H
     case "object": {
       // Build the result as a genuine tenant-managed object: guest code must only ever
       // observe it through `tenant.get`, never via raw property access.
-      const obj = tenant.make(null);
+      const obj = tenant.driveTenant(tenant.make(null), false, false);
       for (const k of Object.keys(spec.fields)) {
         const fieldSpec = (spec.fields as Record<string, NarrowSpec<unknown>>)[k];
         const converted = hostToGuest(fieldSpec, (value as Record<string, unknown>)[k], tenant);
-        tenant.set(obj, k, converted);
+        tenant.driveTenant(tenant.set(obj, k, converted), false, false);
       }
       return obj as HostToGuest<T>;
     }
@@ -152,7 +152,8 @@ export function guestToHost<T>(spec: NarrowSpec<T>, value: unknown, tenant: Tena
       // doesn't speculatively register it — see there).
       const meta = guestFnMeta(value);
       if (!meta || meta.abi === "closure") return value as GuestToHost<T>;
-      const adapter = (...args: unknown[]) => tenant.invokeGuestAware(value, undefined, args);
+      const adapter = (...args: unknown[]) =>
+        tenant.driveTenant(tenant.invokeGuestAware(value, undefined, args), false, false);
       tenant.markGuestFn(adapter, { abi: "closure" });
       return adapter as GuestToHost<T>;
     }
@@ -171,7 +172,9 @@ export function guestToHost<T>(spec: NarrowSpec<T>, value: unknown, tenant: Tena
       const out: Record<string, unknown> = {};
       for (const k of Object.keys(spec.fields)) {
         const fieldSpec = (spec.fields as Record<string, NarrowSpec<unknown>>)[k];
-        const raw = isGuestObject ? tenant.get(value as object, k) : undefined;
+        const raw = isGuestObject
+        ? tenant.driveTenant(tenant.get(value as object, k), false, false)
+        : undefined;
         out[k] = guestToHost(fieldSpec, raw, tenant);
       }
       return out as GuestToHost<T>;
