@@ -24,6 +24,11 @@
 //! browser-only in practice) — a plain object's `.toString()` doesn't return its own
 //! declaration source the way a function/class's does, so a class expression/declaration
 //! is the only shape this needs to handle.
+//!
+//! Tenant operations are generator methods. The extracted `is_generator` bit lets the JIT
+//! emit a `function*` IIFE and drive it at the outer call site; the ABI/driver mixin methods
+//! (`yieldTenant`, `driveTenant`, and the existing shim helpers) deliberately stay outside
+//! `TENANT_METHOD_NAMES`, so an inlined operation still reaches them through `__this`.
 
 use std::collections::HashMap;
 

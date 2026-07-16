@@ -14,14 +14,16 @@ function isTenantOp(value: unknown): value is TenantOp<unknown> {
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   return (
-    value !== null && typeof value === "object" && typeof (value as any).then === "function"
+    value !== null &&
+    (typeof value === "object" || typeof value === "function") &&
+    typeof (value as any).then === "function"
   );
 }
 
 function isNativeIterator(value: unknown): value is Iterator<unknown, any, any> {
   return (
     value !== null &&
-    typeof value === "object" &&
+    (typeof value === "object" || typeof value === "function") &&
     typeof (value as any).next === "function" &&
     !isGuestGen(value)
   );
@@ -35,8 +37,9 @@ export function yieldTenant<T>(this: Tenant, gen: Generator<any, T, any>): Tenan
   return op;
 }
 
-/** Synchronous driver: nested tenant ops run synchronously; everything else is
- * passed back to the generator unchanged. */
+/** Synchronous driver: nested tenant ops run synchronously.  Promises and
+ * native iterators require an ambient async/gen capability and therefore cannot
+ * cross this boundary silently. */
 function driveTenantSync<T>(this: Tenant, gen: Generator<any, T, any>): T {
   let step = gen.next();
   while (!step.done) {
@@ -44,6 +47,10 @@ function driveTenantSync<T>(this: Tenant, gen: Generator<any, T, any>): T {
     if (isTenantOp(v)) {
       const r = this.driveTenant(v[TENANT_OP], false, false);
       step = gen.next(r);
+    } else if (isPromiseLike(v)) {
+      throw new TypeError("tenant operation yielded a Promise without addAsync");
+    } else if (isNativeIterator(v)) {
+      throw new TypeError("tenant operation yielded an iterator without addGen");
     } else {
       step = gen.next(v);
     }
@@ -62,6 +69,8 @@ async function driveTenantAsync<T>(this: Tenant, gen: Generator<any, T, any>): P
     } else if (isPromiseLike(v)) {
       const r = await v;
       step = gen.next(r);
+    } else if (isNativeIterator(v)) {
+      throw new TypeError("tenant operation yielded an iterator without addGen");
     } else {
       step = gen.next(v);
     }

@@ -24,12 +24,10 @@ export interface TenantOp<T> {
   readonly [TENANT_OP]: Generator<any, T, any>;
 }
 
+type TenantYield = TenantOp<any> | PromiseLike<any> | Iterator<any, any, any>;
+
 /** Generator shape returned by every tenant operation method. */
-export type TenantGenerator<R> = Generator<
-  TenantOp<any> | Promise<any> | Iterator<any, any, any>,
-  R,
-  any
->;
+export type TenantGenerator<R> = Generator<TenantYield, R, any>;
 
 /** The boundary type produced by `tenant.driveTenant(...)` for a given operation
  *  result `R` and the ambient `addAsync`/`addGen` flags — the same declared-bits

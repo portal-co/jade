@@ -849,8 +849,9 @@ fn emit_program<R: FnRegistry>(
 /// and the (now-populated) registry.
 ///
 /// Pass a non-default [`Config`] to enable ambient `add_async`/`add_gen` flags.
-/// When `add_gen` is active the emitted calls to `createGuestGen` and
-/// `unpackGuestGen` (from `jade-js/shims.ts`) must be in scope at runtime.
+/// The generated program expects the tenant object to expose the shared
+/// `driveTenant`/`createGuestGen` mixin methods from `jade-js`; no shim helper
+/// is referenced as a free identifier at the generated call site.
 pub fn compile<R: FnRegistry>(code: &[u8], reg: R, cfg: Config) -> Result<(String, R), String> {
     #[cfg(feature = "reloop")]
     if cfg.prefer_reloop {

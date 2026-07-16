@@ -195,7 +195,7 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
   );
   void out; // LITOBJ define path mutates target; return value depends on caller encoding.
   assert(
-    (await driveSync(t, t.get(target, "k"))) === 123,
+    (await t.driveTenant(t.get(target, "k"), true, false)) === 123,
     "async accessor descriptor from LITOBJ define should resolve to 123",
   );
 }
@@ -240,6 +240,41 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
     assert(typeof t.driveTenant === "function", "driveTenant mixin should be present");
     assert(typeof t.yieldTenant === "function", "yieldTenant mixin should be present");
   }
+}
+
+// 8) Synchronous boundaries reject asynchronous trap results rather than treating
+// the wrapper as an already-composed host value.
+{
+  const t = new MultiTenant();
+  const { target, descriptors, desc } = buildAccessorScaffold(t);
+  driveSync(t, t.set(desc, "get", () => Promise.resolve("nope")));
+  driveSync(t, t.define(target, descriptors));
+  let threw = false;
+  try {
+    driveSync(t, t.get(target, "k"));
+  } catch (e) {
+    threw = e instanceof TypeError && /addAsync/.test(e.message);
+  }
+  assert(threw, "sync driveTenant must reject Promise trap results");
+}
+
+// 9) Thenable functions are awaited too.
+{
+  const t = new MultiTenant();
+  const thenable = Object.assign(
+    () => undefined,
+    { then(resolve: (value: unknown) => unknown) { return resolve(88); } },
+  );
+  const { target, descriptors, desc, stateBase } = buildAccessorScaffold(t);
+  driveSync(t, t.set(desc, "get", () => thenable));
+  driveSync(t, t.define(target, descriptors));
+  const b = new Buf();
+  b.get(REF(0), REF(1), 2);
+  b.ret(REF(2));
+  assert(
+    (await vm.runVirtualizedA(b.view(), stateBase, { tenant: t, addAsync: true, addGen: false })) === 88,
+    "async driver must await function thenables",
+  );
 }
 
 console.log("PASS: tenant generator driver composition e2e");

@@ -41,8 +41,8 @@ loops:
 
 | ambient flags | driver return | handles `Promise` | handles native `Iterator` |
 |---------------|---------------|-------------------|---------------------------|
-| none          | sync value    | error if yielded  | error if yielded          |
-| `addAsync`    | `Promise`     | `await`           | error if yielded            |
+| none          | sync value    | throws (requires `addAsync`) | throws (requires `addGen`) |
+| `addAsync`    | `Promise`     | `await`           | throws (requires `addGen`) |
 | `addGen`      | `Generator`   | `yield` (passes through to caller) | wraps with `createGuestGen`, then `yield*` |
 | both          | `AsyncGenerator` | `await`        | wraps with `createGuestGen`, then `yield*` |
 

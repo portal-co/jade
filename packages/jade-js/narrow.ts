@@ -1,5 +1,5 @@
 import type { Tenant } from "./index.ts";
-import { createGuestGen, unpackGuestGen } from "./shims.ts";
+import { createGuestGen, isGuestGen, unpackGuestGen } from "./shims.ts";
 import { yieldTenant, driveTenant } from "./driver.ts";
 
 /**
@@ -48,15 +48,18 @@ export function* invokeGuestAware<Args extends readonly unknown[], R = unknown>(
     meta?.abi === "leading-tenant-nt"
       ? (Reflect.apply(fn, thisArg, [this, undefined, ...args]) as R)
       : (Reflect.apply(fn, thisArg, args) as R);
-  // If the callee produced a Promise (e.g. an async host function), hand it to
-  // the driver so an async effective variant can await it.  Sync callers will
-  // simply receive the raw Promise back from the generator's boundary.
+  // Hand asynchronous and native-generator results to the driver.  A guest-gen
+  // object is already an ABI value and must not be wrapped a second time.
   if (
-    raw !== null &&
-    typeof raw === "object" &&
-    typeof (raw as any).then === "function"
+    (raw !== null &&
+      (typeof raw === "object" || typeof raw === "function") &&
+      typeof (raw as any).then === "function") ||
+    (raw !== null &&
+      typeof raw === "object" &&
+      typeof (raw as any).next === "function" &&
+      !isGuestGen(raw))
   ) {
-    return yield (raw as unknown) as PromiseLike<any>;
+    return yield raw as any;
   }
   return raw;
 }
