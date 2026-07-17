@@ -11,6 +11,7 @@ portal-solutions-jade-vm-core = { path = "../jade-vm-core" }
 cfg-traits = { workspace = true, optional = true }
 arena-traits = { workspace = true, optional = true }
 ssa-reloop2 = { workspace = true, optional = true }
+portal-jit-host-names = { path = "../../../codegen-utils/crates/host-method-names" }
 
 [features]
 # Tier 1 (see docs/bytecode-cfg-plan.md): restructure the block-dispatch loop back into

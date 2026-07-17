@@ -55,10 +55,13 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
+use portal_jit_host_names::HostMethodNames;
 use portal_jsc_swc_cfg::{Block as CBlock, BlockId, Catch, Cfg, End, Func, Term};
 use portal_jsc_swc_tac::TFunc;
 use portal_solutions_jade_vm::{Operand, Operation};
-use portal_solutions_jade_vm_jit::{Config, VecRegistry, discover_blocks, ops_to_js};
+use portal_solutions_jade_vm_jit::{
+    Config, JadeTenantMethod, VecRegistry, discover_blocks, ops_to_js,
+};
 use swc_common::sync::Lrc;
 use swc_common::{DUMMY_SP, FileName, SourceMap};
 use swc_ecma_ast::{
@@ -79,7 +82,10 @@ use swc_ecma_parser::{Parser, StringInput, Syntax};
 /// declarations to prepend alongside the returned body, exactly as Tier 0/1's own
 /// `VecRegistry` output is used. `cfg.tenant_methods` inlines `GET`/`SET` the same way too,
 /// via the shared `ops_to_js` per-op emission.
-pub fn compile(code: &[u8], cfg: Config) -> Result<(String, VecRegistry), String> {
+pub fn compile<N>(code: &[u8], cfg: Config<N>) -> Result<(String, VecRegistry), String>
+where
+    N: HostMethodNames<JadeTenantMethod>,
+{
     swc_common::GLOBALS.set(&swc_common::Globals::new(), || {
         let reg = Rc::new(RefCell::new(VecRegistry::new()));
         let is_gen = cfg.add_gen;
@@ -109,7 +115,10 @@ pub fn compile(code: &[u8], cfg: Config) -> Result<(String, VecRegistry), String
 /// harmless redeclarations) — so this closure's own output initializes the *already
 /// var-hoisted* `state` via a plain assignment instead, and `op_fn` skips its usual const
 /// prefix whenever `nested_body_compiler` is in use (see `op_fn`'s doc comment).
-fn with_nested_body_compiler(mut cfg: Config, reg: Rc<RefCell<VecRegistry>>) -> Config {
+fn with_nested_body_compiler<N>(mut cfg: Config<N>, reg: Rc<RefCell<VecRegistry>>) -> Config<N>
+where
+    N: HostMethodNames<JadeTenantMethod>,
+{
     let base_cfg = cfg.clone();
     cfg.nested_body_compiler = Some(Rc::new(
         move |code: &[u8], start_ip: usize, is_gen: bool, is_async: bool, double_gen: bool| {
@@ -129,15 +138,18 @@ fn with_nested_body_compiler(mut cfg: Config, reg: Rc<RefCell<VecRegistry>>) -> 
 /// (`compile`) and, via `Config::nested_body_compiler`, every nested closure — `is_gen`/
 /// `is_async`/`double_gen` are that function's own already-computed *effective* variant
 /// flags (see `Config::nested_body_compiler`'s doc comment).
-fn compile_body(
+fn compile_body<N>(
     code: &[u8],
     start_ip: usize,
-    cfg: &Config,
+    cfg: &Config<N>,
     is_gen: bool,
     is_async: bool,
     double_gen: bool,
     reg: &Rc<RefCell<VecRegistry>>,
-) -> Result<String, String> {
+) -> Result<String, String>
+where
+    N: HostMethodNames<JadeTenantMethod>,
+{
     let cfg_func = build_cfg_func(code, start_ip, cfg, is_gen, is_async, double_gen, reg)?;
     let tfunc = TFunc::try_from(&cfg_func).map_err(|e| format!("jit-swc: Func -> TFunc: {e:?}"))?;
     let tfunc = portal_solutions_jade_cfg_opt::optimize_tfunc(&tfunc)
@@ -292,15 +304,18 @@ fn check_label(
 /// reading `cfg.add_gen`/`cfg.add_async` directly, which are the *ambient*, session-wide
 /// flags — correct for the top-level call, where there's no other "declared" bit, but not
 /// for a nested function, which has its own declared variant to combine with them).
-fn build_cfg_func(
+fn build_cfg_func<N>(
     code: &[u8],
     start_ip: usize,
-    cfg: &Config,
+    cfg: &Config<N>,
     is_gen: bool,
     is_async: bool,
     double_gen: bool,
     reg: &Rc<RefCell<VecRegistry>>,
-) -> Result<Func, String> {
+) -> Result<Func, String>
+where
+    N: HostMethodNames<JadeTenantMethod>,
+{
     let blocks = discover_blocks(code, start_ip)?;
     let mut cfg_out = Cfg::default();
     let mut offset_to_id: BTreeMap<usize, BlockId> = BTreeMap::new();
@@ -335,15 +350,18 @@ fn build_cfg_func(
 
 /// Emit `ops`' JS text (via `jade-vm-jit`'s own per-op emission) and re-parse it into real
 /// `Stmt`s.
-fn ops_to_stmts(
+fn ops_to_stmts<N>(
     reg: &Rc<RefCell<VecRegistry>>,
-    cfg: &Config,
+    cfg: &Config<N>,
     is_gen: bool,
     is_async: bool,
     double_gen: bool,
     ops: &[Operation],
     code: &[u8],
-) -> Result<Vec<Stmt>, String> {
+) -> Result<Vec<Stmt>, String>
+where
+    N: HostMethodNames<JadeTenantMethod>,
+{
     let js = ops_to_js(
         reg.clone(),
         cfg.clone(),
@@ -711,10 +729,8 @@ mod tests {
             "expected a YIELD-related error, got: {err}"
         );
 
-        let cfg = Config {
-            add_gen: true,
-            ..Config::default()
-        };
+        let mut cfg = Config::default();
+        cfg.add_gen = true;
         let (js, _reg) = compile(&code, cfg).unwrap();
         assert!(js.contains("yield"), "got:\n{js}");
     }
@@ -837,10 +853,8 @@ mod tests {
             "expected an AWAIT-related error, got: {err}"
         );
 
-        let cfg = Config {
-            add_async: true,
-            ..Config::default()
-        };
+        let mut cfg = Config::default();
+        cfg.add_async = true;
         let (js, _reg) = compile(&code, cfg).unwrap();
         assert!(js.contains("await"), "got:\n{js}");
         assert_eq!(run_js_async(&js), "5", "js:\n{js}");

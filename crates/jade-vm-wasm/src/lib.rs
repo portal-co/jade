@@ -1486,11 +1486,9 @@ pub fn run_virtualized_tier2(
     add_async: bool,
     add_gen: bool,
 ) -> Result<JsValue, JsValue> {
-    let cfg = portal_solutions_jade_vm_jit::Config {
-        add_async,
-        add_gen,
-        ..Default::default()
-    };
+    let mut cfg = portal_solutions_jade_vm_jit::Config::default();
+    cfg.add_async = add_async;
+    cfg.add_gen = add_gen;
     let (body, reg) = portal_solutions_jade_vm_jit_swc::compile(&code, cfg)
         .map_err(|e| js_err(&format!("jit-swc: {e}")))?;
     // `reg`'s nested-function declarations (if any) must be in scope alongside `body`,

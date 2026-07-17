@@ -46,6 +46,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::fmt;
 
+use portal_jit_host_names::{CanonicalHostMethodNames, HostMethodNames, PropertyAccess};
 use portal_solutions_jade_vm::Operation;
 use portal_solutions_jade_vm_core::{self as core_vm, Ops, State, exec_op, resolve};
 
@@ -144,10 +145,77 @@ fn inline_call(m: &InlinableTenantMethod, tenant_ref: Option<&str>, args: &[&str
     )
 }
 
-/// Wrap a tenant method call with `tenant.driveTenant(...)` so the emitted code
+/// Jade-owned semantic keys for the tenant ABI. The shared host-name crate
+/// only relies on this enum's `Display` implementation, never this type.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum JadeTenantMethod {
+    Make,
+    Get,
+    Set,
+    Define,
+    Assign,
+    DriveTenant,
+    CreateGuestGen,
+}
+
+impl fmt::Display for JadeTenantMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Make => "make",
+            Self::Get => "get",
+            Self::Set => "set",
+            Self::Define => "define",
+            Self::Assign => "assign",
+            Self::DriveTenant => "driveTenant",
+            Self::CreateGuestGen => "createGuestGen",
+        })
+    }
+}
+
+/// Validate that a resolver can serve Jade's complete tenant ABI before it is
+/// used to compile any source. This catches a partial mapping at setup time.
+pub fn validate_host_method_names<N>(names: &N) -> Result<(), String>
+where
+    N: HostMethodNames<JadeTenantMethod>,
+{
+    for method in [
+        JadeTenantMethod::Make,
+        JadeTenantMethod::Get,
+        JadeTenantMethod::Set,
+        JadeTenantMethod::Define,
+        JadeTenantMethod::Assign,
+        JadeTenantMethod::DriveTenant,
+        JadeTenantMethod::CreateGuestGen,
+    ] {
+        names.property(method).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+fn tenant_call<N: HostMethodNames<JadeTenantMethod>>(
+    names: &N,
+    method: JadeTenantMethod,
+    args: &str,
+) -> String {
+    names
+        .property(method)
+        .expect("Jade host names must be validated before code generation")
+        .call("tenant", args)
+}
+
+/// Wrap a tenant method call with its resolved `driveTenant` member so the emitted code
 /// composes generator-based tenant operations according to the ambient flags.
-fn tenant_drive(method_expr: impl fmt::Display, add_async: bool, add_gen: bool) -> String {
-    format!("tenant.driveTenant({method_expr}, {add_async}, {add_gen})")
+fn tenant_drive<N: HostMethodNames<JadeTenantMethod>>(
+    names: &N,
+    method_expr: impl fmt::Display,
+    add_async: bool,
+    add_gen: bool,
+) -> String {
+    tenant_call(
+        names,
+        JadeTenantMethod::DriveTenant,
+        &format!("{method_expr}, {add_async}, {add_gen}"),
+    )
 }
 
 /// Prefix a tenant-driven expression with `await` or `yield*` when the enclosing
@@ -165,8 +233,11 @@ fn prefix_variant(expr: String, is_async: bool, is_gen: bool) -> String {
 
 /// Ambient capability flags for the JIT.  Propagated into every nested function
 /// compiled in the same session so the whole program upgrades uniformly.
-#[derive(Clone, Default)]
-pub struct Config {
+#[derive(Clone)]
+pub struct Config<N = CanonicalHostMethodNames> {
+    /// The resolved names for the tenant ABI. The default zero-sized resolver
+    /// preserves canonical direct-member output.
+    pub names: N,
     /// Add async capability on top of every function's declared variant.
     pub add_async: bool,
     /// Add generator capability on top of every function's declared variant.
@@ -205,9 +276,30 @@ pub struct Config {
 /// See [`Config::nested_body_compiler`].
 pub type NestedBodyCompiler = dyn Fn(&[u8], usize, bool, bool, bool) -> Result<String, String>;
 
+impl<N> Config<N> {
+    /// Start a configuration with a caller-selected host-name resolver.
+    pub fn with_names(names: N) -> Self {
+        Self {
+            names,
+            add_async: false,
+            add_gen: false,
+            tenant_methods: Default::default(),
+            #[cfg(feature = "reloop")]
+            prefer_reloop: false,
+            nested_body_compiler: None,
+        }
+    }
+}
+
+impl Default for Config<CanonicalHostMethodNames> {
+    fn default() -> Self {
+        Self::with_names(CanonicalHostMethodNames)
+    }
+}
+
 /// Decode a resolved `variant` value (a `JsVar`) into an [`FnVariant`], then
 /// apply the ambient `Config` flags to compute the effective variant.
-fn fn_variant(v: &JsVar, cfg: &Config) -> FnVariant {
+fn fn_variant<N>(v: &JsVar, cfg: &Config<N>) -> FnVariant {
     let declared = if let JsVar::Expr(s) = v {
         match s.trim() {
             "1" => FnVariant::Async,
@@ -304,7 +396,7 @@ impl Emit {
 }
 
 /// The JIT backend. Drives `exec_op` and accumulates JS statements.
-pub struct JsJit<R: FnRegistry> {
+pub struct JsJit<R: FnRegistry, N = CanonicalHostMethodNames> {
     /// Owned (reference-counted) rather than borrowed: `Config::nested_body_compiler`
     /// closures must be `'static` to be stored in `Config` without giving `Config` (and
     /// everything that holds one) a lifetime parameter — see that field's doc comment.
@@ -312,8 +404,7 @@ pub struct JsJit<R: FnRegistry> {
     /// registry.
     reg: Rc<RefCell<R>>,
     emit: RefCell<Emit>,
-    cfg: Config,
-    /// Whether the function currently being compiled is effectively a generator.
+    cfg: Config<N>,
     is_gen: bool,
     /// Whether the function currently being compiled is effectively async.
     is_async: bool,
@@ -321,10 +412,10 @@ pub struct JsJit<R: FnRegistry> {
     double_gen: bool,
 }
 
-impl<R: FnRegistry> JsJit<R> {
+impl<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>> JsJit<R, N> {
     fn with_config(
         reg: Rc<RefCell<R>>,
-        cfg: Config,
+        cfg: Config<N>,
         is_gen: bool,
         is_async: bool,
         double_gen: bool,
@@ -381,7 +472,7 @@ fn js_string(s: &str) -> String {
     out
 }
 
-impl<R: FnRegistry> State for JsJit<R> {
+impl<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>> State for JsJit<R, N> {
     type Value = JsVar;
 
     fn get(&mut self, idx: u32) -> JsVar {
@@ -398,7 +489,7 @@ impl<R: FnRegistry> State for JsJit<R> {
     }
 }
 
-impl<R: FnRegistry> Ops for JsJit<R> {
+impl<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>> Ops for JsJit<R, N> {
     type Value = JsVar;
     type Error = String;
 
@@ -422,7 +513,12 @@ impl<R: FnRegistry> Ops for JsJit<R> {
 
     fn define_properties(&self, target: &JsVar, props: JsVar) {
         let expr = tenant_drive(
-            format!("tenant.define({target}, {props})"),
+            &self.cfg.names,
+            tenant_call(
+                &self.cfg.names,
+                JadeTenantMethod::Define,
+                &format!("{target}, {props}"),
+            ),
             self.cfg.add_async,
             self.cfg.add_gen,
         );
@@ -529,20 +625,43 @@ impl<R: FnRegistry> Ops for JsJit<R> {
         let add_async = self.cfg.add_async;
         let add_gen = self.cfg.add_gen;
         let n = self.fresh();
-        let make_expr = tenant_drive("tenant.make(null)", add_async, add_gen);
+        let make_expr = tenant_drive(
+            &self.cfg.names,
+            tenant_call(&self.cfg.names, JadeTenantMethod::Make, "null"),
+            add_async,
+            add_gen,
+        );
         self.line(format!(
             "const v{n} = {};",
             prefix_variant(make_expr, self.is_async, self.is_gen)
         ));
         if let Some(s) = spread {
-            let expr = tenant_drive(format!("tenant.assign(v{n}, {s})"), add_async, add_gen);
+            let expr = tenant_drive(
+                &self.cfg.names,
+                tenant_call(
+                    &self.cfg.names,
+                    JadeTenantMethod::Assign,
+                    &format!("v{n}, {s}"),
+                ),
+                add_async,
+                add_gen,
+            );
             self.line(format!(
                 "{};",
                 prefix_variant(expr, self.is_async, self.is_gen)
             ));
         }
         for (k, v) in pairs {
-            let expr = tenant_drive(format!("tenant.set(v{n}, {k}, {v})"), add_async, add_gen);
+            let expr = tenant_drive(
+                &self.cfg.names,
+                tenant_call(
+                    &self.cfg.names,
+                    JadeTenantMethod::Set,
+                    &format!("v{n}, {k}, {v}"),
+                ),
+                add_async,
+                add_gen,
+            );
             self.line(format!(
                 "{};",
                 prefix_variant(expr, self.is_async, self.is_gen)
@@ -570,7 +689,16 @@ impl<R: FnRegistry> Ops for JsJit<R> {
             let add_gen = self.cfg.add_gen;
             let raw = self.bind(raw_call);
             let wrapped = prefix_variant(
-                tenant_drive(format!("tenant.createGuestGen({raw})"), add_async, add_gen),
+                tenant_drive(
+                    &self.cfg.names,
+                    tenant_call(
+                        &self.cfg.names,
+                        JadeTenantMethod::CreateGuestGen,
+                        &raw.to_string(),
+                    ),
+                    add_async,
+                    add_gen,
+                ),
                 self.is_async,
                 self.is_gen,
             );
@@ -617,12 +745,21 @@ impl<R: FnRegistry> Ops for JsJit<R> {
                 let tenant_ref = m.needs_tenant_self.then_some("tenant");
                 let splice = inline_call(m, tenant_ref, &[&obj.to_string(), &key.to_string()]);
                 if m.is_generator {
-                    tenant_drive(splice, add_async, add_gen)
+                    tenant_drive(&self.cfg.names, splice, add_async, add_gen)
                 } else {
                     splice
                 }
             }
-            _ => tenant_drive(format!("tenant.get({obj}, {key})"), add_async, add_gen),
+            _ => tenant_drive(
+                &self.cfg.names,
+                tenant_call(
+                    &self.cfg.names,
+                    JadeTenantMethod::Get,
+                    &format!("{obj}, {key}"),
+                ),
+                add_async,
+                add_gen,
+            ),
         };
         self.bind(prefix_variant(expr, self.is_async, self.is_gen))
     }
@@ -641,13 +778,18 @@ impl<R: FnRegistry> Ops for JsJit<R> {
                     &[&obj.to_string(), &key.to_string(), &val.to_string()],
                 );
                 if m.is_generator {
-                    tenant_drive(splice, add_async, add_gen)
+                    tenant_drive(&self.cfg.names, splice, add_async, add_gen)
                 } else {
                     splice
                 }
             }
             _ => tenant_drive(
-                format!("tenant.set({obj}, {key}, {val})"),
+                &self.cfg.names,
+                tenant_call(
+                    &self.cfg.names,
+                    JadeTenantMethod::Set,
+                    &format!("{obj}, {key}, {val}"),
+                ),
                 add_async,
                 add_gen,
             ),
@@ -732,7 +874,11 @@ pub fn discover_blocks(
 /// Emit one non-terminator op: `AWAIT`/`YIELD`/`YIELDSTAR` are special-cased (checked
 /// against the function's declared capabilities), everything else goes through the
 /// shared `exec_op`.
-fn emit_op<R: FnRegistry>(jit: &mut JsJit<R>, code: &[u8], op: Operation) -> Result<(), String> {
+fn emit_op<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>>(
+    jit: &mut JsJit<R, N>,
+    code: &[u8],
+    op: Operation,
+) -> Result<(), String> {
     match op {
         Operation::Await { val: val_op, dest } => {
             if !jit.is_async {
@@ -777,7 +923,10 @@ fn emit_op<R: FnRegistry>(jit: &mut JsJit<R>, code: &[u8], op: Operation) -> Res
 
 /// Emit a block's terminator: a real `return`, or an assignment to `__ip` followed by
 /// `continue` (re-entering the dispatch `switch` at the top of the `while (true)` loop).
-fn emit_terminator<R: FnRegistry>(jit: &mut JsJit<R>, term: Operation) -> Result<(), String> {
+fn emit_terminator<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>>(
+    jit: &mut JsJit<R, N>,
+    term: Operation,
+) -> Result<(), String> {
     match term {
         Operation::Ret(val_op) => {
             let val = resolve(val_op, jit);
@@ -819,8 +968,8 @@ fn emit_terminator<R: FnRegistry>(jit: &mut JsJit<R>, term: Operation) -> Result
 /// `while (true) { switch (__ip) { ... } }` dispatch loop — the JIT's always-correct
 /// baseline codegen (Tier 0; see `docs/bytecode-cfg-plan.md`). A `return` now works
 /// from any block, since there's no more nested-body context to be inside of.
-fn emit_program<R: FnRegistry>(
-    jit: &mut JsJit<R>,
+fn emit_program<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>>(
+    jit: &mut JsJit<R, N>,
     code: &[u8],
     start_ip: usize,
 ) -> Result<(), String> {
@@ -852,7 +1001,11 @@ fn emit_program<R: FnRegistry>(
 /// The generated program expects the tenant object to expose the shared
 /// `driveTenant`/`createGuestGen` mixin methods from `jade-js`; no shim helper
 /// is referenced as a free identifier at the generated call site.
-pub fn compile<R: FnRegistry>(code: &[u8], reg: R, cfg: Config) -> Result<(String, R), String> {
+pub fn compile<R: FnRegistry, N>(code: &[u8], reg: R, cfg: Config<N>) -> Result<(String, R), String>
+where
+    N: HostMethodNames<JadeTenantMethod>,
+{
+    validate_host_method_names(&cfg.names)?;
     #[cfg(feature = "reloop")]
     if cfg.prefer_reloop {
         return reloop::compile(code, reg, cfg);
@@ -885,9 +1038,9 @@ pub use core_vm::{Ops as JitOps, State as JitState};
 /// `false` for a top-level call and whatever `op_fn` computed (declared-gen && ambient
 /// `add_gen`) when recompiling a nested function's own body — see
 /// `Config::nested_body_compiler`.
-pub fn ops_to_js<R: FnRegistry>(
+pub fn ops_to_js<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>>(
     reg: Rc<RefCell<R>>,
-    cfg: Config,
+    cfg: Config<N>,
     is_gen: bool,
     is_async: bool,
     double_gen: bool,
@@ -1206,6 +1359,44 @@ mod tests {
         let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), Config::default()).unwrap();
         assert!(js.contains("tenant.driveTenant(tenant.get("), "got:\n{js}");
         assert!(js.contains("tenant.driveTenant(tenant.set("), "got:\n{js}");
+    }
+
+    #[test]
+    fn mapped_names_replace_every_tenant_abi_member() {
+        use portal_jit_host_names::MappedHostMethodNames;
+
+        let names = MappedHostMethodNames::new([
+            ("make".into(), "a".into()),
+            ("get".into(), "b".into()),
+            ("set".into(), "c".into()),
+            ("define".into(), "d".into()),
+            ("assign".into(), "e".into()),
+            ("driveTenant".into(), "not-a-name".into()),
+            ("createGuestGen".into(), "g".into()),
+        ]);
+        let cfg = Config::with_names(names);
+        let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), cfg).unwrap();
+        assert!(
+            js.contains("tenant[\"not-a-name\"](tenant.b("),
+            "got:\n{js}"
+        );
+        assert!(
+            js.contains("tenant[\"not-a-name\"](tenant.c("),
+            "got:\n{js}"
+        );
+        assert!(!js.contains("tenant.driveTenant"), "got:\n{js}");
+    }
+
+    #[test]
+    fn incomplete_mapped_names_fail_before_codegen() {
+        use portal_jit_host_names::MappedHostMethodNames;
+        let err = compile(
+            &get_set_code(),
+            VecRegistry::new(),
+            Config::with_names(MappedHostMethodNames::default()),
+        )
+        .unwrap_err();
+        assert!(err.contains("make"), "got: {err}");
     }
 
     #[test]

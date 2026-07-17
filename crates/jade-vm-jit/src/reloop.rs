@@ -51,8 +51,16 @@ type BlockIdx = usize;
 enum Term {
     Ret(Operand),
     Jmp(BlockIdx),
-    CondJmp { cond: Operand, if_true: BlockIdx, if_false: BlockIdx },
-    Switch { val: Operand, cases: Vec<(u32, BlockIdx)>, default: BlockIdx },
+    CondJmp {
+        cond: Operand,
+        if_true: BlockIdx,
+        if_false: BlockIdx,
+    },
+    Switch {
+        val: Operand,
+        cases: Vec<(u32, BlockIdx)>,
+        default: BlockIdx,
+    },
 }
 
 struct CfgBlock {
@@ -149,8 +157,12 @@ impl cfg_traits::Term<CfgFunc> for Term {
         match self {
             Term::Ret(_) => Box::new(empty()),
             Term::Jmp(t) => Box::new(once(t)),
-            Term::CondJmp { if_true, if_false, .. } => Box::new([if_true, if_false].into_iter()),
-            Term::Switch { cases, default, .. } => Box::new(cases.iter().map(|(_, t)| t).chain(once(default))),
+            Term::CondJmp {
+                if_true, if_false, ..
+            } => Box::new([if_true, if_false].into_iter()),
+            Term::Switch { cases, default, .. } => {
+                Box::new(cases.iter().map(|(_, t)| t).chain(once(default)))
+            }
         }
     }
     fn targets_mut<'a>(&'a mut self) -> Box<dyn Iterator<Item = &'a mut BlockIdx> + 'a>
@@ -160,7 +172,9 @@ impl cfg_traits::Term<CfgFunc> for Term {
         match self {
             Term::Ret(_) => Box::new(empty()),
             Term::Jmp(t) => Box::new(once(t)),
-            Term::CondJmp { if_true, if_false, .. } => Box::new([if_true, if_false].into_iter()),
+            Term::CondJmp {
+                if_true, if_false, ..
+            } => Box::new([if_true, if_false].into_iter()),
             Term::Switch { cases, default, .. } => {
                 Box::new(cases.iter_mut().map(|(_, t)| t).chain(once(default)))
             }
@@ -187,20 +201,36 @@ fn build_cfg_func(mut blocks: BTreeMap<usize, Block>, entry_offset: usize) -> Cf
             let term = match block.term {
                 Operation::Ret(val) => Term::Ret(val),
                 Operation::Jmp { target } => Term::Jmp(idx(target)),
-                Operation::CondJmp { cond, if_true, if_false } => {
-                    Term::CondJmp { cond, if_true: idx(if_true), if_false: idx(if_false) }
-                }
-                Operation::Switch { val, cases, default_target } => Term::Switch {
+                Operation::CondJmp {
+                    cond,
+                    if_true,
+                    if_false,
+                } => Term::CondJmp {
+                    cond,
+                    if_true: idx(if_true),
+                    if_false: idx(if_false),
+                },
+                Operation::Switch {
+                    val,
+                    cases,
+                    default_target,
+                } => Term::Switch {
                     val,
                     cases: cases.into_iter().map(|(cv, t)| (cv, idx(t))).collect(),
                     default: idx(default_target),
                 },
                 _ => unreachable!("Tier 0 only ever discovers Ret/Jmp/CondJmp/Switch terminators"),
             };
-            CfgBlock { ops: block.ops, term }
+            CfgBlock {
+                ops: block.ops,
+                term,
+            }
         })
         .collect();
-    CfgFunc { blocks: VecArena(vec_blocks), entry: 0 }
+    CfgFunc {
+        blocks: VecArena(vec_blocks),
+        entry: 0,
+    }
 }
 
 fn label_for(loop_id: u32) -> String {
@@ -208,8 +238,8 @@ fn label_for(loop_id: u32) -> String {
 }
 
 /// Emit `sb`'s ops/terminator, then whatever structurally follows.
-fn emit_block<R: FnRegistry>(
-    jit: &mut JsJit<R>,
+fn emit_block<R: FnRegistry, N: portal_jit_host_names::HostMethodNames<crate::JadeTenantMethod>>(
+    jit: &mut JsJit<R, N>,
     code: &[u8],
     cfg: &CfgFunc,
     sb: &StructuredBlock<BlockIdx>,
@@ -272,8 +302,11 @@ fn emit_block<R: FnRegistry>(
 /// uses to turn `ssa-reloop2`'s `Multiple` nodes into real conditionals (see
 /// `emit_dispatch`): unlike targeting Jade bytecode (which has no local variables to flag
 /// with), a real JS local makes this completely sound, not just a same-shaped heuristic.
-fn emit_branch_arm<R: FnRegistry>(
-    jit: &mut JsJit<R>,
+fn emit_branch_arm<
+    R: FnRegistry,
+    N: portal_jit_host_names::HostMethodNames<crate::JadeTenantMethod>,
+>(
+    jit: &mut JsJit<R, N>,
     branches: &BTreeMap<BlockIdx, BranchMode>,
     target: BlockIdx,
     loops: &[(u32, String)],
@@ -311,8 +344,11 @@ fn find_label(loops: &[(u32, String)], id: u32) -> Result<String, String> {
 
 /// Emit `term`. A `Return` always becomes a real `return` — correct from any nesting
 /// depth, unlike the old bytecode-targeting design (see the module doc comment).
-fn emit_terminator<R: FnRegistry>(
-    jit: &mut JsJit<R>,
+fn emit_terminator<
+    R: FnRegistry,
+    N: portal_jit_host_names::HostMethodNames<crate::JadeTenantMethod>,
+>(
+    jit: &mut JsJit<R, N>,
     code: &[u8],
     cfg: &CfgFunc,
     term: &Term,
@@ -332,7 +368,11 @@ fn emit_terminator<R: FnRegistry>(
                 }
             }
         }
-        Term::CondJmp { cond, if_true, if_false } => {
+        Term::CondJmp {
+            cond,
+            if_true,
+            if_false,
+        } => {
             let cond_v = resolve(*cond, jit);
             // Both arms are emitted as real `if`/`else`; each arm either performs a real
             // exit (return/break/continue) or falls through to whatever the shared
@@ -348,7 +388,11 @@ fn emit_terminator<R: FnRegistry>(
                 }
             }
         }
-        Term::Switch { val, cases, default } => {
+        Term::Switch {
+            val,
+            cases,
+            default,
+        } => {
             let val_v = resolve(*val, jit);
             jit.line(format!("switch ({val_v}) {{"));
             let mut any_fallthrough = false;
@@ -381,15 +425,21 @@ fn emit_terminator<R: FnRegistry>(
 /// technique `swc-cfg`'s own `Cfg::process_block` uses for the same `ssa-reloop2`
 /// `Multiple` node shape, just with a plain JS local instead of a JS string literal
 /// switch.
-fn emit_dispatch<R: FnRegistry>(
-    jit: &mut JsJit<R>,
+fn emit_dispatch<
+    R: FnRegistry,
+    N: portal_jit_host_names::HostMethodNames<crate::JadeTenantMethod>,
+>(
+    jit: &mut JsJit<R, N>,
     code: &[u8],
     cfg: &CfgFunc,
     im: &StructuredBlock<BlockIdx>,
     loops: &mut Vec<(u32, String)>,
 ) -> Result<(), String> {
     let StructuredBlock::Multiple(m) = im else {
-        return Err("jit(reloop): terminator's `immediate` was not a Multiple block (internal invariant)".into());
+        return Err(
+            "jit(reloop): terminator's `immediate` was not a Multiple block (internal invariant)"
+                .into(),
+        );
     };
     for h in &m.handled {
         let cond = h
@@ -408,7 +458,14 @@ fn emit_dispatch<R: FnRegistry>(
 /// Tier 1 entry point: compile Jade bytecode into JS by restructuring Tier 0's
 /// discovered blocks via `ssa-reloop2` into native `while`/`if`/`switch`/`return`/labeled
 /// `break`/`continue`, instead of Tier 0's flat block-dispatch loop.
-pub fn compile<R: FnRegistry>(code: &[u8], reg: R, mut cfg: Config) -> Result<(String, R), String> {
+pub fn compile<R: FnRegistry, N>(
+    code: &[u8],
+    reg: R,
+    mut cfg: Config<N>,
+) -> Result<(String, R), String>
+where
+    N: portal_jit_host_names::HostMethodNames<crate::JadeTenantMethod>,
+{
     // Force this on regardless of what the caller passed: calling *this* function is
     // itself the choice of Tier 1, and `op_fn` (`crates/jade-vm-jit/src/lib.rs`) reads
     // `Config.prefer_reloop` — propagated by `Clone` into every nested `JsJit` — to decide
@@ -438,8 +495,11 @@ pub fn compile<R: FnRegistry>(code: &[u8], reg: R, mut cfg: Config) -> Result<(S
 /// `Config::nested_body_compiler` override is needed for this tier — that hook exists only
 /// for Tier 2, which cannot be called directly from `jade-vm-jit` without an illegal
 /// reverse crate dependency.
-pub(crate) fn emit_reloop_program<R: FnRegistry>(
-    jit: &mut JsJit<R>,
+pub(crate) fn emit_reloop_program<
+    R: FnRegistry,
+    N: portal_jit_host_names::HostMethodNames<crate::JadeTenantMethod>,
+>(
+    jit: &mut JsJit<R, N>,
     code: &[u8],
     start_ip: usize,
 ) -> Result<(), String> {
@@ -475,8 +535,16 @@ mod tests {
             "const fn = new Function('tenant','nt','state', {:?}); console.log(JSON.stringify(fn(undefined,undefined,[])));",
             body
         );
-        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
-        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("node failed");
+        assert!(
+            output.status.success(),
+            "node stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
@@ -485,7 +553,11 @@ mod tests {
         let then_body = chunk(&[Operation::Lit32 { dest: 1, val: 10 }]);
         let else_body = chunk(&[Operation::Lit32 { dest: 1, val: 20 }]);
         let ret_body = chunk(&[Operation::Ret(Operand::StateRef(1))]);
-        let condjmp_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let condjmp_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
         let then_offset = condjmp_len;
         let jmp_offset = then_offset + then_body.len() as u32;
@@ -493,7 +565,10 @@ mod tests {
         let ret_offset = else_offset + else_body.len() as u32;
 
         for cond_val in [true, false] {
-            let mut code = chunk(&[Operation::Bool { val: cond_val, dest: 0 }]);
+            let mut code = chunk(&[Operation::Bool {
+                val: cond_val,
+                dest: 0,
+            }]);
             code.extend(
                 Operation::CondJmp {
                     cond: Operand::StateRef(0),
@@ -503,13 +578,21 @@ mod tests {
                 .emit(),
             );
             code.extend(then_body.clone());
-            code.extend(Operation::Jmp { target: ret_offset + 10 }.emit());
+            code.extend(
+                Operation::Jmp {
+                    target: ret_offset + 10,
+                }
+                .emit(),
+            );
             code.extend(else_body.clone());
             code.extend(ret_body.clone());
 
             let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
             assert!(js.contains("if ("), "got:\n{js}");
-            assert!(!js.contains("__ip"), "should not fall back to Tier 0 dispatch, got:\n{js}");
+            assert!(
+                !js.contains("__ip"),
+                "should not fall back to Tier 0 dispatch, got:\n{js}"
+            );
 
             let result = run_js(&js);
             let expected = if cond_val { "10" } else { "20" };
@@ -520,8 +603,15 @@ mod tests {
     #[test]
     fn loop_emits_native_while_and_executes_correctly() {
         let ret_body = chunk(&[Operation::Ret(Operand::StateRef(0))]);
-        let body_ops = chunk(&[Operation::Bool { val: false, dest: 0 }]);
-        let header_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let body_ops = chunk(&[Operation::Bool {
+            val: false,
+            dest: 0,
+        }]);
+        let header_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
 
         let mut code = chunk(&[Operation::Bool { val: true, dest: 0 }]);
@@ -529,15 +619,28 @@ mod tests {
         let body_offset = header_offset + header_len;
         let exit_offset = body_offset + body_ops.len() as u32 + jmp_len;
         code.extend(
-            Operation::CondJmp { cond: Operand::StateRef(0), if_true: body_offset, if_false: exit_offset }.emit(),
+            Operation::CondJmp {
+                cond: Operand::StateRef(0),
+                if_true: body_offset,
+                if_false: exit_offset,
+            }
+            .emit(),
         );
         code.extend(body_ops);
-        code.extend(Operation::Jmp { target: header_offset }.emit());
+        code.extend(
+            Operation::Jmp {
+                target: header_offset,
+            }
+            .emit(),
+        );
         code.extend(ret_body);
 
         let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
         assert!(js.contains("while (true) {"), "got:\n{js}");
-        assert!(!js.contains("__ip"), "should not fall back to Tier 0 dispatch, got:\n{js}");
+        assert!(
+            !js.contains("__ip"),
+            "should not fall back to Tier 0 dispatch, got:\n{js}"
+        );
 
         let result = run_js(&js);
         assert_eq!(result, "false", "js:\n{js}");
@@ -552,11 +655,22 @@ mod tests {
     #[test]
     fn return_inside_loop_body_executes_correctly() {
         let entry_ops = chunk(&[Operation::Bool { val: true, dest: 0 }]);
-        let header_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let header_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let body_ops = chunk(&[Operation::Bool { val: true, dest: 1 }]);
-        let body_condjmp_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(1), if_true: 0, if_false: 0 });
+        let body_condjmp_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(1),
+            if_true: 0,
+            if_false: 0,
+        });
         let ret7 = chunk(&[Operation::Ret(Operand::Literal(7))]);
-        let else_ops = chunk(&[Operation::Bool { val: false, dest: 0 }]);
+        let else_ops = chunk(&[Operation::Bool {
+            val: false,
+            dest: 0,
+        }]);
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
         let exit_ops = chunk(&[Operation::Ret(Operand::Literal(99))]);
 
@@ -568,16 +682,30 @@ mod tests {
 
         let mut code = entry_ops;
         code.extend(
-            Operation::CondJmp { cond: Operand::StateRef(0), if_true: body_offset, if_false: exit_offset }.emit(),
+            Operation::CondJmp {
+                cond: Operand::StateRef(0),
+                if_true: body_offset,
+                if_false: exit_offset,
+            }
+            .emit(),
         );
         code.extend(body_ops);
         code.extend(
-            Operation::CondJmp { cond: Operand::StateRef(1), if_true: retblk_offset, if_false: elseblk_offset }
-                .emit(),
+            Operation::CondJmp {
+                cond: Operand::StateRef(1),
+                if_true: retblk_offset,
+                if_false: elseblk_offset,
+            }
+            .emit(),
         );
         code.extend(ret7);
         code.extend(else_ops);
-        code.extend(Operation::Jmp { target: header_offset }.emit());
+        code.extend(
+            Operation::Jmp {
+                target: header_offset,
+            }
+            .emit(),
+        );
         code.extend(exit_ops);
 
         let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
@@ -592,8 +720,16 @@ mod tests {
         let script = format!(
             "function markGuestFn(f, m) {{ return f; }}\n{prelude}\nconst fn = new Function('tenant', 'nt', 'state', {body:?});\nconsole.log(JSON.stringify(fn(undefined, undefined, [])));",
         );
-        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("node failed");
-        assert!(output.status.success(), "node stderr: {}", String::from_utf8_lossy(&output.stderr));
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("node failed");
+        assert!(
+            output.status.success(),
+            "node stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
@@ -615,7 +751,11 @@ mod tests {
             j,
             dest: 0,
         };
-        let call_op = Operation::Call { fn_op: Operand::StateRef(0), args: vec![], dest: 1 };
+        let call_op = Operation::Call {
+            fn_op: Operand::StateRef(0),
+            args: vec![],
+            dest: 1,
+        };
         let ret_op = Operation::Ret(Operand::StateRef(1));
         // The nested body must start *after* the entire top-level block (Fn + Call +
         // Ret), not right after the `Fn` op alone — see the identical note in
@@ -623,7 +763,11 @@ mod tests {
         let j = op_len(&mk(0)) + op_len(&call_op) + op_len(&ret_op);
 
         let bool_len = op_len(&Operation::Bool { val: true, dest: 0 });
-        let cond_len = op_len(&Operation::CondJmp { cond: Operand::StateRef(0), if_true: 0, if_false: 0 });
+        let cond_len = op_len(&Operation::CondJmp {
+            cond: Operand::StateRef(0),
+            if_true: 0,
+            if_false: 0,
+        });
         let jmp_len = op_len(&Operation::Jmp { target: 0 });
         let then_body = chunk(&[Operation::Lit32 { dest: 1, val: 10 }]);
         let else_body = chunk(&[Operation::Lit32 { dest: 1, val: 20 }]);
@@ -636,7 +780,12 @@ mod tests {
 
         let mut fn_body = chunk(&[Operation::Bool { val: true, dest: 0 }]);
         fn_body.extend(
-            Operation::CondJmp { cond: Operand::StateRef(0), if_true: then_offset, if_false: else_offset }.emit(),
+            Operation::CondJmp {
+                cond: Operand::StateRef(0),
+                if_true: then_offset,
+                if_false: else_offset,
+            }
+            .emit(),
         );
         fn_body.extend(then_body);
         fn_body.extend(Operation::Jmp { target: ret_offset }.emit());
@@ -646,14 +795,28 @@ mod tests {
         let mut code: Vec<u8> = mk(j).emit().collect();
         code.extend(call_op.emit());
         code.extend(ret_op.emit());
-        assert_eq!(code.len() as u32, j, "internal test invariant: top-level block length must match the precomputed `j`");
+        assert_eq!(
+            code.len() as u32,
+            j,
+            "internal test invariant: top-level block length must match the precomputed `j`"
+        );
         code.extend_from_slice(&fn_body);
 
         let (js, reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
         let prelude = reg.prelude();
-        assert!(prelude.contains("if ("), "expected the nested body's branch reconstructed as a real `if`, got:\n{prelude}");
-        assert!(!prelude.contains("__ip"), "did not expect a Tier 0 block-dispatch loop, got:\n{prelude}");
+        assert!(
+            prelude.contains("if ("),
+            "expected the nested body's branch reconstructed as a real `if`, got:\n{prelude}"
+        );
+        assert!(
+            !prelude.contains("__ip"),
+            "did not expect a Tier 0 block-dispatch loop, got:\n{prelude}"
+        );
 
-        assert_eq!(run_js_with_prelude(&prelude, &js), "10", "prelude:\n{prelude}\njs:\n{js}");
+        assert_eq!(
+            run_js_with_prelude(&prelude, &js),
+            "10",
+            "prelude:\n{prelude}\njs:\n{js}"
+        );
     }
 }

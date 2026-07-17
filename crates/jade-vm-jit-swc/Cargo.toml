@@ -9,6 +9,7 @@ description.workspace = true
 portal-solutions-jade-vm = { path = "../jade-vm", features = ["alloc"] }
 portal-solutions-jade-vm-jit = { path = "../jade-vm-jit" }
 portal-solutions-jade-cfg-opt = { path = "../jade-cfg-opt" }
+portal-jit-host-names = { path = "../../../codegen-utils/crates/host-method-names" }
 portal-jsc-swc-cfg = { workspace = true }
 portal-jsc-swc-tac = { workspace = true }
 swc_atoms = { workspace = true }
