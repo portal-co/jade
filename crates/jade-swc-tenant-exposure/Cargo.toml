@@ -1,0 +1,17 @@
+[package]
+name = "portal-solutions-jade-swc-tenant-exposure"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Bundle-level SWC pre-pass for Jade tenant accessors and exposed functions"
+
+[dependencies]
+swc_atoms = { workspace = true }
+swc_common = { workspace = true }
+swc_ecma_ast = { workspace = true }
+swc_ecma_codegen = { workspace = true }
+swc_ecma_parser = { workspace = true }
+swc_ecma_visit = { workspace = true }
+
+[dev-dependencies]
+portal-solutions-jade-vm-frontend = { path = "../jade-vm-frontend" }

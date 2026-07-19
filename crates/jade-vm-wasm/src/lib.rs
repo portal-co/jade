@@ -544,8 +544,16 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
 
         self.cache.flush_and_invalidate();
         let invocation = create_null_obj();
-        let _ = Reflect::set(&invocation, &JsValue::from_str("kind"), &JsValue::from_str("apply"));
-        let _ = Reflect::set(&invocation, &JsValue::from_str("thisArg"), &JsValue::UNDEFINED);
+        let _ = Reflect::set(
+            &invocation,
+            &JsValue::from_str("kind"),
+            &JsValue::from_str("apply"),
+        );
+        let _ = Reflect::set(
+            &invocation,
+            &JsValue::from_str("thisArg"),
+            &JsValue::UNDEFINED,
+        );
         let _ = Reflect::set(&invocation, &JsValue::from_str("args"), &call_args);
         Ok(tenant_drive(
             self.tenant,

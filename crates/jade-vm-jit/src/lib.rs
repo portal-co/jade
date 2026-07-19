@@ -689,11 +689,18 @@ impl<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>> Ops for JsJit<R, N> {
         // its generator result is driven once under the ambient capability bits.
         let invocation = format!(
             "{{kind: \"apply\", thisArg: undefined, args: [{}]}}",
-            args.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+            args.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
         );
         let call = tenant_drive(
             &self.cfg.names,
-            tenant_call(&self.cfg.names, JadeTenantMethod::Invoke, &format!("{fn_val}, {invocation}")),
+            tenant_call(
+                &self.cfg.names,
+                JadeTenantMethod::Invoke,
+                &format!("{fn_val}, {invocation}"),
+            ),
             self.cfg.add_async,
             self.cfg.add_gen,
         );

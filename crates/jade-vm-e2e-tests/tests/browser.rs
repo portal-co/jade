@@ -29,7 +29,7 @@
 //! 150.0.7871.47 / chromedriver 150.0.7871.46.
 
 use portal_solutions_jade_vm_frontend::compile_to_bytecode;
-use portal_solutions_jade_vm_jit::{compile, Config, VecRegistry};
+use portal_solutions_jade_vm_jit::{Config, VecRegistry, compile};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -41,13 +41,15 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
 /// above).
 fn compile_to_js_function(src: &str) -> js_sys::Function {
     let bytecode = compile_to_bytecode(src).expect("frontend compile failed");
-    let (body, _reg) = compile(&bytecode, VecRegistry::new(), Config::default()).expect("JIT compile failed");
+    let (body, _reg) =
+        compile(&bytecode, VecRegistry::new(), Config::default()).expect("JIT compile failed");
     js_sys::Function::new_with_args("state", &body)
 }
 
 fn call0(f: &js_sys::Function) -> JsValue {
     let state = js_sys::Array::new();
-    f.call1(&JsValue::UNDEFINED, &state).expect("compiled function threw")
+    f.call1(&JsValue::UNDEFINED, &state)
+        .expect("compiled function threw")
 }
 
 #[wasm_bindgen_test]
@@ -109,11 +111,15 @@ fn minimal_tenant() -> JsValue {
 
 #[wasm_bindgen_test]
 fn object_literal_and_member_access_via_tenant() {
-    let bytecode = compile_to_bytecode("var o = {}; o[1] = 42; return o[1];").expect("frontend compile failed");
-    let (body, _reg) = compile(&bytecode, VecRegistry::new(), Config::default()).expect("JIT compile failed");
+    let bytecode = compile_to_bytecode("var o = {}; o[1] = 42; return o[1];")
+        .expect("frontend compile failed");
+    let (body, _reg) =
+        compile(&bytecode, VecRegistry::new(), Config::default()).expect("JIT compile failed");
     let f = js_sys::Function::new_with_args("tenant, nt, state", &body);
     let tenant = minimal_tenant();
     let state = js_sys::Array::new();
-    let result = f.call3(&JsValue::UNDEFINED, &tenant, &JsValue::UNDEFINED, &state).expect("compiled function threw");
+    let result = f
+        .call3(&JsValue::UNDEFINED, &tenant, &JsValue::UNDEFINED, &state)
+        .expect("compiled function threw");
     assert_eq!(result.as_f64(), Some(42.0));
 }

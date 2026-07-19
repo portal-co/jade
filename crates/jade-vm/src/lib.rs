@@ -213,7 +213,10 @@ mod tests {
         }
 
         // AWAIT: opcode (2) + LSB val (4) + raw dest (4) = 10 bytes
-        let await_op = Operation::Await { val: Operand::StateRef(3), dest: 9 };
+        let await_op = Operation::Await {
+            val: Operand::StateRef(3),
+            dest: 9,
+        };
         let bytes: Vec<u8> = await_op.emit().collect();
         assert_eq!(bytes.len(), 10);
         let (parsed_op, _) = Operation::parse(&bytes).unwrap();
@@ -225,7 +228,10 @@ mod tests {
         }
 
         // LIT32: opcode (2) + raw dest (4) + raw val (4) = 10 bytes
-        let lit_op = Operation::Lit32 { dest: 2, val: 0xDEAD_BEEF };
+        let lit_op = Operation::Lit32 {
+            dest: 2,
+            val: 0xDEAD_BEEF,
+        };
         let bytes: Vec<u8> = lit_op.emit().collect();
         assert_eq!(bytes.len(), 10);
         let (parsed_op, _) = Operation::parse(&bytes).unwrap();
@@ -295,7 +301,12 @@ mod tests {
         assert_eq!(bytes.len(), 14);
         let (parsed_op, remaining) = Operation::parse(&bytes).unwrap();
         assert!(remaining.is_empty());
-        if let Operation::CondJmp { cond, if_true, if_false } = parsed_op {
+        if let Operation::CondJmp {
+            cond,
+            if_true,
+            if_false,
+        } = parsed_op
+        {
             assert_eq!(cond, Operand::StateRef(0));
             assert_eq!(if_true, 10);
             assert_eq!(if_false, 20);
@@ -318,7 +329,12 @@ mod tests {
         let bytes: Vec<u8> = switch_op.emit().collect();
         let (parsed_op, remaining) = Operation::parse(&bytes).unwrap();
         assert!(remaining.is_empty());
-        if let Operation::Switch { val, cases, default_target } = parsed_op {
+        if let Operation::Switch {
+            val,
+            cases,
+            default_target,
+        } = parsed_op
+        {
             assert_eq!(val, Operand::StateRef(1));
             assert_eq!(cases, vec![(2, 100), (3, 200)]);
             assert_eq!(default_target, 300);
@@ -358,7 +374,12 @@ mod tests {
         let (parsed, rest) = Operation::parse(&bytes).unwrap();
         assert!(rest.is_empty());
         match parsed {
-            Operation::Set { obj, key, val, dest } => {
+            Operation::Set {
+                obj,
+                key,
+                val,
+                dest,
+            } => {
                 assert_eq!(obj, Operand::StateRef(1));
                 assert_eq!(key, Operand::Literal(7));
                 assert_eq!(val, Operand::StateRef(2));

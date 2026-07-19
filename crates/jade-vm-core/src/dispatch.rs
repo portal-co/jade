@@ -43,13 +43,30 @@ pub trait Ops {
 
     // Opcode handlers (one per value-producing opcode) --------------------
     fn op_global(&self) -> Self::Value;
-    fn op_fn(&mut self, code: &[u8], variant: Self::Value, closure_args: Self::Value, spanner: Self::Value, j: u32, parent_state: Self::Value) -> Result<Self::Value, Self::Error>;
+    fn op_fn(
+        &mut self,
+        code: &[u8],
+        variant: Self::Value,
+        closure_args: Self::Value,
+        spanner: Self::Value,
+        j: u32,
+        parent_state: Self::Value,
+    ) -> Result<Self::Value, Self::Error>;
     fn op_lit32(&self, val: u32) -> Self::Value;
     fn op_arr(&self, items: Vec<Self::Value>) -> Self::Value;
     fn op_str(&self, items: Vec<Self::Value>) -> Self::Value;
-    fn op_litobj(&self, spread: Option<Self::Value>, pairs: Vec<(Self::Value, Self::Value)>) -> Self::Value;
+    fn op_litobj(
+        &self,
+        spread: Option<Self::Value>,
+        pairs: Vec<(Self::Value, Self::Value)>,
+    ) -> Self::Value;
     fn op_new_target(&self) -> Self::Value;
-    fn op_call(&mut self, code: &[u8], fn_val: Self::Value, args: Vec<Self::Value>) -> Result<Self::Value, Self::Error>;
+    fn op_call(
+        &mut self,
+        code: &[u8],
+        fn_val: Self::Value,
+        args: Vec<Self::Value>,
+    ) -> Result<Self::Value, Self::Error>;
     fn op_bool(&self, val: bool) -> Self::Value;
     fn op_eq(&self, a: Self::Value, b: Self::Value) -> Self::Value;
     fn op_ne(&self, a: Self::Value, b: Self::Value) -> Self::Value;
@@ -84,11 +101,7 @@ where
 /// none of these produce a value via a normal `op_*()`+`set()` pair; each caller's own
 /// driving loop handles them directly (updating its own program counter, or
 /// returning) before ever reaching this dispatcher.
-pub fn exec_op<P>(
-    op: Operation,
-    code: &[u8],
-    platform: &mut P,
-) -> Result<(), <P as Ops>::Error>
+pub fn exec_op<P>(op: Operation, code: &[u8], platform: &mut P) -> Result<(), <P as Ops>::Error>
 where
     P: State + Ops<Value = <P as State>::Value>,
 {
@@ -98,7 +111,13 @@ where
             platform.set(dest, val);
             Ok(())
         }
-        Operation::Fn { variant, closure_args, spanner, j, dest } => {
+        Operation::Fn {
+            variant,
+            closure_args,
+            spanner,
+            j,
+            dest,
+        } => {
             platform.flush();
             let parent = platform.state_ref();
             let r0 = resolve(variant, platform);
@@ -129,12 +148,16 @@ where
             let mut iter = pairs.into_iter();
             let spread = if c.as_i32() < 0 {
                 Some(resolve(iter.next().unwrap().0, platform))
-            } else { None };
-            let kv: Vec<_> = iter.map(|(k, v)| {
-                let k = resolve(k, platform);
-                let v = resolve(v, platform);
-                (k, v)
-            }).collect();
+            } else {
+                None
+            };
+            let kv: Vec<_> = iter
+                .map(|(k, v)| {
+                    let k = resolve(k, platform);
+                    let v = resolve(v, platform);
+                    (k, v)
+                })
+                .collect();
             let obj = platform.op_litobj(spread, kv);
             match key {
                 Operand::Literal(idx) => platform.set(idx, obj),
@@ -204,7 +227,12 @@ where
             platform.set(dest, val);
             Ok(())
         }
-        Operation::Sel { cond, then, else_, dest } => {
+        Operation::Sel {
+            cond,
+            then,
+            else_,
+            dest,
+        } => {
             let cv = resolve(cond, platform);
             let tv = resolve(then, platform);
             let ev = resolve(else_, platform);
@@ -219,7 +247,12 @@ where
             platform.set(dest, val);
             Ok(())
         }
-        Operation::Set { obj, key, val, dest } => {
+        Operation::Set {
+            obj,
+            key,
+            val,
+            dest,
+        } => {
             let o = resolve(obj, platform);
             let k = resolve(key, platform);
             let v = resolve(val, platform);

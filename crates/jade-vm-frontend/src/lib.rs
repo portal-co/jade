@@ -112,7 +112,8 @@ pub fn compile_to_bytecode_with_variant(
             type_params: None,
             return_type: None,
         };
-        let tfunc = TFunc::try_from(&synthetic).map_err(|e| FrontendError::Tac(format!("{e:?}")))?;
+        let tfunc =
+            TFunc::try_from(&synthetic).map_err(|e| FrontendError::Tac(format!("{e:?}")))?;
         // Shared TAC canonicalizer + SSA constant-fold/DCE pass (see
         // `docs/bytecode-cfg-plan.md`); the same `jade-cfg-opt::optimize_tfunc` an
         // optional JIT plugin (Tier 2) can also apply to its own reconstructed CFG.
@@ -159,8 +160,12 @@ fn compile_program(entry: TFunc) -> Result<Vec<u8>, FrontendError> {
     while i < funcs.len() {
         let mut lowering = FnLowering::new(&funcs[i].cfg);
         let mut discovered = Vec::new();
-        let mut phase = FnPhase::Measure { discovered: &mut discovered };
-        let len = lowering.compile_blocks(funcs[i].entry, 0, &mut phase)?.len() as u32;
+        let mut phase = FnPhase::Measure {
+            discovered: &mut discovered,
+        };
+        let len = lowering
+            .compile_blocks(funcs[i].entry, 0, &mut phase)?
+            .len() as u32;
         region_lens.push(len);
         children_base.push(funcs.len() as u32);
         funcs.extend(discovered);
@@ -179,7 +184,10 @@ fn compile_program(entry: TFunc) -> Result<Vec<u8>, FrontendError> {
     let mut out = vec![0u8; cursor as usize];
     for (k, tfunc) in funcs.iter().enumerate() {
         let mut lowering = FnLowering::new(&tfunc.cfg);
-        let mut phase = FnPhase::Emit { children_base: children_base[k], region_offsets: &region_offsets };
+        let mut phase = FnPhase::Emit {
+            children_base: children_base[k],
+            region_offsets: &region_offsets,
+        };
         let bytes = lowering.compile_blocks(tfunc.entry, region_offsets[k], &mut phase)?;
         debug_assert_eq!(
             bytes.len() as u32,
@@ -224,7 +232,10 @@ enum FnPhase<'a> {
     /// Nth nested `Item::Func` encountered (0-indexed, same traversal order phase 1 used
     /// — see `FnLowering::nested_fn_counter`) to its global function index via
     /// `children_base + N`, then to its real byte offset via `region_offsets`.
-    Emit { children_base: u32, region_offsets: &'a [u32] },
+    Emit {
+        children_base: u32,
+        region_offsets: &'a [u32],
+    },
 }
 
 struct FnLowering<'a> {
@@ -242,7 +253,13 @@ struct FnLowering<'a> {
 
 impl<'a> FnLowering<'a> {
     fn new(tcfg: &'a TCfg) -> Self {
-        Self { tcfg, slots: HashMap::new(), next_slot: 0, undefined_slot: None, nested_fn_counter: 0 }
+        Self {
+            tcfg,
+            slots: HashMap::new(),
+            next_slot: 0,
+            undefined_slot: None,
+            nested_fn_counter: 0,
+        }
     }
 }
 
@@ -282,7 +299,13 @@ impl<'a> FnLowering<'a> {
             if !matches!(block.post.catch, TCatch::Throw) {
                 return unsupported("try/catch (Jade bytecode has no exception-handling opcode)");
             }
-            lowered.push((*id, LoweredBlock { ops_bytes, term: block.post.term.clone() }));
+            lowered.push((
+                *id,
+                LoweredBlock {
+                    ops_bytes,
+                    term: block.post.term.clone(),
+                },
+            ));
         }
 
         // Placeholder-target terminator lengths, to compute each block's byte offset.
@@ -334,9 +357,15 @@ impl<'a> FnLowering<'a> {
         Ok(match term {
             TTerm::Return(_) => vec![],
             TTerm::Jmp(id) => vec![*id],
-            TTerm::CondJmp { if_true, if_false, .. } => vec![*if_true, *if_false],
-            TTerm::Switch { .. } => return unsupported("`switch` statement (JS `switch`, not yet lowered)"),
-            TTerm::Throw(_) => return unsupported("`throw` (Jade bytecode has no exception-handling opcode)"),
+            TTerm::CondJmp {
+                if_true, if_false, ..
+            } => vec![*if_true, *if_false],
+            TTerm::Switch { .. } => {
+                return unsupported("`switch` statement (JS `switch`, not yet lowered)");
+            }
+            TTerm::Throw(_) => {
+                return unsupported("`throw` (Jade bytecode has no exception-handling opcode)");
+            }
             TTerm::Tail { .. } => return unsupported("tail call"),
             TTerm::Default => return unsupported("internal invariant: unreachable TAC terminator"),
         })
@@ -352,9 +381,7 @@ impl<'a> FnLowering<'a> {
         offsets: &HashMap<TBlockId, u32>,
         placeholder: bool,
     ) -> Result<Vec<u8>, FrontendError> {
-        let target = |id: &TBlockId| -> u32 {
-            if placeholder { 0 } else { offsets[id] }
-        };
+        let target = |id: &TBlockId| -> u32 { if placeholder { 0 } else { offsets[id] } };
         Ok(match term {
             TTerm::Return(val) => {
                 let op = match val {
@@ -364,15 +391,25 @@ impl<'a> FnLowering<'a> {
                 Operation::Ret(op).emit().collect()
             }
             TTerm::Jmp(id) => Operation::Jmp { target: target(id) }.emit().collect(),
-            TTerm::CondJmp { cond, if_true, if_false } => {
+            TTerm::CondJmp {
+                cond,
+                if_true,
+                if_false,
+            } => {
                 let cond_op = self.operand_for(cond);
-                Operation::CondJmp { cond: cond_op, if_true: target(if_true), if_false: target(if_false) }
-                    .emit()
-                    .collect()
+                Operation::CondJmp {
+                    cond: cond_op,
+                    if_true: target(if_true),
+                    if_false: target(if_false),
+                }
+                .emit()
+                .collect()
             }
             TTerm::Switch { .. } | TTerm::Throw(_) | TTerm::Tail { .. } | TTerm::Default => {
                 // `discover_reachable` already rejects these before we ever get here.
-                return unsupported("internal invariant: unreachable TAC terminator reached emit_terminator");
+                return unsupported(
+                    "internal invariant: unreachable TAC terminator reached emit_terminator",
+                );
             }
         })
     }
@@ -413,7 +450,12 @@ impl<'a> FnLowering<'a> {
     /// its `LId` (a plain identifier gets its own slot; a member write also emits the
     /// Jade `SET` and discards the write's own result slot). `phase` is only consulted by
     /// `lower_item`'s `Item::Func` arm; see [`FnPhase`].
-    fn lower_stmt(&mut self, stmt: &TStmt, phase: &mut FnPhase, out: &mut Vec<u8>) -> Result<(), FrontendError> {
+    fn lower_stmt(
+        &mut self,
+        stmt: &TStmt,
+        phase: &mut FnPhase,
+        out: &mut Vec<u8>,
+    ) -> Result<(), FrontendError> {
         match &stmt.left {
             LId::Id { id } => {
                 let dest = self.slot_for(id);
@@ -479,21 +521,40 @@ impl<'a> FnLowering<'a> {
             Item::Mem { obj, mem } => {
                 let obj_op = self.operand_for(obj);
                 let key_op = self.operand_for(mem);
-                out.extend(Operation::Get { obj: obj_op, key: key_op, dest }.emit());
+                out.extend(
+                    Operation::Get {
+                        obj: obj_op,
+                        key: key_op,
+                        dest,
+                    }
+                    .emit(),
+                );
                 Ok(())
             }
-            Item::Select { cond, then, otherwise } => {
+            Item::Select {
+                cond,
+                then,
+                otherwise,
+            } => {
                 let cond_op = self.operand_for(cond);
                 let then_op = self.operand_for(then);
                 let else_op = self.operand_for(otherwise);
                 out.extend(
-                    Operation::Sel { cond: cond_op, then: then_op, else_: else_op, dest }.emit(),
+                    Operation::Sel {
+                        cond: cond_op,
+                        then: then_op,
+                        else_: else_op,
+                        dest,
+                    }
+                    .emit(),
                 );
                 Ok(())
             }
             Item::Call { callee, args } => {
                 let TCallee::Val(f) = callee else {
-                    return unsupported("call target other than a plain value (method calls, `super`, `import()`, `eval`)");
+                    return unsupported(
+                        "call target other than a plain value (method calls, `super`, `import()`, `eval`)",
+                    );
                 };
                 let mut arg_ops = Vec::with_capacity(args.len());
                 for a in args {
@@ -503,7 +564,14 @@ impl<'a> FnLowering<'a> {
                     arg_ops.push(self.operand_for(&a.value));
                 }
                 let fn_op = self.operand_for(f);
-                out.extend(Operation::Call { fn_op, args: arg_ops, dest }.emit());
+                out.extend(
+                    Operation::Call {
+                        fn_op,
+                        args: arg_ops,
+                        dest,
+                    }
+                    .emit(),
+                );
                 Ok(())
             }
             Item::Arr { members } => {
@@ -560,7 +628,9 @@ impl<'a> FnLowering<'a> {
                 }
                 Ok(())
             }
-            Item::Meta { prop: MetaPropKind::NewTarget } => {
+            Item::Meta {
+                prop: MetaPropKind::NewTarget,
+            } => {
                 out.extend(Operation::NewTarget(dest).emit());
                 Ok(())
             }
@@ -579,9 +649,10 @@ impl<'a> FnLowering<'a> {
                         discovered.push(func.clone());
                         0
                     }
-                    FnPhase::Emit { children_base, region_offsets } => {
-                        region_offsets[(*children_base + n) as usize]
-                    }
+                    FnPhase::Emit {
+                        children_base,
+                        region_offsets,
+                    } => region_offsets[(*children_base + n) as usize],
                 };
                 // 0=sync, 1=async, 2=sync generator, 3=async generator — the same 2-bit
                 // encoding every JIT tier's `fn_variant`/`effectiveVariant` decodes.
@@ -613,7 +684,13 @@ impl<'a> FnLowering<'a> {
                         n.value
                     ));
                 }
-                out.extend(Operation::Lit32 { dest, val: n.value as u32 }.emit());
+                out.extend(
+                    Operation::Lit32 {
+                        dest,
+                        val: n.value as u32,
+                    }
+                    .emit(),
+                );
                 Ok(())
             }
             Lit::Bool(b) => {
@@ -626,7 +703,15 @@ impl<'a> FnLowering<'a> {
                 };
                 let op = self.lower_string_into_fresh_slot(str_val, out);
                 // Alias into `dest` (see `Item::Just` for why a SEL is used as a move).
-                out.extend(Operation::Sel { cond: Operand::Literal(1), then: op, else_: op, dest }.emit());
+                out.extend(
+                    Operation::Sel {
+                        cond: Operand::Literal(1),
+                        then: op,
+                        else_: op,
+                        dest,
+                    }
+                    .emit(),
+                );
                 Ok(())
             }
             Lit::Null(_) => unsupported("`null` literal (no Jade opcode produces it)"),
@@ -662,7 +747,11 @@ impl<'a> FnLowering<'a> {
             BinaryOp::LtEq => Operation::Le { a, b, dest }.emit().collect(),
             BinaryOp::Gt => Operation::Gt { a, b, dest }.emit().collect(),
             BinaryOp::GtEq => Operation::Ge { a, b, dest }.emit().collect(),
-            other => return unsupported(format!("binary operator {other:?} (only ===, !==, <, <=, >, >= have a Jade opcode)")),
+            other => {
+                return unsupported(format!(
+                    "binary operator {other:?} (only ===, !==, <, <=, >, >= have a Jade opcode)"
+                ));
+            }
         };
         out.extend(bytes);
         Ok(())
@@ -672,7 +761,7 @@ impl<'a> FnLowering<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use portal_solutions_jade_vm_jit::{compile, Config, VecRegistry};
+    use portal_solutions_jade_vm_jit::{Config, VecRegistry, compile};
 
     /// Compile `src` end-to-end (parse -> TAC -> bytecode -> JIT) and return the emitted
     /// JS source. Structural assertions on this string are the same style already used by
@@ -681,7 +770,8 @@ mod tests {
     /// `jade-vm-e2e-tests`.
     fn jit_js(src: &str) -> String {
         let bytecode = compile_to_bytecode(src).expect("frontend compile failed");
-        let (js, _reg) = compile(&bytecode, VecRegistry::new(), Config::default()).expect("JIT compile failed");
+        let (js, _reg) =
+            compile(&bytecode, VecRegistry::new(), Config::default()).expect("JIT compile failed");
         js
     }
 
@@ -699,7 +789,11 @@ mod tests {
             .arg(&script)
             .output()
             .expect("failed to run node");
-        assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
@@ -732,7 +826,10 @@ mod tests {
 
     #[test]
     fn compiles_while_loop() {
-        assert_eq!(run_js("var x = true; while (x) { x = false; } return x;"), "false");
+        assert_eq!(
+            run_js("var x = true; while (x) { x = false; } return x;"),
+            "false"
+        );
     }
 
     #[test]
@@ -740,16 +837,22 @@ mod tests {
         let js = jit_js(
             "var x = true; while (x) { x = false; if (true) { var y = 1; } else { var y = 2; } } return x;",
         );
-        assert!(js.contains("__ip"), "expected a jump-based dispatch loop, got:\n{js}");
+        assert!(
+            js.contains("__ip"),
+            "expected a jump-based dispatch loop, got:\n{js}"
+        );
         assert_eq!(
-            run_js("var x = true; while (x) { x = false; if (true) { var y = 1; } else { var y = 2; } } return x;"),
+            run_js(
+                "var x = true; while (x) { x = false; if (true) { var y = 1; } else { var y = 2; } } return x;"
+            ),
             "false"
         );
     }
 
     #[test]
     fn rejects_unsupported_switch_statement() {
-        let err = compile_to_bytecode("switch (1) { case 1: return 1; default: return 0; }").unwrap_err();
+        let err =
+            compile_to_bytecode("switch (1) { case 1: return 1; default: return 0; }").unwrap_err();
         assert!(matches!(err, FrontendError::Unsupported(_)), "got: {err:?}");
     }
 
@@ -760,7 +863,9 @@ mod tests {
         // content. Jade bytecode is jump-based now, so `return` is valid in any block —
         // this compiles *and* executes correctly, with no special-casing at all.
         assert_eq!(
-            run_js("var x = true; while (x) { if (true) { return 7; } else { x = false; } } return 99;"),
+            run_js(
+                "var x = true; while (x) { if (true) { return 7; } else { x = false; } } return 99;"
+            ),
             "7"
         );
     }
@@ -777,14 +882,23 @@ mod tests {
     /// `undefined` for both `tenant` and `nt`.
     fn run_js_with_tenant(src: &str) -> String {
         let bytecode = compile_to_bytecode(src).expect("frontend compile failed");
-        let (body, reg) = compile(&bytecode, VecRegistry::new(), Config::default()).expect("JIT compile failed");
+        let (body, reg) =
+            compile(&bytecode, VecRegistry::new(), Config::default()).expect("JIT compile failed");
         let script = format!(
             "function markGuestFn(f, m) {{ return f; }}\n{prelude}\nconst fn = new Function('tenant', 'nt', 'state', {body});\nconsole.log(JSON.stringify(fn(undefined, undefined, [])));",
             prelude = reg.prelude(),
             body = serde_json_escape(&body),
         );
-        let output = std::process::Command::new("node").arg("-e").arg(&script).output().expect("failed to run node");
-        assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("failed to run node");
+        assert!(
+            output.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
@@ -862,10 +976,16 @@ mod tests {
     fn constant_condition_is_folded_away() {
         let js = jit_js("if (true) { return 111; } else { return 222; }");
         assert!(js.contains("111"), "got:\n{js}");
-        assert!(!js.contains("222"), "expected the untaken branch to be folded away, got:\n{js}");
+        assert!(
+            !js.contains("222"),
+            "expected the untaken branch to be folded away, got:\n{js}"
+        );
 
         let js = jit_js("if (false) { return 111; } else { return 222; }");
-        assert!(!js.contains("111"), "expected the untaken branch to be folded away, got:\n{js}");
+        assert!(
+            !js.contains("111"),
+            "expected the untaken branch to be folded away, got:\n{js}"
+        );
         assert!(js.contains("222"), "got:\n{js}");
     }
 }
