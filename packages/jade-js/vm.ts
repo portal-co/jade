@@ -33,7 +33,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
-                state[code().getUint32(ip,true)]=markGuestFn(spanner(function(this: any,...args: any[]): any{
+                state[code().getUint32(ip,true)]=yield* tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
                     const o=create(null);
                     for(const a in closureArgs)o[closureArgs[a]]={
                         get:()=>state[closureArgs[a]],
@@ -57,7 +57,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                         }),
                         ...args
                     ]);
-                },...spans),{abi:"closure"});
+                },...spans),{abi:"closure"})),addAsync,addGen);
                 ip += 4;
                 break;
             }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {
@@ -95,10 +95,11 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 let n = code().getUint32(ip,true); ip += 4;
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
-                const _callRaw = apply(fn, undefined, callArgs);
-                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof (_callRaw as any).next === 'function')
-                    ? yield* tenant.driveTenant(tenant.createGuestGen(_callRaw as Generator),addAsync,addGen)
-                    : _callRaw;
+                state[code().getUint32(ip,true)] = yield* tenant.driveTenant(
+                    tenant.invoke(fn, {kind:"apply", thisArg:undefined, args:callArgs}),
+                    addAsync,
+                    addGen,
+                );
                 ip += 4;
                 break;
             }case 12: state[code().getUint32(ip+4,true)]=!!code().getUint32(ip,true);ip+=8;break;case 13: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a===b; ip+=4; break; }case 14: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a!==b; ip+=4; break; }case 15: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a<b;   ip+=4; break; }case 16: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a<=b;  ip+=4; break; }case 17: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>b;   ip+=4; break; }case 18: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>=b;  ip+=4; break; }case 19: { const c=arg(),t=arg(),e=arg(); state[code().getUint32(ip,true)]=c?t:e; ip+=4; break; }case 20: ip=code().getUint32(ip,true);break;case 21: {
@@ -146,7 +147,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
-                state[code().getUint32(ip,true)]=markGuestFn(spanner(function(this: any,...args: any[]): any{
+                state[code().getUint32(ip,true)]=await tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
                     const o=create(null);
                     for(const a in closureArgs)o[closureArgs[a]]={
                         get:()=>state[closureArgs[a]],
@@ -170,7 +171,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                         }),
                         ...args
                     ]);
-                },...spans),{abi:"closure"});
+                },...spans),{abi:"closure"})),addAsync,addGen);
                 ip += 4;
                 break;
             }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {
@@ -208,10 +209,11 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 let n = code().getUint32(ip,true); ip += 4;
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
-                const _callRaw = apply(fn, undefined, callArgs);
-                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof (_callRaw as any).next === 'function')
-                    ? await tenant.driveTenant(tenant.createGuestGen(_callRaw as Generator),addAsync,addGen)
-                    : _callRaw;
+                state[code().getUint32(ip,true)] = await tenant.driveTenant(
+                    tenant.invoke(fn, {kind:"apply", thisArg:undefined, args:callArgs}),
+                    addAsync,
+                    addGen,
+                );
                 ip += 4;
                 break;
             }case 12: state[code().getUint32(ip+4,true)]=!!code().getUint32(ip,true);ip+=8;break;case 13: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a===b; ip+=4; break; }case 14: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a!==b; ip+=4; break; }case 15: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a<b;   ip+=4; break; }case 16: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a<=b;  ip+=4; break; }case 17: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>b;   ip+=4; break; }case 18: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>=b;  ip+=4; break; }case 19: { const c=arg(),t=arg(),e=arg(); state[code().getUint32(ip,true)]=c?t:e; ip+=4; break; }case 20: ip=code().getUint32(ip,true);break;case 21: {
@@ -259,7 +261,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
-                state[code().getUint32(ip,true)]=markGuestFn(spanner(function(this: any,...args: any[]): any{
+                state[code().getUint32(ip,true)]=yield* tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
                     const o=create(null);
                     for(const a in closureArgs)o[closureArgs[a]]={
                         get:()=>state[closureArgs[a]],
@@ -283,7 +285,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                         }),
                         ...args
                     ]);
-                },...spans),{abi:"closure"});
+                },...spans),{abi:"closure"})),addAsync,addGen);
                 ip += 4;
                 break;
             }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {
@@ -321,10 +323,11 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 let n = code().getUint32(ip,true); ip += 4;
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
-                const _callRaw = apply(fn, undefined, callArgs);
-                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof (_callRaw as any).next === 'function')
-                    ? yield* tenant.driveTenant(tenant.createGuestGen(_callRaw as Generator),addAsync,addGen)
-                    : _callRaw;
+                state[code().getUint32(ip,true)] = yield* tenant.driveTenant(
+                    tenant.invoke(fn, {kind:"apply", thisArg:undefined, args:callArgs}),
+                    addAsync,
+                    addGen,
+                );
                 ip += 4;
                 break;
             }case 12: state[code().getUint32(ip+4,true)]=!!code().getUint32(ip,true);ip+=8;break;case 13: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a===b; ip+=4; break; }case 14: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a!==b; ip+=4; break; }case 15: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a<b;   ip+=4; break; }case 16: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a<=b;  ip+=4; break; }case 17: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>b;   ip+=4; break; }case 18: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>=b;  ip+=4; break; }case 19: { const c=arg(),t=arg(),e=arg(); state[code().getUint32(ip,true)]=c?t:e; ip+=4; break; }case 20: ip=code().getUint32(ip,true);break;case 21: {
@@ -372,7 +375,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
-                state[code().getUint32(ip,true)]=markGuestFn(spanner(function(this: any,...args: any[]): any{
+                state[code().getUint32(ip,true)]=tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
                     const o=create(null);
                     for(const a in closureArgs)o[closureArgs[a]]={
                         get:()=>state[closureArgs[a]],
@@ -396,7 +399,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                         }),
                         ...args
                     ]);
-                },...spans),{abi:"closure"});
+                },...spans),{abi:"closure"})),addAsync,addGen);
                 ip += 4;
                 break;
             }case 6: state[code().getUint32(ip,true)]=code().getUint32(ip+4,true);ip+=8;break;case 7:  {
@@ -434,10 +437,11 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 let n = code().getUint32(ip,true); ip += 4;
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
-                const _callRaw = apply(fn, undefined, callArgs);
-                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof (_callRaw as any).next === 'function')
-                    ? tenant.driveTenant(tenant.createGuestGen(_callRaw as Generator),addAsync,addGen)
-                    : _callRaw;
+                state[code().getUint32(ip,true)] = tenant.driveTenant(
+                    tenant.invoke(fn, {kind:"apply", thisArg:undefined, args:callArgs}),
+                    addAsync,
+                    addGen,
+                );
                 ip += 4;
                 break;
             }case 12: state[code().getUint32(ip+4,true)]=!!code().getUint32(ip,true);ip+=8;break;case 13: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a===b; ip+=4; break; }case 14: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a!==b; ip+=4; break; }case 15: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a<b;   ip+=4; break; }case 16: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a<=b;  ip+=4; break; }case 17: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>b;   ip+=4; break; }case 18: { const a=arg(),b=arg(); state[code().getUint32(ip,true)]=a>=b;  ip+=4; break; }case 19: { const c=arg(),t=arg(),e=arg(); state[code().getUint32(ip,true)]=c?t:e; ip+=4; break; }case 20: ip=code().getUint32(ip,true);break;case 21: {

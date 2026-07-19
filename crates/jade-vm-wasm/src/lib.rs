@@ -442,9 +442,17 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
             wrapper
         };
 
-        // Register with the effective variant so op_call's fast path uses the right executor.
+        // Register with the effective variant for backend-local bookkeeping. The
+        // public callable is adopted through makeFunction below, so ownership
+        // and tenant-side function properties are established uniformly.
         registry_set(&spanned, effective_variant, j, &closure_slots_reg);
-        Ok(spanned)
+        Ok(tenant_drive(
+            self.tenant,
+            "makeFunction",
+            &[spanned],
+            self.add_async,
+            self.add_gen,
+        ))
     }
 
     fn op_lit32(&self, val: u32) -> JsValue {
@@ -535,12 +543,17 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         }
 
         self.cache.flush_and_invalidate();
-        Ok(Reflect::apply(
-            fn_val.unchecked_ref::<Function>(),
-            &JsValue::UNDEFINED,
-            &call_args,
-        )
-        .unwrap_or(JsValue::UNDEFINED))
+        let invocation = create_null_obj();
+        let _ = Reflect::set(&invocation, &JsValue::from_str("kind"), &JsValue::from_str("apply"));
+        let _ = Reflect::set(&invocation, &JsValue::from_str("thisArg"), &JsValue::UNDEFINED);
+        let _ = Reflect::set(&invocation, &JsValue::from_str("args"), &call_args);
+        Ok(tenant_drive(
+            self.tenant,
+            "invoke",
+            &[fn_val, invocation],
+            self.add_async,
+            self.add_gen,
+        ))
     }
 
     fn op_bool(&self, val: bool) -> JsValue {

@@ -71,7 +71,7 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                     ,[spanner,...spans]=arg()??[(a:any)=>a];
                 const j = code().getUint32(ip,true);
                 ip+=4;
-                state[code().getUint32(ip,true)]=markGuestFn(spanner(function(this: any,...args: any[]): any{
+                state[code().getUint32(ip,true)]=__DRIVE__tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
                     const o=create(null);
                     for(const a in closureArgs)o[closureArgs[a]]={
                         get:()=>state[closureArgs[a]],
@@ -95,7 +95,7 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                         }),
                         ...args
                     ]);
-                },...spans),{abi:"closure"});
+                },...spans),{abi:"closure"})),addAsync,addGen);
                 ip += 4;
                 break;
             }`,
@@ -139,10 +139,11 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                 let n = code().getUint32(ip,true); ip += 4;
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
-                const _callRaw = apply(fn, undefined, callArgs);
-                state[code().getUint32(ip,true)] = (addGen && _callRaw && typeof (_callRaw as any).next === 'function')
-                    ? __DRIVE__tenant.driveTenant(tenant.createGuestGen(_callRaw as Generator),addAsync,addGen)
-                    : _callRaw;
+                state[code().getUint32(ip,true)] = __DRIVE__tenant.driveTenant(
+                    tenant.invoke(fn, {kind:"apply", thisArg:undefined, args:callArgs}),
+                    addAsync,
+                    addGen,
+                );
                 ip += 4;
                 break;
             }`,

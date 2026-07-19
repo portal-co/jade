@@ -12,7 +12,7 @@ import type { Tenant } from "./index.ts";
 export const WSDOM_TENANT_RUNTIME_IMPORT = "@portal-solutions/jade-js/wsdom-tenant-runtime";
 
 type Callback = (value: unknown) => unknown;
-type ServerDescriptor = { kind: "server"; capability: string; id: number };
+type ServerDescriptor = { kind: "server"; capability: string; id: number; callable?: boolean };
 
 type Request = {
   capability: string;
@@ -46,6 +46,7 @@ export function installServerTenantRuntime(
   capability: string,
 ): Tenant {
   let nextRequestId = 1;
+  let tenant!: Tenant;
   const serverShims = new WeakMap<object, ServerDescriptor>();
   const releaseQueue: number[] = [];
   let releaseScheduled = false;
@@ -68,7 +69,14 @@ export function installServerTenantRuntime(
       });
 
   const shim = (descriptor: ServerDescriptor): object => {
-    const out = Object.freeze(Object.create(null));
+    const out = descriptor.callable
+      ? function (this: unknown, ...args: unknown[]) {
+          return tenant.driveTenant(
+            tenant.invoke(out as Function, { kind: "apply", thisArg: this, args }), false, false,
+          );
+        }
+      : Object.create(null);
+    Object.freeze(out);
     serverShims.set(out, descriptor);
     finalizer?.register(out, descriptor.id);
     return out;
@@ -111,10 +119,17 @@ export function installServerTenantRuntime(
 
   // The full normal tenant object-manager surface is present. The ABI helpers
   // below come from the current Jade package, never a Rust source snapshot.
-  return Object.assign(
+  tenant = Object.assign(
     Object.create(null),
     {
       make: op("make"),
+      makeFunction: op("makeFunction"),
+      makeExotic: op("makeExotic"),
+      makeCallableExotic: op("makeCallableExotic"),
+      *invoke(callee: Function, invocation: unknown) {
+        return yield bridge.request("invoke", [callee, invocation]);
+      },
+      ownsObject(value: object) { return serverShims.has(value); },
       get: op("get"),
       set: op("set"),
       has: op("has"),
@@ -125,4 +140,5 @@ export function installServerTenantRuntime(
     },
     guestAbiMixin,
   ) as Tenant;
+  return tenant;
 }

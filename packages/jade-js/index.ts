@@ -38,6 +38,32 @@ export type TenantOpResult<R, AA extends boolean, AG extends boolean> = FnResult
   AG
 >;
 
+export type TenantInvocation =
+  | { kind: "apply"; thisArg: unknown; args: readonly unknown[] }
+  | { kind: "construct"; args: readonly unknown[]; newTarget: Function };
+
+/** Proxy-trap-like behavior for a tenant-managed exotic. Missing traps fail closed. */
+export interface TenantExoticHandler {
+  get?(receiver: object, key: PropertyKey): TenantGenerator<unknown>;
+  set?(receiver: object, key: PropertyKey, value: unknown): TenantGenerator<void>;
+  has?(receiver: object, key: PropertyKey): TenantGenerator<boolean>;
+  delete?(receiver: object, key: PropertyKey): TenantGenerator<void>;
+  ownKeys?(receiver: object): TenantGenerator<PropertyKey[]>;
+  define?(receiver: object, descriptors: object): TenantGenerator<void>;
+  assign?(receiver: object, source: object): TenantGenerator<void>;
+}
+
+/** Call/construct traps for an exotic represented by a real native function. */
+export interface TenantCallableExoticHandler extends TenantExoticHandler {
+  apply?(receiver: Function, thisArg: unknown, args: readonly unknown[]): TenantGenerator<unknown>;
+  construct?(receiver: Function, newTarget: Function, args: readonly unknown[]): TenantGenerator<object>;
+}
+
+/** A Tenant with independent, non-trapping ownership knowledge for merging. */
+export interface TenantProvider extends Tenant {
+  ownsObject(value: object): boolean;
+}
+
 /**
  * A tenant is an abstract object manager: it isolates a virtual environment by
  * owning the representation of the objects it creates. Implementations are free
@@ -87,11 +113,26 @@ export interface Tenant {
   assign(dst: object, src: object): TenantGenerator<void>;
   /** Register `fn`'s guest calling convention. See `narrow.ts`. */
   markGuestFn<F extends Function>(fn: F, meta: GuestFnMeta): F;
+  /** Create a fail-closed exotic object. This is host/provider-facing only. */
+  makeExotic(proto: object | null | undefined, handler: TenantExoticHandler): TenantGenerator<object>;
+  /** Adopt a native callable as an owned, non-exotic tenant value. */
+  makeFunction(
+    implementation: Function,
+    options?: { proto?: object | null; guestMeta?: GuestFnMeta },
+  ): TenantGenerator<Function>;
+  /** Create a callable exotic represented by a constructible native function. */
+  makeCallableExotic(
+    proto: object | null | undefined,
+    handler: TenantCallableExoticHandler,
+  ): TenantGenerator<Function>;
+  /** Route normal apply or construction through the tenant callable ABI. */
+  invoke(callee: Function, invocation: TenantInvocation): TenantGenerator<unknown>;
   /** Invoke `fn` respecting its actual registered ABI. See `narrow.ts`. */
   invokeGuestAware<Args extends readonly unknown[], R = unknown>(
     fn: Function,
     thisArg: unknown,
     args: Args,
+    invocation?: TenantInvocation,
   ): TenantGenerator<R>;
   /** Invoke a property-descriptor getter/setter ("trap"). See `narrow.ts`. */
   invokeTrap<Args extends readonly unknown[], R = unknown>(
@@ -128,6 +169,7 @@ import * as vm from "./vm.ts";
 export { isPolyfillKey, vm };
 export * from "./gc.ts";
 export { Tenant as MultiTenant } from "./multi_tenant.ts";
+export { MergedTenant } from "./merged_tenant.ts";
 export * from "./narrow.ts";
 export * from "./rewrite.ts";
 export * from "./driver.ts";

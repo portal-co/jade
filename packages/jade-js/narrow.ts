@@ -1,4 +1,4 @@
-import type { Tenant } from "./index.ts";
+import type { Tenant, TenantInvocation } from "./index.ts";
 import { createGuestGen, isGuestGen, unpackGuestGen } from "./shims.ts";
 import { yieldTenant, driveTenant } from "./driver.ts";
 
@@ -42,12 +42,16 @@ export function* invokeGuestAware<Args extends readonly unknown[], R = unknown>(
   fn: Function,
   thisArg: unknown,
   args: Args,
+  invocation: TenantInvocation = { kind: "apply", thisArg, args },
 ): Generator<any, R, any> {
   const meta = guestFnMeta(fn);
-  const raw =
-    meta?.abi === "leading-tenant-nt"
-      ? (Reflect.apply(fn, thisArg, [this, undefined, ...args]) as R)
-      : (Reflect.apply(fn, thisArg, args) as R);
+  const raw = invocation.kind === "construct"
+    ? meta?.abi === "leading-tenant-nt"
+      ? (Reflect.construct(fn, [this, invocation.newTarget, ...args], invocation.newTarget) as R)
+      : (Reflect.construct(fn, [...args], invocation.newTarget) as R)
+    : meta?.abi === "leading-tenant-nt"
+      ? (Reflect.apply(fn, invocation.thisArg, [this, undefined, ...args]) as R)
+      : (Reflect.apply(fn, invocation.thisArg, args) as R);
   // Hand asynchronous and native-generator results to the driver.  A guest-gen
   // object is already an ABI value and must not be wrapped a second time.
   if (

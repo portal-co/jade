@@ -154,8 +154,9 @@ pub enum JadeTenantMethod {
     Set,
     Define,
     Assign,
+    MakeFunction,
+    Invoke,
     DriveTenant,
-    CreateGuestGen,
 }
 
 impl fmt::Display for JadeTenantMethod {
@@ -166,8 +167,9 @@ impl fmt::Display for JadeTenantMethod {
             Self::Set => "set",
             Self::Define => "define",
             Self::Assign => "assign",
+            Self::MakeFunction => "makeFunction",
+            Self::Invoke => "invoke",
             Self::DriveTenant => "driveTenant",
-            Self::CreateGuestGen => "createGuestGen",
         })
     }
 }
@@ -184,8 +186,9 @@ where
         JadeTenantMethod::Set,
         JadeTenantMethod::Define,
         JadeTenantMethod::Assign,
+        JadeTenantMethod::MakeFunction,
+        JadeTenantMethod::Invoke,
         JadeTenantMethod::DriveTenant,
-        JadeTenantMethod::CreateGuestGen,
     ] {
         names.property(method).map_err(|err| err.to_string())?;
     }
@@ -602,7 +605,13 @@ impl<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>> Ops for JsJit<R, N> {
             .reg
             .borrow_mut()
             .register(eff, &["tenant", "nt", "...args"], &body);
-        Ok(self.bind(reference))
+        let adopted = tenant_drive(
+            &self.cfg.names,
+            tenant_call(&self.cfg.names, JadeTenantMethod::MakeFunction, &reference),
+            self.cfg.add_async,
+            self.cfg.add_gen,
+        );
+        Ok(self.bind(prefix_variant(adopted, self.is_async, self.is_gen)))
     }
 
     fn op_lit32(&self, val: u32) -> JsVar {
@@ -675,39 +684,20 @@ impl<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>> Ops for JsJit<R, N> {
     }
 
     fn op_call(&mut self, _code: &[u8], fn_val: JsVar, args: Vec<JsVar>) -> Result<JsVar, String> {
-        // Jade functions are registered as `function(tenant, nt, ...args)`, so a
-        // call threads the enclosing `tenant` and `nt` ahead of the user args.
-        let mut parts = Vec::with_capacity(args.len() + 2);
-        parts.push("tenant".to_string());
-        parts.push("nt".to_string());
-        parts.extend(args.iter().map(|v| v.to_string()));
-        let raw_call = format!("Reflect.apply({fn_val}, undefined, [{}])", parts.join(", "));
-        if self.cfg.add_gen {
-            // In addGen mode every Jade callee runs as a generator; wrap the
-            // result in a guest-side generator object via the tenant mixin helper.
-            let add_async = self.cfg.add_async;
-            let add_gen = self.cfg.add_gen;
-            let raw = self.bind(raw_call);
-            let wrapped = prefix_variant(
-                tenant_drive(
-                    &self.cfg.names,
-                    tenant_call(
-                        &self.cfg.names,
-                        JadeTenantMethod::CreateGuestGen,
-                        &raw.to_string(),
-                    ),
-                    add_async,
-                    add_gen,
-                ),
-                self.is_async,
-                self.is_gen,
-            );
-            Ok(self.bind(format!(
-                "({raw} && typeof {raw}.next === 'function') ? {wrapped} : {raw}"
-            )))
-        } else {
-            Ok(self.bind(raw_call))
-        }
+        // Calls are tenant-owned: ordinary apply always has `nt === undefined`.
+        // `invoke` chooses guest vs host ABI and callable-exotic dispatch, then
+        // its generator result is driven once under the ambient capability bits.
+        let invocation = format!(
+            "{{kind: \"apply\", thisArg: undefined, args: [{}]}}",
+            args.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+        );
+        let call = tenant_drive(
+            &self.cfg.names,
+            tenant_call(&self.cfg.names, JadeTenantMethod::Invoke, &format!("{fn_val}, {invocation}")),
+            self.cfg.add_async,
+            self.cfg.add_gen,
+        );
+        Ok(self.bind(prefix_variant(call, self.is_async, self.is_gen)))
     }
 
     fn op_bool(&self, val: bool) -> JsVar {
@@ -1342,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn op_call_threads_tenant_and_nt() {
+    fn op_call_routes_apply_through_tenant_invoke() {
         // state[1] = call state[0]( state[2] ); return state[1];
         let code = chunk(&[
             Operation::Call {
@@ -1354,9 +1344,10 @@ mod tests {
         ]);
         let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
         assert!(
-            js.contains("Reflect.apply(state[0], undefined, [tenant, nt, state[2]])"),
+            js.contains("tenant.driveTenant(tenant.invoke(state[0], {kind: \"apply\", thisArg: undefined, args: [state[2]]}), false, false)"),
             "got:\n{js}"
         );
+        assert!(!js.contains("Reflect.apply(state[0]"), "got:\n{js}");
     }
 
     fn get_set_code() -> Vec<u8> {
@@ -1410,8 +1401,9 @@ mod tests {
             ("set".into(), "c".into()),
             ("define".into(), "d".into()),
             ("assign".into(), "e".into()),
+            ("makeFunction".into(), "f".into()),
+            ("invoke".into(), "i".into()),
             ("driveTenant".into(), "not-a-name".into()),
-            ("createGuestGen".into(), "g".into()),
         ]);
         let cfg = Config::with_names(names);
         let (js, _reg) = compile(&get_set_code(), VecRegistry::new(), cfg).unwrap();
