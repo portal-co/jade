@@ -37,7 +37,7 @@ extern crate alloc;
 #[cfg(feature = "reloop")]
 mod reloop;
 #[cfg(feature = "reloop")]
-pub use reloop::compile as compile_reloop;
+pub use reloop::{compile as compile_reloop, compile_from_variant as compile_reloop_from_variant};
 
 use alloc::format;
 use alloc::rc::Rc;
@@ -1001,19 +1001,32 @@ fn emit_program<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>>(
 /// The generated program expects the tenant object to expose the shared
 /// `driveTenant`/`createGuestGen` mixin methods from `jade-js`; no shim helper
 /// is referenced as a free identifier at the generated call site.
-pub fn compile<R: FnRegistry, N>(code: &[u8], reg: R, cfg: Config<N>) -> Result<(String, R), String>
+/// Compile a Tier-0 Jade bytecode chunk at `start_ip` with a caller-selected
+/// enclosing async/generator context.
+///
+/// WSDOM uses this for its four wrapper kinds. Existing hosts should normally
+/// use [`compile_from`], which preserves the historical non-generator,
+/// non-async top-level context.
+pub fn compile_from_variant<R: FnRegistry, N>(
+    code: &[u8],
+    start_ip: usize,
+    reg: R,
+    cfg: Config<N>,
+    is_gen: bool,
+    is_async: bool,
+) -> Result<(String, R), String>
 where
     N: HostMethodNames<JadeTenantMethod>,
 {
     validate_host_method_names(&cfg.names)?;
     #[cfg(feature = "reloop")]
     if cfg.prefer_reloop {
-        return reloop::compile(code, reg, cfg);
+        return reloop::compile_from_variant(code, start_ip, reg, cfg, is_gen, is_async);
     }
     let cell = Rc::new(RefCell::new(reg));
     let body = {
-        let mut jit = JsJit::with_config(cell.clone(), cfg, false, false, false);
-        emit_program(&mut jit, code, 0)?;
+        let mut jit = JsJit::with_config(cell.clone(), cfg, is_gen, is_async, false);
+        emit_program(&mut jit, code, start_ip)?;
         jit.emit.into_inner().buf
     };
     let reg = Rc::try_unwrap(cell)
@@ -1023,6 +1036,32 @@ where
         })?
         .into_inner();
     Ok((body, reg))
+}
+
+/// Compile a Jade bytecode chunk starting at `start_ip` in the historic
+/// synchronous, non-generator top-level context.
+pub fn compile_from<R: FnRegistry, N>(
+    code: &[u8],
+    start_ip: usize,
+    reg: R,
+    cfg: Config<N>,
+) -> Result<(String, R), String>
+where
+    N: HostMethodNames<JadeTenantMethod>,
+{
+    compile_from_variant(code, start_ip, reg, cfg, false, false)
+}
+
+/// Compile a Jade bytecode chunk from bytecode offset zero.
+///
+/// This backwards-compatible convenience entry point delegates to
+/// [`compile_from`]. WSDOM hosts use the latter to start at a validated
+/// bytecode entry offset without reimplementing Tier 0 dispatch.
+pub fn compile<R: FnRegistry, N>(code: &[u8], reg: R, cfg: Config<N>) -> Result<(String, R), String>
+where
+    N: HostMethodNames<JadeTenantMethod>,
+{
+    compile_from(code, 0, reg, cfg)
 }
 
 // Re-export the driven traits so embedders can name them without depending on

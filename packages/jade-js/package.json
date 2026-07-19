@@ -9,7 +9,8 @@
     "main": "index.ts",
     "exports": {
       ".": "index.ts",
-      "./gc": "gc.ts"
+      "./gc": "gc.ts",
+      "./wsdom-tenant-runtime": "wsdom-tenant-runtime.ts"
     }
   },
   "scripts": {

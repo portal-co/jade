@@ -455,6 +455,31 @@ fn emit_dispatch<
     Ok(())
 }
 
+pub fn compile_from_variant<R: FnRegistry, N>(
+    code: &[u8],
+    start_ip: usize,
+    reg: R,
+    mut cfg: Config<N>,
+    is_gen: bool,
+    is_async: bool,
+) -> Result<(String, R), String>
+where
+    N: portal_jit_host_names::HostMethodNames<crate::JadeTenantMethod>,
+{
+    // Preserve Tier 1 for every nested closure, exactly like `compile`.
+    cfg.prefer_reloop = true;
+    let cell = alloc::rc::Rc::new(RefCell::new(reg));
+    let body = {
+        let mut jit = JsJit::with_config(cell.clone(), cfg, is_gen, is_async, false);
+        emit_reloop_program(&mut jit, code, start_ip)?;
+        jit.emit.into_inner().buf
+    };
+    let reg = alloc::rc::Rc::try_unwrap(cell)
+        .map_err(|_| "jit(reloop): internal invariant: FnRegistry Rc had lingering clones after compile finished".to_string())?
+        .into_inner();
+    Ok((body, reg))
+}
+
 /// Tier 1 entry point: compile Jade bytecode into JS by restructuring Tier 0's
 /// discovered blocks via `ssa-reloop2` into native `while`/`if`/`switch`/`return`/labeled
 /// `break`/`continue`, instead of Tier 0's flat block-dispatch loop.
@@ -466,25 +491,8 @@ pub fn compile<R: FnRegistry, N>(
 where
     N: portal_jit_host_names::HostMethodNames<crate::JadeTenantMethod>,
 {
-    // Force this on regardless of what the caller passed: calling *this* function is
-    // itself the choice of Tier 1, and `op_fn` (`crates/jade-vm-jit/src/lib.rs`) reads
-    // `Config.prefer_reloop` — propagated by `Clone` into every nested `JsJit` — to decide
-    // whether a nested closure recurses through Tier 1 too, rather than downgrading to
-    // Tier 0. Without this, a caller reaching this function directly (bypassing
-    // `jade_vm_jit::compile`'s own `if cfg.prefer_reloop { return reloop::compile(...) }`
-    // dispatch, which is the only other place this flag is normally set) would silently
-    // get Tier-0-emitted nested closures despite asking for Tier 1 at the top level.
     cfg.prefer_reloop = true;
-    let cell = alloc::rc::Rc::new(RefCell::new(reg));
-    let body = {
-        let mut jit = JsJit::with_config(cell.clone(), cfg, false, false, false);
-        emit_reloop_program(&mut jit, code, 0)?;
-        jit.emit.into_inner().buf
-    };
-    let reg = alloc::rc::Rc::try_unwrap(cell)
-        .map_err(|_| "jit(reloop): internal invariant: FnRegistry Rc had lingering clones after compile finished".to_string())?
-        .into_inner();
-    Ok((body, reg))
+    compile_from_variant(code, 0, reg, cfg, false, false)
 }
 
 /// Restructure the bytecode at `code[start_ip..]` into `jit`'s own emitted output — public

@@ -1,0 +1,23 @@
+[package]
+name = "portal-solutions-jade-vm-wsdom"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Jade Tier-0 JIT host for a WSDOM-connected browser"
+
+[dependencies]
+portal-solutions-jade-vm = { path = "../jade-vm", features = ["alloc"] }
+portal-solutions-jade-vm-jit = { path = "../jade-vm-jit", features = ["reloop"] }
+portal-solutions-jade-vm-jit-swc = { path = "../jade-vm-jit-swc", optional = true }
+portal-jit-host-names = { path = "../../../codegen-utils/crates/host-method-names" }
+px-wsdom = { package = "px-wsdom", version = "0.0.6", git = "https://github.com/portal-co/wsdom.git" }
+px-wsdom-core = { package = "px-wsdom-core", version = "0.0.6", git = "https://github.com/portal-co/wsdom.git" }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+tier2 = ["dep:portal-solutions-jade-vm-jit-swc"]
+
+[dev-dependencies]
+futures = "0.3"

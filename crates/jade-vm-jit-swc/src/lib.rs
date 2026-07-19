@@ -70,6 +70,30 @@ use swc_ecma_ast::{
 use swc_ecma_parser::lexer::Lexer;
 use swc_ecma_parser::{Parser, StringInput, Syntax};
 
+pub fn compile_from_variant<N>(
+    code: &[u8],
+    start_ip: usize,
+    cfg: Config<N>,
+    is_gen: bool,
+    is_async: bool,
+) -> Result<(String, VecRegistry), String>
+where
+    N: HostMethodNames<JadeTenantMethod>,
+{
+    swc_common::GLOBALS.set(&swc_common::Globals::new(), || {
+        let reg = Rc::new(RefCell::new(VecRegistry::new()));
+        let cfg = with_nested_body_compiler(cfg, reg.clone());
+        let body = compile_body(code, start_ip, &cfg, is_gen, is_async, false, &reg)?;
+        // `cfg`'s own `nested_body_compiler` closure holds its own clone of `reg` — drop
+        // it before `try_unwrap`, or the refcount never drops back to 1.
+        drop(cfg);
+        let reg = Rc::try_unwrap(reg)
+            .map_err(|_| "jit-swc: internal invariant: FnRegistry Rc had lingering clones after compile finished".to_string())?
+            .into_inner();
+        Ok((body, reg))
+    })
+}
+
 /// Compile Jade bytecode into JavaScript via the Tier 2 swc-cfg-backed pipeline. The
 /// returned text is a bare statement list (reads/writes a `state` object; ends in
 /// `return`), matching the same contract as `portal_solutions_jade_vm_jit::compile`'s body
@@ -86,20 +110,9 @@ pub fn compile<N>(code: &[u8], cfg: Config<N>) -> Result<(String, VecRegistry), 
 where
     N: HostMethodNames<JadeTenantMethod>,
 {
-    swc_common::GLOBALS.set(&swc_common::Globals::new(), || {
-        let reg = Rc::new(RefCell::new(VecRegistry::new()));
-        let is_gen = cfg.add_gen;
-        let is_async = cfg.add_async;
-        let cfg = with_nested_body_compiler(cfg, reg.clone());
-        let body = compile_body(code, 0, &cfg, is_gen, is_async, false, &reg)?;
-        // `cfg`'s own `nested_body_compiler` closure holds its own clone of `reg` — drop
-        // it before `try_unwrap`, or the refcount never drops back to 1.
-        drop(cfg);
-        let reg = Rc::try_unwrap(reg)
-            .map_err(|_| "jit-swc: internal invariant: FnRegistry Rc had lingering clones after compile finished".to_string())?
-            .into_inner();
-        Ok((body, reg))
-    })
+    let is_gen = cfg.add_gen;
+    let is_async = cfg.add_async;
+    compile_from_variant(code, 0, cfg, is_gen, is_async)
 }
 
 /// Return a clone of `cfg` with `nested_body_compiler` set to recurse into this tier's own
