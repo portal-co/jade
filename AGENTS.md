@@ -104,7 +104,31 @@ so a hand-written guest-side stub can be typechecked directly against `HostToGue
 `narrow.ts` (validation/`NarrowSpec`) and `rewrite.ts` (conversion) are deliberately separate
 modules — don't merge them back together.
 
-## Tenant generator-driver protocol (`packages/jade-js/driver.ts`)
+## Tenant-scoped primordials (`packages/jade-js/primordials/`)
+
+Primordials are tenant-owned values, never ambient host intrinsics. Every
+factory caches by the **exact** execution-facing `Tenant`; values for a
+`MergedTenant` must retain and operate through that router. Guest-visible
+function shells, prototypes, descriptor objects, and buffer shells are
+allocated through tenant operations, and guest callbacks use `tenant.invoke`.
+
+`BufferHooks` is an explicit embedder capability. `ArrayBuffer`, optional
+`SharedArrayBuffer`, and typed arrays are absent unless `createPrimordialRealm`
+receives hooks. Hooks may be asynchronous; compose them with
+`yield tenant.yieldTenant(...)`, never expose raw handles. `nativeBufferHooks`
+is an opt-in adapter, not a host fallback. Reject unsupported behavior instead
+of using host property access, host `Reflect.apply`, native `Proxy`, or ambient
+intrinsics. Dynamic `Function`/`new Function`, primitive boxing, and BigInt
+arrays are deliberately unavailable.
+
+Native exotic traps remain fail-closed. The guest `Proxy` installs every native
+exotic trap and only then performs guest-handler fallback to its target.
+`Proxy.revocable` has private revocation state and relies on normal GC.
+Descriptor/prototype/extensibility methods, including `Object.seal` and
+`Object.freeze`, use explicit Tenant methods; do not shortcut through host
+reflection.
+
+## Tenant generator-driver protocol (`packages/jade-js/tenants/driver.ts`)
 
 All tenant operations (`make`, `get`, `set`, `has`, `delete`, `ownKeys`, `define`,
 `assign`) are **generators**. The VM, the JIT, and the WASM backend never call

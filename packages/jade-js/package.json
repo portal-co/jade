@@ -10,6 +10,8 @@
     "exports": {
       ".": "index.ts",
       "./gc": "gc.ts",
+      "./tenants": "tenants/index.ts",
+      "./primordials": "primordials/index.ts",
       "./wsdom-tenant-runtime": "wsdom-tenant-runtime.ts"
     }
   },

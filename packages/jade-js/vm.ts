@@ -1,9 +1,9 @@
 
 /* This is GENERATED code by `regen.ts` */
 import {type Tenant} from "./index.ts"
-import {THROUGH, createGuestGen, unpackGuestGen} from "./shims.ts"
-import {markGuestFn} from "./narrow.ts"
-export {THROUGH} from "./shims.ts"
+import {THROUGH, createGuestGen, unpackGuestGen} from "./tenants/shims.ts"
+import {markGuestFn} from "./tenants/narrow.ts"
+export {THROUGH} from "./tenants/shims.ts"
 const {apply} = Reflect;
 const {create,defineProperties,freeze} = Object;
 const {fromCodePoint} = String;
