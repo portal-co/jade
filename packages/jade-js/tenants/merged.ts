@@ -16,6 +16,7 @@ export class MergedTenant implements Tenant, TenantProvider {
   declare createGuestGen: Tenant["createGuestGen"];
   declare unpackGuestGen: Tenant["unpackGuestGen"];
   declare yieldTenant: Tenant["yieldTenant"];
+  declare yieldHostTask: Tenant["yieldHostTask"];
   declare driveTenant: Tenant["driveTenant"];
 
   readonly primary: TenantProvider;

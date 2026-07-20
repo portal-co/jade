@@ -1,6 +1,7 @@
 import { isPolyfillKey } from "@portal-solutions/semble-common";
 import type { GuestFnMeta } from "./narrow.ts";
-import type { FnResult } from "./rewrite.ts";
+import type { HostAsyncCapability, HostTask, HostTaskYield } from "../async-host.ts";
+import type { GuestFnResult } from "./rewrite.ts";
 
 export { isPolyfillKey };
 
@@ -26,15 +27,16 @@ export interface TenantOp<T> {
   readonly [TENANT_OP]: Generator<any, T, any>;
 }
 
-type TenantYield = TenantOp<any> | PromiseLike<any> | Iterator<any, any, any>;
+type TenantYield = TenantOp<any> | HostTaskYield<any> | Iterator<any, any, any>;
 
-/** Generator shape returned by every tenant operation method. */
+/** Generator shape returned by every tenant operation method. Kept broad while
+ * providers are migrated; the driver only composes the closed tagged subset. */
 export type TenantGenerator<R> = Generator<any, R, any>;
 
 /** The boundary type produced by `tenant.driveTenant(...)` for a given operation
  *  result `R` and the ambient `addAsync`/`addGen` flags — the same declared-bits
  *  OR ambient-bits rule used by `FnResult`. */
-export type TenantOpResult<R, AA extends boolean, AG extends boolean> = FnResult<
+export type TenantOpResult<R, AA extends boolean, AG extends boolean> = GuestFnResult<
   R,
   AA,
   AG
@@ -192,8 +194,9 @@ export interface Tenant {
   /** Adapt a guest-side generator object back to the native generator protocol. See `shims.ts`. */
   unpackGuestGen(g: unknown): Generator;
 
-  /**
-   * Create the sentinel used by tenant methods to compose nested tenant ops:
+  /** Wrap a trusted host task as an explicit tenant-driver suspension request. */
+  yieldHostTask<T>(capability: HostAsyncCapability, task: HostTask<T>): HostTaskYield<T>;
+  /** Create the sentinel used by tenant methods to compose nested tenant ops:
    * `yield this.yieldTenant(this.get(...))`.  See `driver.ts`.
    */
   yieldTenant<T>(gen: Generator<any, T, any>): TenantOp<T>;

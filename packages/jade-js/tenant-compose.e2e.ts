@@ -5,6 +5,10 @@
 //
 // Run with: node --experimental-strip-types packages/jade-js/tenant-compose.e2e.ts
 
+import {
+  createNativeHostAsyncCapability, hostTaskFromPromise, hostTaskToPromise,
+} from "./async-host.ts";
+import { promisePrimordial } from "./primordials/promise.ts";
 import { MultiTenant, single_tenant, markGuestFn, vm } from "./index.ts";
 
 function assert(cond: unknown, msg: string) {
@@ -53,6 +57,10 @@ class Buf {
 function driveSync<T>(t: MultiTenant, gen: Generator<any, T, any>): T {
   return t.driveTenant(gen, false, false) as T;
 }
+const hostAsync = createNativeHostAsyncCapability();
+function runtime(t: MultiTenant) {
+  return driveSync(t, promisePrimordial(t, hostAsync)).promiseRuntime;
+}
 
 // Build the scaffolding for an accessor-backed target: a target object and a
 // descriptors map containing key "k" -> empty descriptor. Callers fill in get/set
@@ -72,7 +80,9 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
 {
   const t = new MultiTenant();
   const { target, descriptors, desc, stateBase } = buildAccessorScaffold(t);
-  driveSync(t, t.set(desc, "get", () => Promise.resolve(77)));
+  driveSync(t, t.set(desc, "get", () =>
+    t.yieldHostTask(runtime(t).async, hostTaskFromPromise(runtime(t).async, Promise.resolve(77))),
+  ));
   driveSync(t, t.define(target, descriptors));
 
   const b = new Buf();
@@ -82,10 +92,9 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
   const out = vm.runVirtualizedA(
     b.view(),
     stateBase,
-    { tenant: t, addAsync: true, addGen: false },
+    { tenant: t, promiseRuntime: runtime(t), addAsync: true, addGen: false },
   );
-  assert(out instanceof Promise, "async GET must return a Promise when addAsync is true");
-  assert((await out) === 77, "expected async getter to resolve to 77");
+  assert((await hostTaskToPromise(runtime(t).async, out)) === 77, "expected async getter to resolve to 77");
 }
 
 // 2) Async setter trap under runVirtualizedA completes and side effect is visible.
@@ -97,7 +106,7 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
     t,
     t.set(desc, "set", (v: unknown) => {
       seen = v;
-      return Promise.resolve();
+      return t.yieldHostTask(runtime(t).async, hostTaskFromPromise(runtime(t).async, Promise.resolve()));
     }),
   );
   driveSync(t, t.define(target, descriptors));
@@ -109,10 +118,9 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
   const out = vm.runVirtualizedA(
     b.view(),
     stateBase,
-    { tenant: t, addAsync: true, addGen: false },
+    { tenant: t, promiseRuntime: runtime(t), addAsync: true, addGen: false },
   );
-  assert(out instanceof Promise, "async SET must return a Promise");
-  const resolved = await out;
+  const resolved = await hostTaskToPromise(runtime(t).async, out);
   assert(resolved === 42, `expected async setter to return assigned value 42, got ${resolved}`);
   assert(seen === 42, `expected async setter trap to receive 42, got ${seen}`);
 }
@@ -139,7 +147,7 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
   const topGen = vm.runVirtualizedG(
     b.view(),
     stateBase,
-    { tenant: t, addAsync: false, addGen: true },
+    { tenant: t, promiseRuntime: runtime(t), addAsync: false, addGen: true },
   ) as Generator;
   assert(typeof topGen.next === "function", "runVirtualizedG must return a generator when addGen is true");
 
@@ -165,7 +173,9 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
 {
   const t = new MultiTenant();
   const target = driveSync(t, t.make(null));
-  const getter = () => Promise.resolve(123);
+  const getter = () => t.yieldHostTask(
+    runtime(t).async, hostTaskFromPromise(runtime(t).async, Promise.resolve(123)),
+  );
 
   const b = new Buf();
   // First LITOBJ: build innerDesc = { get: getter, enumerable: true, configurable: true }
@@ -188,11 +198,11 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
   b.u32(REF(0) | 1); // define target (state[0])
   b.ret(LIT(0));
 
-  const out = await vm.runVirtualizedA(
+  const out = await hostTaskToPromise(runtime(t).async, vm.runVirtualizedA(
     b.view(),
     { 0: target, 1: "get", 2: getter, 3: "enumerable", 4: true, 5: "configurable", 6: true, 7: undefined, 8: "k" },
-    { tenant: t, addAsync: true, addGen: false },
-  );
+    { tenant: t, promiseRuntime: runtime(t), addAsync: true, addGen: false },
+  ));
   void out; // LITOBJ define path mutates target; return value depends on caller encoding.
   assert(
     (await t.driveTenant(t.get(target, "k"), true, false)) === 123,
@@ -204,8 +214,8 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
 {
   const t = new MultiTenant();
   const { target, descriptors, desc, stateBase } = buildAccessorScaffold(t);
-  const guestGetter = function (_tenant: unknown, _nt: unknown) {
-    return Promise.resolve("guest-async");
+  const guestGetter = function (_tenant: MultiTenant, _nt: unknown) {
+    return _tenant.yieldHostTask(runtime(_tenant).async, hostTaskFromPromise(runtime(_tenant).async, Promise.resolve("guest-async")));
   };
   markGuestFn(guestGetter, { abi: "leading-tenant-nt" });
   driveSync(t, t.set(desc, "get", guestGetter));
@@ -215,11 +225,11 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
   b.get(REF(0), REF(1), 2);
   b.ret(REF(2));
 
-  const out = await vm.runVirtualizedA(
+  const out = await hostTaskToPromise(runtime(t).async, vm.runVirtualizedA(
     b.view(),
     stateBase,
-    { tenant: t, addAsync: true, addGen: false },
-  );
+    { tenant: t, promiseRuntime: runtime(t), addAsync: true, addGen: false },
+  ));
   assert(out === "guest-async", `expected guest async getter to return 'guest-async', got ${out}`);
 }
 
@@ -242,39 +252,37 @@ function buildAccessorScaffold(t: MultiTenant): { target: object; descriptors: o
   }
 }
 
-// 8) Synchronous boundaries reject asynchronous trap results rather than treating
-// the wrapper as an already-composed host value.
+// 8) Raw native promises are guest data. Only an explicitly tagged HostTask
+// suspends tenant control flow.
 {
   const t = new MultiTenant();
   const { target, descriptors, desc } = buildAccessorScaffold(t);
-  driveSync(t, t.set(desc, "get", () => Promise.resolve("nope")));
+  const raw = Promise.resolve("raw guest data");
+  driveSync(t, t.set(desc, "get", () => raw));
   driveSync(t, t.define(target, descriptors));
-  let threw = false;
-  try {
-    driveSync(t, t.get(target, "k"));
-  } catch (e) {
-    threw = e instanceof TypeError && /addAsync/.test(e.message);
-  }
-  assert(threw, "sync driveTenant must reject Promise trap results");
+  assert(driveSync(t, t.get(target, "k")) === raw, "raw native Promise must not be assimilated by driver");
 }
 
-// 9) Thenable functions are awaited too.
+// 9) Explicit HostTask yields suspend only under addAsync.
 {
   const t = new MultiTenant();
-  const thenable = Object.assign(
-    () => undefined,
-    { then(resolve: (value: unknown) => unknown) { return resolve(88); } },
-  );
-  const { target, descriptors, desc, stateBase } = buildAccessorScaffold(t);
+  const capability = createNativeHostAsyncCapability();
+  const task = hostTaskFromPromise(capability, Promise.resolve(88));
+  const operation = function* () { return yield t.yieldHostTask(capability, task); };
+  let rejected = false;
+  try { driveSync(t, operation()); } catch (error) { rejected = error instanceof TypeError && /HostTask/.test(error.message); }
+  assert(rejected, "sync driver must reject explicit HostTask suspension");
+  assert((await t.driveTenant(operation(), true, false)) === 88, "async driver must observe explicit HostTask");
+}
+
+// 10) Guest thenables are ordinary values and are never host-read/awaited by the driver.
+{
+  const t = new MultiTenant();
+  const thenable = Object.assign(() => undefined, { then() { throw new Error("must not be called"); } });
+  const { target, descriptors, desc } = buildAccessorScaffold(t);
   driveSync(t, t.set(desc, "get", () => thenable));
   driveSync(t, t.define(target, descriptors));
-  const b = new Buf();
-  b.get(REF(0), REF(1), 2);
-  b.ret(REF(2));
-  assert(
-    (await vm.runVirtualizedA(b.view(), stateBase, { tenant: t, addAsync: true, addGen: false })) === 88,
-    "async driver must await function thenables",
-  );
+  assert(driveSync(t, t.get(target, "k")) === thenable, "driver must not inspect guest thenables");
 }
 
 console.log("PASS: tenant generator driver composition e2e");

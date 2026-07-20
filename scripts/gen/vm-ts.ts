@@ -7,21 +7,19 @@ export function genVmTs(opcodes: Record<string, any>, handlers: Record<string, s
       const isGenerator = "gen" in o;
       const functionName = ({ isAsync: ak_ = isAsync, isGenerator: gk_ = isGenerator }: { isAsync?: boolean; isGenerator?: boolean }) =>
         `runVirtualized${ak_ ? "A" : ""}${gk_ ? "G" : ""}`;
-      const self = functionName({});
-      // How a block body re-enters this variant: generators delegate with
-      // `yield*`, async functions await, sync functions call directly.
+      const publicName = functionName({});
+      // The host-facing async runner returns a nominal HostTask. Its private
+      // implementation may use native async syntax only after it has entered
+      // the explicit host capability boundary.
+      const implementationName = isAsync && !isGenerator ? `_${publicName}` : publicName;
+      const self = implementationName;
       const drive = isGenerator ? "yield* " : isAsync ? "await " : "";
-      // Substitute the block-handler placeholders for this variant.
       const subst = (s: string) => s.replaceAll("__DRIVE__", drive).replaceAll("__SELF__", self);
-      const parameters = `(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args)`;
-      return subst(`
-export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualized${
-        isAsync ? "A" : ""
-      }${
-        isGenerator ? "G" : ""
-      }(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): ${
-        isAsync ? (isGenerator ? `AsyncGenerator<any,any,any>` : `Promise<any>`) : `any`
-      }{
+      const parameters = `(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,promiseRuntime,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args)`;
+      const context = `{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,promiseRuntime,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,promiseRuntime:PromiseRuntime,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean}`;
+      const signature = `(code: () => DataView, state: {[a: number]: any},${context},...args: any[])`;
+      const result = isAsync ? (isGenerator ? `AsyncGenerator<any,any,any>` : `HostTask<any>`) : `any`;
+      const body = subst(`
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -29,48 +27,39 @@ export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} runVirtualize
             ip += 4;
             return val & 1 ? state[val >>> 1] : val >>> 1;
         }
-        const val: any = (op === 0 || ${isAsync ? "op === 1" : "false"} || ${
-        isGenerator ? "op === 2 || op === 3 " : "false"
-      }) ? arg() : undefined;
+        const val: any = (op === 0 || ${isAsync ? "op === 1" : "false"} || ${isGenerator ? "op === 2 || op === 3 " : "false"}) ? arg() : undefined;
         switch(op){
-
-            case ${opcodes.AWAIT.id}: ${
-        isAsync
-          ? `state[code().getUint32(ip,true)]=await val;ip += 4;break;`
-          : `return apply(${functionName({
-              isAsync: true,
-            })},this,${parameters});`
-      }
-            case ${opcodes.YIELD.id}: ${
-        isGenerator
-          ? `state[code().getUint32(ip,true)]=doubleGen ? yield {value:val,[THROUGH]:true} : yield val;ip += 4;break;`
-          : `return apply(${functionName({
-              isGenerator: true,
-            })},this,${parameters});`
-      }
-            case ${opcodes.YIELDSTAR.id}: ${
-        isGenerator
-          ? `state[code().getUint32(ip,true)]=yield* (doubleGen ? unpackGuestGen(val) : val);ip += 4;break;`
-          : `return apply(${functionName({
-              isGenerator: true,
-            })},this,${parameters});`
-      }
-    ${Object.keys(opcodes)
-        .filter((op) => op !== "AWAIT" && op !== "YIELD" && op !== "YIELDSTAR")
-        .map((op) => `case ${opcodes[op].id}: ${handlers[op]}`)
-        .join("")}
+            case ${opcodes.AWAIT.id}: ${isAsync
+              ? `state[code().getUint32(ip,true)]=await promiseRuntime.awaitHostTask(promiseRuntime.awaitGuest(val));ip += 4;break;`
+              : `return apply(${functionName({ isAsync: true })},this,${parameters});`}
+            case ${opcodes.YIELD.id}: ${isGenerator
+              ? `state[code().getUint32(ip,true)]=doubleGen ? yield {value:val,[THROUGH]:true} : yield val;ip += 4;break;`
+              : `return apply(${functionName({ isGenerator: true })},this,${parameters});`}
+            case ${opcodes.YIELDSTAR.id}: ${isGenerator
+              ? `state[code().getUint32(ip,true)]=yield* (doubleGen ? unpackGuestGen(val) : val);ip += 4;break;`
+              : `return apply(${functionName({ isGenerator: true })},this,${parameters});`}
+    ${Object.keys(opcodes).filter((op) => op !== "AWAIT" && op !== "YIELD" && op !== "YIELDSTAR").map((op) => `case ${opcodes[op].id}: ${handlers[op]}`).join("")}
         }
-    }
+    }`);
+      if (isAsync && !isGenerator) {
+        return subst(`
+async function ${implementationName}${signature}: Promise<any>{${body}}
+export function ${publicName}${signature}: HostTask<any>{
+  return hostTaskFromPromise(promiseRuntime.async, ${implementationName}(code,state,{ip,globalThis,nt,tenant,promiseRuntime,addAsync,addGen,doubleGen},...args));
 }`);
-    })
-    .join("\n");
+      }
+      return subst(`
+export ${isAsync ? "async" : ""} function${isGenerator ? "*" : ""} ${publicName}${signature}: ${result}{${body}}`);
+    }).join("\n");
 
   return `
 /* This is GENERATED code by \`regen.ts\` */
-import {type Tenant} from "./index.ts"
-import {THROUGH, createGuestGen, unpackGuestGen} from "./shims.ts"
-import {markGuestFn} from "./narrow.ts"
-export {THROUGH} from "./shims.ts"
+import {type Tenant} from "./tenants/types.ts";
+import {THROUGH, unpackGuestGen} from "./tenants/shims.ts";
+import {markGuestFn} from "./tenants/narrow.ts";
+import {hostTaskFromPromise,type HostTask} from "./async-host.ts";
+import type {PromiseRuntime} from "./primordials/promise.ts";
+export {THROUGH} from "./tenants/shims.ts";
 const {apply} = Reflect;
 const {create,defineProperties,freeze} = Object;
 const {fromCodePoint} = String;

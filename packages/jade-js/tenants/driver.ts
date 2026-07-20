@@ -1,3 +1,7 @@
+import {
+  hostTaskPromise, hostTaskYield, isHostTaskYield,
+  type HostAsyncCapability, type HostTask,
+} from "../async-host.ts";
 import type { Tenant, TenantOp } from "./types.ts";
 import { isGuestGen } from "./shims.ts";
 import { TENANT_OP } from "./types.ts";
@@ -5,163 +9,91 @@ import { TENANT_OP } from "./types.ts";
 export { TENANT_OP };
 
 function isTenantOp(value: unknown): value is TenantOp<unknown> {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    (value as any)[TENANT_OP] !== undefined
-  );
-}
-
-function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
-  return (
-    value !== null &&
-    (typeof value === "object" || typeof value === "function") &&
-    typeof (value as any).then === "function"
-  );
+  return value !== null && typeof value === "object" && (value as any)[TENANT_OP] !== undefined;
 }
 
 function isNativeIterator(value: unknown): value is Iterator<unknown, any, any> {
-  return (
-    value !== null &&
-    (typeof value === "object" || typeof value === "function") &&
-    typeof (value as any).next === "function" &&
-    !isGuestGen(value)
-  );
+  return value !== null && (typeof value === "object" || typeof value === "function") &&
+    typeof (value as any).next === "function" && !isGuestGen(value);
 }
 
-/** Create the sentinel used by tenant methods to compose nested tenant ops:
- * `yield this.yieldTenant(this.get(...))`. */
+/** Create the sentinel used by tenant methods to compose nested tenant ops. */
 export function yieldTenant<T>(this: Tenant, gen: Generator<any, T, any>): TenantOp<T> {
   const op: TenantOp<T> = {} as TenantOp<T>;
   (op as any)[TENANT_OP] = gen;
   return op;
 }
 
-/** Synchronous driver: nested tenant ops run synchronously.  Promises and
- * native iterators require an ambient async/gen capability and therefore cannot
- * cross this boundary silently. */
+/** Explicitly yield host control flow. Guest promises and thenables are ordinary data. */
+export function yieldHostTask<T>(
+  this: Tenant,
+  capability: HostAsyncCapability,
+  task: HostTask<T>,
+) {
+  void this;
+  return hostTaskYield(capability, task);
+}
+
 function driveTenantSync<T>(this: Tenant, gen: Generator<any, T, any>): T {
   let step = gen.next();
   while (!step.done) {
-    const v = step.value;
-    if (isTenantOp(v)) {
-      const r = this.driveTenant(v[TENANT_OP], false, false);
-      step = gen.next(r);
-    } else if (isPromiseLike(v)) {
-      throw new TypeError("tenant operation yielded a Promise without addAsync");
-    } else if (isNativeIterator(v)) {
-      throw new TypeError("tenant operation yielded an iterator without addGen");
-    } else {
-      step = gen.next(v);
-    }
+    const value = step.value;
+    if (isTenantOp(value)) step = gen.next(this.driveTenant(value[TENANT_OP], false, false));
+    else if (isHostTaskYield(value)) throw new TypeError("tenant operation yielded a HostTask without addAsync");
+    else if (isNativeIterator(value)) throw new TypeError("tenant operation yielded an iterator without addGen");
+    else step = gen.next(value);
   }
   return step.value;
 }
 
-/** Asynchronous driver: awaits promises, recursively drives nested tenant ops. */
 async function driveTenantAsync<T>(this: Tenant, gen: Generator<any, T, any>): Promise<T> {
   let step = gen.next();
   while (!step.done) {
-    const v = step.value;
-    if (isTenantOp(v)) {
-      const r = await this.driveTenant(v[TENANT_OP], true, false);
-      step = gen.next(r);
-    } else if (isPromiseLike(v)) {
-      const r = await v;
-      step = gen.next(r);
-    } else if (isNativeIterator(v)) {
-      throw new TypeError("tenant operation yielded an iterator without addGen");
-    } else {
-      step = gen.next(v);
-    }
+    const value = step.value;
+    if (isTenantOp(value)) step = gen.next(await this.driveTenant(value[TENANT_OP], true, false));
+    else if (isHostTaskYield(value)) step = gen.next(await hostTaskPromise(value.capability, value.task));
+    else if (isNativeIterator(value)) throw new TypeError("tenant operation yielded an iterator without addGen");
+    else step = gen.next(value);
   }
   return step.value;
 }
 
-/** Generator driver: `yield*`s through nested ops and traps returning native
- * generators, wrapping those native generators with `createGuestGen` when
- * `addGen` is active. */
 function* driveTenantGen<T>(this: Tenant, gen: Generator<any, T, any>): Generator<any, T, any> {
   let step = gen.next();
   while (!step.done) {
-    const v = step.value;
-    if (isTenantOp(v)) {
-      let r: any = (yield* (this.driveTenant(v[TENANT_OP], false, true) as Generator<any, any, any>)) as any;
-      if (isNativeIterator(r)) {
-        r = (yield* (this.driveTenant(
-          this.createGuestGen(r as Generator),
-          false,
-          true,
-        ) as Generator<any, any, any>)) as any;
-      }
-      step = gen.next(r);
-    } else if (isNativeIterator(v)) {
-      const r = (yield* (this.driveTenant(
-        this.createGuestGen(v as Generator),
-        false,
-        true,
-      ) as Generator<any, any, any>)) as any;
-      step = gen.next(r);
-    } else if (isPromiseLike(v)) {
-      const r = yield v;
-      step = gen.next(r);
-    } else {
-      const r = yield v;
-      step = gen.next(r);
-    }
+    const value = step.value;
+    if (isTenantOp(value)) {
+      let result: any = yield* this.driveTenant(value[TENANT_OP], false, true) as Generator<any, any, any>;
+      if (isNativeIterator(result)) result = yield* this.driveTenant(this.createGuestGen(result as Generator), false, true) as Generator<any, any, any>;
+      step = gen.next(result);
+    } else if (isHostTaskYield(value)) {
+      throw new TypeError("tenant operation yielded a HostTask without addAsync");
+    } else if (isNativeIterator(value)) {
+      step = gen.next(yield* this.driveTenant(this.createGuestGen(value as Generator), false, true) as Generator<any, any, any>);
+    } else step = gen.next(yield value);
   }
   return step.value;
 }
 
-/** Async-generator driver: composes both `await` and `yield*`. */
-async function* driveTenantAsyncGen<T>(
-  this: Tenant,
-  gen: Generator<any, T, any>,
-): AsyncGenerator<any, T, any> {
+async function* driveTenantAsyncGen<T>(this: Tenant, gen: Generator<any, T, any>): AsyncGenerator<any, T, any> {
   let step = gen.next();
   while (!step.done) {
-    const v = step.value;
-    if (isTenantOp(v)) {
-      let r: any = (yield* (this.driveTenant(v[TENANT_OP], true, true) as AsyncGenerator<any, any, any>)) as any;
-      if (isNativeIterator(r)) {
-        r = (yield* (this.driveTenant(
-          this.createGuestGen(r as Generator),
-          true,
-          true,
-        ) as AsyncGenerator<any, any, any>)) as any;
-      }
-      step = gen.next(r);
-    } else if (isPromiseLike(v)) {
-      const r = await v;
-      step = gen.next(r);
-    } else if (isNativeIterator(v)) {
-      const r = (yield* (this.driveTenant(
-        this.createGuestGen(v as Generator),
-        true,
-        true,
-      ) as AsyncGenerator<any, any, any>)) as any;
-      step = gen.next(r);
-    } else {
-      const r = yield v;
-      step = gen.next(r);
-    }
+    const value = step.value;
+    if (isTenantOp(value)) {
+      let result: any = yield* this.driveTenant(value[TENANT_OP], true, true) as AsyncGenerator<any, any, any>;
+      if (isNativeIterator(result)) result = yield* this.driveTenant(this.createGuestGen(result as Generator), true, true) as AsyncGenerator<any, any, any>;
+      step = gen.next(result);
+    } else if (isHostTaskYield(value)) {
+      step = gen.next(await hostTaskPromise(value.capability, value.task));
+    } else if (isNativeIterator(value)) {
+      step = gen.next(yield* this.driveTenant(this.createGuestGen(value as Generator), true, true) as AsyncGenerator<any, any, any>);
+    } else step = gen.next(yield value);
   }
   return step.value;
 }
 
-/** Drive a tenant-operation generator according to the effective variant.  This
- * is the single entry point every backend and embedder uses -- never call
- * `.next()` on a tenant method directly. */
-export function driveTenant<T>(
-  this: Tenant,
-  gen: Generator<any, T, any>,
-  addAsync: boolean,
-  addGen: boolean,
-): any {
-  if (addGen) {
-    if (addAsync) return driveTenantAsyncGen.call(this, gen);
-    return driveTenantGen.call(this, gen);
-  }
-  if (addAsync) return driveTenantAsync.call(this, gen);
-  return driveTenantSync.call(this, gen);
+/** Drive tenant control flow. It only recognizes tagged HostTasks, never `.then`. */
+export function driveTenant<T>(this: Tenant, gen: Generator<any, T, any>, addAsync: boolean, addGen: boolean): any {
+  if (addGen) return addAsync ? driveTenantAsyncGen.call(this, gen) : driveTenantGen.call(this, gen);
+  return addAsync ? driveTenantAsync.call(this, gen) : driveTenantSync.call(this, gen);
 }

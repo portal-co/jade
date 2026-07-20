@@ -5,4 +5,5 @@ export * from "./reflect.ts";
 export * from "./proxy.ts";
 export * from "./array-buffer.ts";
 export * from "./typed-arrays.ts";
+export * from "./promise.ts";
 export * from "./realm.ts";

@@ -6,6 +6,8 @@
 // GET/SET/LITOBJ route through the tenant and that produced objects are
 // isolated empty shells.
 
+import { createNativeHostAsyncCapability } from "./async-host.ts";
+import { promisePrimordial } from "./primordials/promise.ts";
 import { vm, MultiTenant } from "./index.ts";
 
 // --- operand + opcode encoder ---------------------------------------------
@@ -39,6 +41,11 @@ function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error("FAIL: " + msg);
 }
 
+function runtime(tenant: MultiTenant) {
+  return tenant.driveTenant(promisePrimordial(tenant, hostAsync), false, false).promiseRuntime;
+}
+const hostAsync = createNativeHostAsyncCapability();
+
 // Program: obj = {}; obj[7] = 42; return obj[7];
 function buildProgram(retOperand: number): () => DataView {
   const b = new Buf();
@@ -54,14 +61,14 @@ function buildProgram(retOperand: number): () => DataView {
 // 1) value round-trips through the tenant.
 {
   const tenant = new MultiTenant();
-  const out = vm.runVirtualized(buildProgram(REF(4)), {}, { tenant });
+  const out = vm.runVirtualized(buildProgram(REF(4)), {}, { tenant, promiseRuntime: runtime(tenant) });
   assert(out === 42, `expected GET to return 42, got ${out}`);
 }
 
 // 2) the produced object is an isolated empty shell; only the tenant sees props.
 {
   const tenant = new MultiTenant();
-  const obj = vm.runVirtualized(buildProgram(REF(2)), {}, { tenant }) as object;
+  const obj = vm.runVirtualized(buildProgram(REF(2)), {}, { tenant, promiseRuntime: runtime(tenant) }) as object;
   assert(typeof obj === "object" && obj !== null, "expected an object");
   assert(Object.keys(obj).length === 0, "host should see NO own keys (foreign by nature)");
   assert(!(7 in (obj as any)), "host should not see the tenant property natively");

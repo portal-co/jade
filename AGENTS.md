@@ -143,9 +143,16 @@ or JIT call sites, and **never** add them to `TENANT_METHOD_NAMES`
 (`crates/jade-vm-frontend/src/tenant_inline.rs`). If they were treated as
 inlinable tenant methods, the driver could be spliced into its own body.
 
-The driver composes nested `TenantOp` sentinels, `Promise`s, and native
-iterators consistently with the declared-bits-OR-ambient-bits rule already used
-by `Config.add_async`/`add_gen` and `FnResult`. Thread the flags at exactly one
+The driver composes nested `TenantOp` sentinels, **explicitly tagged
+`HostTask` yields**, and native iterators consistently with the
+ declared-bits-OR-ambient-bits rule already used by `Config.add_async`/`add_gen`
+and `FnResult`. It never probes `.then`, awaits a raw native `Promise`, or
+assimilates a guest promise/thenable: those are ordinary guest data.  A host
+provider that needs suspension must create a task with its explicit
+`HostAsyncCapability` and yield it via `this.yieldHostTask(capability, task)`.
+The standard realm requires that capability to install its guest `Promise`;
+`hostTaskToPromise` is the separately exported opt-in host interoperability
+adapter, never a Jade runtime return type. Thread the flags at exactly one
 emission site per tier, the same as `op_await`/`op_yield`/`op_yieldstar`.
 
 For inlining: real tenant methods are generators, so the JIT emits a

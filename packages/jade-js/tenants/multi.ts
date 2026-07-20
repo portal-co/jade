@@ -42,6 +42,7 @@ export class Tenant implements Tenant_ {
   declare createGuestGen: Tenant_["createGuestGen"];
   declare unpackGuestGen: Tenant_["unpackGuestGen"];
   declare yieldTenant: Tenant_["yieldTenant"];
+  declare yieldHostTask: Tenant_["yieldHostTask"];
   declare driveTenant: Tenant_["driveTenant"];
 
   #shadow: Record<`$${string}` | number | symbol, WeakMap<object, PropertyDescriptor>> = Object.create(null);

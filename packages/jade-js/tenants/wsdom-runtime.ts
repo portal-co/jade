@@ -1,3 +1,5 @@
+import type { HostAsyncCapability, HostTask } from "../async-host.ts";
+import { hostTaskFromPromise } from "../async-host.ts";
 import { guestAbiMixin } from "./narrow.ts";
 import type { Tenant } from "./types.ts";
 
@@ -44,6 +46,7 @@ export function installServerTenantRuntime(
   request: Callback,
   release: Callback,
   capability: string,
+  async: HostAsyncCapability,
 ): Tenant {
   let nextRequestId = 1;
   let tenant!: Tenant;
@@ -96,9 +99,9 @@ export function installServerTenantRuntime(
     isServerDescriptor(value) && value.capability === capability ? shim(value) : value;
 
   const bridge = {
-    request(operation: string, args: unknown[]): Promise<unknown> {
+    request(operation: string, args: unknown[]): HostTask<unknown> {
       const requestId = nextRequestId++;
-      return new Promise((resolve, reject) => {
+      const pending = new Promise<unknown>((resolve, reject) => {
         const resolveCallback: Callback = (value) => resolve(fromWire(value));
         const rejectCallback: Callback = (error) => reject(error);
         request({
@@ -110,11 +113,12 @@ export function installServerTenantRuntime(
           reject: rejectCallback,
         } satisfies Request);
       });
+      return hostTaskFromPromise(async, pending);
     },
   };
 
   const op = (name: string) => function* (...args: unknown[]) {
-    return yield bridge.request(name, args);
+    return yield tenant.yieldHostTask(async, bridge.request(name, args));
   };
 
   // The full normal tenant object-manager surface is present. The ABI helpers

@@ -5,6 +5,7 @@ import { reflectPrimordial } from "./primordials/reflect.ts";
 import { proxyPrimordial } from "./primordials/proxy.ts";
 import { bufferPrimordial, nativeBufferHooks } from "./primordials/array-buffer.ts";
 import { typedArraysPrimordial } from "./primordials/typed-arrays.ts";
+import { createNativeHostAsyncCapability } from "./async-host.ts";
 import { createPrimordialRealm } from "./primordials/realm.ts";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -52,7 +53,9 @@ for (const tenant of [new MultiTenant(), single_tenant] as const) {
   drive(tenant, tenant.set(array, "0", 255));
   assert(drive(tenant, tenant.get(array, "0")) === 255, "typed array indexes go through BufferHooks");
 
-  const realm = drive(tenant, createPrimordialRealm(tenant));
+  const realm = drive(tenant, createPrimordialRealm(tenant, {
+    async: createNativeHostAsyncCapability(),
+  }));
   assert(drive(tenant, tenant.get(realm.globalThis, "Object")) === realm.Object, "realm installs Object");
   assert(drive(tenant, tenant.get(realm.globalThis, "ArrayBuffer")) === undefined,
     "BufferHooks must be explicit: bare realm has no ArrayBuffer");

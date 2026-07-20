@@ -245,6 +245,8 @@ pub struct Config<N = CanonicalHostMethodNames> {
     pub add_async: bool,
     /// Add generator capability on top of every function's declared variant.
     pub add_gen: bool,
+    /// Explicit realm PromiseRuntime expression used by `AWAIT` emission.
+    pub promise_runtime: String,
     /// Tenant methods (keyed by name — `"get"`, `"set"`, etc; see
     /// `portal_solutions_jade_vm_frontend::tenant_inline::TENANT_METHOD_NAMES`) safe to
     /// inline directly instead of calling through `tenant.<method>(...)`. Empty by
@@ -286,6 +288,7 @@ impl<N> Config<N> {
             names,
             add_async: false,
             add_gen: false,
+            promise_runtime: "promiseRuntime".to_string(),
             tenant_methods: Default::default(),
             #[cfg(feature = "reloop")]
             prefer_reloop: false,
@@ -882,7 +885,10 @@ fn emit_op<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>>(
                 return Err("jit: AWAIT in non-async function".to_string());
             }
             let val = resolve(val_op, jit);
-            jit.line(format!("state[{dest}] = await {val};"));
+            jit.line(format!(
+                "state[{dest}] = await {}.awaitHostTask({}.awaitGuest({val}));",
+                jit.cfg.promise_runtime, jit.cfg.promise_runtime
+            ));
             Ok(())
         }
         Operation::Yield { val: val_op, dest } => {

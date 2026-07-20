@@ -1,28 +1,34 @@
+import type { HostTask } from "../async-host.ts";
+import type { GuestPromise } from "../primordials/promise.ts";
 import type { Tenant } from "./types.ts";
 import { guestFnMeta, type NarrowSpec } from "./narrow.ts";
 
-/**
- * Combines a function's *declared* return shape (already `Promise`/`Generator`/
- * `AsyncGenerator`-wrapped, or plain) with the *ambient* `addAsync`/`addGen` upgrade
- * flags — the exact declared-bits-OR-ambient-bits idiom `fn_variant`/`effectiveVariant`
- * use on the Rust JIT (`Config.add_async`/`add_gen`) and `vm.ts` sides. Both unset leaves
- * `R` as-is; `addAsync` wraps in `Promise` (or `AsyncGenerator` if `addGen` is also set);
- * `addGen` alone wraps in `Generator`. If `R` is already one of these wrapper shapes, the
- * ambient flags upgrade it further (e.g. `Generator<T>` + `addAsync` becomes
- * `AsyncGenerator<T>`) rather than double-wrapping.
- */
-export type FnResult<R, AA extends boolean = false, AG extends boolean = false> =
+/** Directional async result of a function visible to host code. */
+export type HostFnResult<R, AA extends boolean = false, AG extends boolean = false> =
   R extends AsyncGenerator<infer Y, infer Ret, infer Next>
     ? AsyncGenerator<Y, Ret, Next>
     : R extends Generator<infer Y, infer Ret, infer Next>
       ? (AA extends true ? AsyncGenerator<Y, Ret, Next> : Generator<Y, Ret, Next>)
-      : R extends Promise<infer U>
-        ? (AG extends true ? AsyncGenerator<U, void, unknown> : Promise<U>)
+      : R extends GuestPromise<infer U>
+        ? (AG extends true ? AsyncGenerator<U, void, unknown> : HostTask<U>)
         : AA extends true
-          ? (AG extends true ? AsyncGenerator<R, void, unknown> : Promise<R>)
-          : AG extends true
-            ? Generator<R, void, unknown>
-            : R;
+          ? (AG extends true ? AsyncGenerator<R, void, unknown> : HostTask<R>)
+          : AG extends true ? Generator<R, void, unknown> : R;
+
+/** Directional async result of a function visible to guest code. */
+export type GuestFnResult<R, AA extends boolean = false, AG extends boolean = false> =
+  R extends AsyncGenerator<infer Y, infer Ret, infer Next>
+    ? AsyncGenerator<Y, Ret, Next>
+    : R extends Generator<infer Y, infer Ret, infer Next>
+      ? (AA extends true ? AsyncGenerator<Y, Ret, Next> : Generator<Y, Ret, Next>)
+      : R extends HostTask<infer U>
+        ? (AG extends true ? AsyncGenerator<U, void, unknown> : GuestPromise<U>)
+        : AA extends true
+          ? (AG extends true ? AsyncGenerator<R, void, unknown> : GuestPromise<R>)
+          : AG extends true ? Generator<R, void, unknown> : R;
+
+/** @deprecated Use HostFnResult or GuestFnResult to state the direction explicitly. */
+export type FnResult<R, AA extends boolean = false, AG extends boolean = false> = HostFnResult<R, AA, AG>;
 
 /**
  * The type-level counterpart of `hostToGuest`: given a host-side type `T`, compute the
@@ -54,9 +60,9 @@ export type HostToGuest<
       // `Args` (the default) actually *is* `never` — wrapping both sides in a tuple
       // suppresses that distribution.
       ...args: [Args] extends [never] ? { [K in keyof A]: GuestToHost<A[K]> } : Args
-    ) => FnResult<HostToGuest<R>, AA, AG>
-  : T extends Promise<infer U>
-    ? Promise<HostToGuest<U>>
+    ) => GuestFnResult<HostToGuest<R>, AA, AG>
+  : T extends HostTask<infer U>
+    ? GuestPromise<HostToGuest<U>>
     : T extends AsyncGenerator<infer Y, infer Ret, infer Next>
       ? AsyncGenerator<HostToGuest<Y>, HostToGuest<Ret>, GuestToHost<Next>>
       : T extends Generator<infer Y, infer Ret, infer Next>
@@ -76,9 +82,9 @@ export type GuestToHost<
 > = T extends (...args: infer A) => infer R
   ? (
       ...args: [Args] extends [never] ? { [K in keyof A]: HostToGuest<A[K]> } : Args
-    ) => FnResult<GuestToHost<R>, AA, AG>
-  : T extends Promise<infer U>
-    ? Promise<GuestToHost<U>>
+    ) => HostFnResult<GuestToHost<R>, AA, AG>
+  : T extends GuestPromise<infer U>
+    ? HostTask<GuestToHost<U>>
     : T extends AsyncGenerator<infer Y, infer Ret, infer Next>
       ? AsyncGenerator<GuestToHost<Y>, GuestToHost<Ret>, HostToGuest<Next>>
       : T extends Generator<infer Y, infer Ret, infer Next>

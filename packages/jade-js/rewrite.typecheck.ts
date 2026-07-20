@@ -3,7 +3,9 @@
 // typechecked for assignment-compatibility against `HostToGuest<SomeHostFnType>` directly,
 // and that a mismatched stub is correctly rejected.
 
-import type { HostToGuest, GuestToHost, FnResult } from "./rewrite.ts";
+import type { HostToGuest, GuestToHost, GuestFnResult, HostFnResult } from "./rewrite.ts";
+import type { GuestPromise } from "./primordials/promise.ts";
+import type { HostTask } from "./async-host.ts";
 
 // A host-side function type: takes a number and a string, returns a boolean.
 type HostFn = (n: number, s: string) => boolean;
@@ -24,11 +26,12 @@ const wrongReturnStub: HostToGuest<HostFn> = (n: number, s: string): string => `
 // `addAsync`/`addGen` upgrade a bare function's declared return shape, mirroring the
 // Rust JIT's `Config.add_async`/`add_gen` and `vm.ts`'s `addAsync`/`addGen` convention.
 type HostAsyncFn = (id: number) => string;
-const guestAsyncStub: HostToGuest<HostAsyncFn, true, false> = (id: number): Promise<string> =>
-  Promise.resolve(`${id}`);
+// A runtime-free branded fixture proves async guest values cannot be native promises.
+declare const guestPromise: GuestPromise<string>;
+const guestAsyncStub: HostToGuest<HostAsyncFn, true, false> = (_id: number): GuestPromise<string> => guestPromise;
 
 // A guest stub that forgets to wrap its return in a Promise must be rejected.
-// @ts-expect-error - addAsync=true means the guest side observes `Promise<string>`, not `string`
+// @ts-expect-error - addAsync=true means the guest side observes GuestPromise<string>, not string
 const wrongAsyncStub: HostToGuest<HostAsyncFn, true, false> = (id: number): string => `${id}`;
 
 // `GuestToHost` is the reverse: a host-side wrapper consuming a guest function.
@@ -38,15 +41,20 @@ const correctHostWrapper: GuestToHost<GuestFn, false, false> = (x: number): Gene
     yield x;
   })();
 
-// `FnResult` alone, without going through the full recursive machinery.
-type _AsyncResult = FnResult<number, true, false>; // Promise<number>
-const _asyncResultCheck: _AsyncResult = Promise.resolve(1);
-// @ts-expect-error - FnResult<number, true, false> is `Promise<number>`, not `number`
-const _wrongAsyncResultCheck: _AsyncResult = 1;
+// Directional result types use nominal host/guest async values, never native Promise.
+type _GuestAsyncResult = GuestFnResult<number, true, false>;
+declare const guestAsyncResult: _GuestAsyncResult;
+type _HostAsyncResult = HostFnResult<number, true, false>;
+declare const hostAsyncResult: _HostAsyncResult;
+// @ts-expect-error - native Promise is not a HostTask
+const _wrongHostAsyncResult: _HostAsyncResult = Promise.resolve(1);
+// @ts-expect-error - native Promise is not a GuestPromise
+const _wrongGuestAsyncResult: _GuestAsyncResult = Promise.resolve(1);
 
 // Keep the "correct" bindings referenced so this file has no genuinely-unused-variable
 // noise beyond what `@ts-expect-error` already documents as intentionally wrong.
 void correctGuestStub;
 void guestAsyncStub;
 void correctHostWrapper;
-void _asyncResultCheck;
+void guestAsyncResult;
+void hostAsyncResult;

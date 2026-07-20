@@ -1,16 +1,18 @@
 
 /* This is GENERATED code by `regen.ts` */
-import {type Tenant} from "./index.ts"
-import {THROUGH, createGuestGen, unpackGuestGen} from "./tenants/shims.ts"
-import {markGuestFn} from "./tenants/narrow.ts"
-export {THROUGH} from "./tenants/shims.ts"
+import {type Tenant} from "./tenants/types.ts";
+import {THROUGH, unpackGuestGen} from "./tenants/shims.ts";
+import {markGuestFn} from "./tenants/narrow.ts";
+import {hostTaskFromPromise,type HostTask} from "./async-host.ts";
+import type {PromiseRuntime} from "./primordials/promise.ts";
+export {THROUGH} from "./tenants/shims.ts";
 const {apply} = Reflect;
 const {create,defineProperties,freeze} = Object;
 const {fromCodePoint} = String;
 type _globalThis = typeof globalThis;
 const unshift = Array.prototype.unshift.call.bind(Array.prototype.unshift);
 
-export async function* runVirtualizedAG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): AsyncGenerator<any,any,any>{
+export async function* runVirtualizedAG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,promiseRuntime,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,promiseRuntime:PromiseRuntime,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): AsyncGenerator<any,any,any>{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -20,8 +22,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
         }
         const val: any = (op === 0 || op === 1 || op === 2 || op === 3 ) ? arg() : undefined;
         switch(op){
-
-            case 1: state[code().getUint32(ip,true)]=await val;ip += 4;break;
+            case 1: state[code().getUint32(ip,true)]=await promiseRuntime.awaitHostTask(promiseRuntime.awaitGuest(val));ip += 4;break;
             case 2: state[code().getUint32(ip,true)]=doubleGen ? yield {value:val,[THROUGH]:true} : yield val;ip += 4;break;
             case 3: state[code().getUint32(ip,true)]=yield* (doubleGen ? unpackGuestGen(val) : val);ip += 4;break;
     case 0: return val;case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;case 5:  {
@@ -50,7 +51,7 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                             ip:j,
                             globalThis,
                             nt: new.target,
-                            tenant,
+                            promiseRuntime,
                             addAsync,
                             addGen,
                             doubleGen: childDoubleGen,
@@ -121,10 +122,9 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 break;
             }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=yield* tenant.driveTenant(tenant.get(o,k),addAsync,addGen); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); yield* tenant.driveTenant(tenant.set(o,k,v),addAsync,addGen); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
-    }
-}
+    }}
 
-export async function runVirtualizedA(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): Promise<any>{
+async function _runVirtualizedA(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,promiseRuntime,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,promiseRuntime:PromiseRuntime,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): Promise<any>{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -134,10 +134,9 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
         }
         const val: any = (op === 0 || op === 1 || false) ? arg() : undefined;
         switch(op){
-
-            case 1: state[code().getUint32(ip,true)]=await val;ip += 4;break;
-            case 2: return apply(runVirtualizedAG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
-            case 3: return apply(runVirtualizedAG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
+            case 1: state[code().getUint32(ip,true)]=await promiseRuntime.awaitHostTask(promiseRuntime.awaitGuest(val));ip += 4;break;
+            case 2: return apply(runVirtualizedAG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,promiseRuntime,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
+            case 3: return apply(runVirtualizedAG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,promiseRuntime,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
     case 0: return val;case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;case 5:  {
                 const declaredVariant = arg()&3;
                 const effectiveVariant = declaredVariant | (addAsync ? 1 : 0) | (addGen ? 2 : 0);
@@ -164,7 +163,7 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                             ip:j,
                             globalThis,
                             nt: new.target,
-                            tenant,
+                            promiseRuntime,
                             addAsync,
                             addGen,
                             doubleGen: childDoubleGen,
@@ -235,10 +234,12 @@ export async function runVirtualizedA(code: () => DataView, state: {[a: number]:
                 break;
             }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=await tenant.driveTenant(tenant.get(o,k),addAsync,addGen); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); await tenant.driveTenant(tenant.set(o,k,v),addAsync,addGen); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
-    }
+    }}
+export function runVirtualizedA(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,promiseRuntime,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,promiseRuntime:PromiseRuntime,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): HostTask<any>{
+  return hostTaskFromPromise(promiseRuntime.async, _runVirtualizedA(code,state,{ip,globalThis,nt,tenant,promiseRuntime,addAsync,addGen,doubleGen},...args));
 }
 
-export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): any{
+export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,promiseRuntime,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,promiseRuntime:PromiseRuntime,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): any{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -248,8 +249,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
         }
         const val: any = (op === 0 || false || op === 2 || op === 3 ) ? arg() : undefined;
         switch(op){
-
-            case 1: return apply(runVirtualizedAG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
+            case 1: return apply(runVirtualizedAG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,promiseRuntime,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
             case 2: state[code().getUint32(ip,true)]=doubleGen ? yield {value:val,[THROUGH]:true} : yield val;ip += 4;break;
             case 3: state[code().getUint32(ip,true)]=yield* (doubleGen ? unpackGuestGen(val) : val);ip += 4;break;
     case 0: return val;case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;case 5:  {
@@ -278,7 +278,7 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                             ip:j,
                             globalThis,
                             nt: new.target,
-                            tenant,
+                            promiseRuntime,
                             addAsync,
                             addGen,
                             doubleGen: childDoubleGen,
@@ -349,10 +349,9 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 break;
             }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=yield* tenant.driveTenant(tenant.get(o,k),addAsync,addGen); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); yield* tenant.driveTenant(tenant.set(o,k,v),addAsync,addGen); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
-    }
-}
+    }}
 
-export  function runVirtualized(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): any{
+export  function runVirtualized(code: () => DataView, state: {[a: number]: any},{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,promiseRuntime,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,promiseRuntime:PromiseRuntime,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean},...args: any[]): any{
     for(;;){
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
@@ -362,10 +361,9 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
         }
         const val: any = (op === 0 || false || false) ? arg() : undefined;
         switch(op){
-
-            case 1: return apply(runVirtualizedA,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
-            case 2: return apply(runVirtualizedG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
-            case 3: return apply(runVirtualizedG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
+            case 1: return apply(runVirtualizedA,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,promiseRuntime,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
+            case 2: return apply(runVirtualizedG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,promiseRuntime,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
+            case 3: return apply(runVirtualizedG,this,(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,promiseRuntime,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args));
     case 0: return val;case 4: state[code().getUint32(ip,true)]=globalThis;ip += 4;break;case 5:  {
                 const declaredVariant = arg()&3;
                 const effectiveVariant = declaredVariant | (addAsync ? 1 : 0) | (addGen ? 2 : 0);
@@ -392,7 +390,7 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                             ip:j,
                             globalThis,
                             nt: new.target,
-                            tenant,
+                            promiseRuntime,
                             addAsync,
                             addGen,
                             doubleGen: childDoubleGen,
@@ -463,5 +461,4 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 break;
             }case 23: { const o=arg(),k=arg(); state[code().getUint32(ip,true)]=tenant.driveTenant(tenant.get(o,k),addAsync,addGen); ip+=4; break; }case 24: { const o=arg(),k=arg(),v=arg(); tenant.driveTenant(tenant.set(o,k,v),addAsync,addGen); state[code().getUint32(ip,true)]=v; ip+=4; break; }
         }
-    }
-}
+    }}

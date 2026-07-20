@@ -1,6 +1,7 @@
+import { isHostTaskYield } from "../async-host.ts";
 import type { Tenant, TenantInvocation } from "./types.ts";
-import { createGuestGen, isGuestGen, unpackGuestGen } from "./shims.ts";
-import { yieldTenant, driveTenant } from "./driver.ts";
+import { createGuestGen, unpackGuestGen } from "./shims.ts";
+import { yieldTenant, yieldHostTask, driveTenant } from "./driver.ts";
 
 /**
  * The calling convention a guest (Jade-VM-produced) function actually uses, as observed
@@ -52,19 +53,9 @@ export function* invokeGuestAware<Args extends readonly unknown[], R = unknown>(
     : meta?.abi === "leading-tenant-nt"
       ? (Reflect.apply(fn, invocation.thisArg, [this, undefined, ...args]) as R)
       : (Reflect.apply(fn, invocation.thisArg, args) as R);
-  // Hand asynchronous and native-generator results to the driver.  A guest-gen
-  // object is already an ABI value and must not be wrapped a second time.
-  if (
-    (raw !== null &&
-      (typeof raw === "object" || typeof raw === "function") &&
-      typeof (raw as any).then === "function") ||
-    (raw !== null &&
-      typeof raw === "object" &&
-      typeof (raw as any).next === "function" &&
-      !isGuestGen(raw))
-  ) {
-    return yield raw as any;
-  }
+  // Async control flow is explicit. Only a trusted HostTaskYield crosses to the
+  // driver; guest values and guest thenables are returned unchanged.
+  if (isHostTaskYield(raw)) return yield raw;
   return raw;
 }
 
@@ -84,7 +75,8 @@ export function* invokeTrap<Args extends readonly unknown[], R = unknown>(
 
 /**
  * Every ABI/shim helper a tenant method might need — `markGuestFn`/`invokeGuestAware`/
- * `invokeTrap`/`createGuestGen`/`unpackGuestGen` plus the new `yieldTenant`/`driveTenant`
+ * `invokeTrap`/`createGuestGen`/`unpackGuestGen` plus the new
+ * `yieldTenant`/`yieldHostTask`/`driveTenant`
  * driver helpers — bundled for injection onto every `Tenant` implementation
  * (`Object.assign(Tenant.prototype, guestAbiMixin)` for a class, `Object.assign(obj,
  * guestAbiMixin)` for an object literal).  Each function keeps this single shared
@@ -99,6 +91,7 @@ export const guestAbiMixin = {
   createGuestGen,
   unpackGuestGen,
   yieldTenant,
+  yieldHostTask,
   driveTenant,
 };
 

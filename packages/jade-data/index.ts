@@ -88,7 +88,7 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                             ip:j,
                             globalThis,
                             nt: new.target,
-                            tenant,
+                            promiseRuntime,
                             addAsync,
                             addGen,
                             doubleGen: childDoubleGen,
