@@ -265,8 +265,14 @@ fn try_emit_module(module: &Module) -> TokenStream {
     });
     // Every registered cross-file factory's struct, unconditionally — small, fixed registry, so
     // this is simpler than scanning for which ones a given file actually destructures (see
-    // `cross_file.rs`).
+    // `cross_file.rs`) — except the one defining *this* file's own struct: that would be a
+    // self-import of a name already defined right below (`object.rs` generating a `use
+    // crate::object::ObjectPrimordial;` for its own `ObjectPrimordial`), a hard duplicate-
+    // definition error, not merely redundant.
     for factory in cross_file::TABLE {
+        if STRUCT_DEFS.with(|d| d.borrow().contains_key(factory.struct_name)) {
+            continue;
+        }
         let path: TokenStream = factory.struct_path.parse().unwrap_or_default();
         items.push(quote! {
             #[allow(unused_imports)]
@@ -509,6 +515,13 @@ fn emit_fn_decl(func: &FnDecl) -> Result<TokenStream, IrError> {
     if throws && is_void {
         body = quote! { #body Ok(()) };
     }
+    // See `emit_member`'s numeric-computed-member doc comment: every `args[N]` fallback reads
+    // this local instead of calling `tenant.undefined_value()` inline, to avoid a second live
+    // mutable borrow of `tenant` when `args[N]` appears as an argument to a call that already
+    // borrows `tenant` itself. Unconditional (every function here takes `tenant`, whether or not
+    // its body actually contains a numeric computed-member access) — an unused local is only a
+    // warning, never a build error.
+    body = quote! { let __undefined = tenant.undefined_value(); #body };
 
     let cache = PER_TENANT_CACHE.with(|c| c.borrow().clone());
     if let Some((cache_var, value_ty)) = &cache
@@ -607,34 +620,46 @@ fn tenant_call_method_name(expr: &Expr) -> Option<&str> {
 
 /// Every closure's declared return type is a plain guest `T::Value` (see `emit_closure`), but a
 /// handful of `Tenant` methods return something else in Rust — `bool`
-/// (`has`/`isExtensible`/`preventExtensions`/`defineProperty`/`setPrototypeOf`) or
-/// `Option<T::Value>` (`getPrototypeOf`) — where the *TS* source gets away with returning the
-/// bare value directly because in the current TS-hosted execution model a host `boolean`/
-/// primitive *is* already a valid guest-observable value with no marshaling boundary at all
-/// (only objects/functions are tenant-managed). Rust's `Tenant::Value` is opaque, so returning
-/// one of these from a closure needs an explicit conversion at exactly this boundary: `bool` via
-/// `Tenant::boolean_value`, `Option<T::Value>` by unwrapping to `Tenant::null_value()`.
-/// `ownKeys`/`ownPropertyKeys` (`Vec<PropertyKey>`) have no such conversion available — a raw
-/// host key list has no guest-visible Array representation without a guest Array primordial,
-/// which doesn't exist yet (see `docs/primordials-plan.md`'s own non-goals) — so returning one
-/// directly is a named, honest rejection rather than a guess.
+/// (`has`/`isExtensible`/`preventExtensions`/`defineProperty`/`setPrototypeOf`),
+/// `Option<T::Value>` (`getPrototypeOf`), or `Vec<PropertyKey>` (`ownKeys`/`ownPropertyKeys`) —
+/// where the *TS* source gets away with returning the bare value directly because in the current
+/// TS-hosted execution model a host `boolean`/primitive/`Array` *is* already a valid
+/// guest-observable value with no marshaling boundary at all (only objects/functions are
+/// tenant-managed). Rust's `Tenant::Value` is opaque, so returning one of these from a closure
+/// needs an explicit conversion at exactly this boundary: `bool` via `Tenant::boolean_value`,
+/// `Option<T::Value>` by unwrapping to `Tenant::null_value()`, and `Vec<PropertyKey>` via
+/// `Tenant::property_key_value` (per key) + `Tenant::indexed_collection` (the whole list) — see
+/// `docs/array-primordial-gap-plan.md` for why those two methods, not a full guest `Array`
+/// primordial, are the right-sized fix here.
 fn coerce_return_value(expr: &Expr, tokens: TokenStream) -> Result<TokenStream, IrError> {
     const BOOL_RETURNING: &[&str] = &["has", "isExtensible", "preventExtensions", "defineProperty", "setPrototypeOf"];
     const OPTION_VALUE_RETURNING: &[&str] = &["getPrototypeOf"];
     const KEY_LIST_RETURNING: &[&str] = &["ownKeys", "ownPropertyKeys"];
     if let Some(method) = tenant_call_method_name(expr) {
         if BOOL_RETURNING.contains(&method) {
-            return Ok(quote! { tenant.boolean_value(#tokens) });
+            // `#tokens` is itself `(tenant.<method>(...))?` — a second live mutable borrow of
+            // `tenant` (the inner call's own receiver borrow) can't be inlined directly as an
+            // argument to `tenant.boolean_value(...)`, which borrows `tenant` too (same class of
+            // conflict as `emit_member`'s `args[N]` fallback — see its doc comment). Hoisting
+            // the inner call's result into its own `let` first resolves that borrow before
+            // `boolean_value`'s call starts.
+            return Ok(quote! {
+                {
+                    let __result = #tokens;
+                    tenant.boolean_value(__result)
+                }
+            });
         }
         if OPTION_VALUE_RETURNING.contains(&method) {
             return Ok(quote! { (#tokens).unwrap_or_else(|| tenant.null_value()) });
         }
         if KEY_LIST_RETURNING.contains(&method) {
-            return Err(IrError::Unsupported {
-                file: String::new(),
-                construct: format!(
-                    "returning tenant.{method}(...)'s host-side Vec<PropertyKey> directly as a guest value needs a guest Array primordial, which doesn't exist yet"
-                ),
+            return Ok(quote! {
+                {
+                    let __keys = #tokens;
+                    let __values = __keys.iter().map(|k| tenant.property_key_value(k)).collect::<Result<Vec<_>, _>>()?;
+                    tenant.indexed_collection(__values)?
+                }
             });
         }
     }
@@ -863,15 +888,13 @@ fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
             };
             let ident = format_ident!("{}", to_snake_case(name));
             let iter_tokens = emit_expr(iter)?;
-            // Iterating a `&[T::Value]` slice (`args.slice(N)`, already emitted as `&args[N..]`)
-            // yields `&T::Value` items; iterating an owned `Vec<_>` (`ownKeys`/`ownPropertyKeys`)
-            // yields owned items — Rust's own `IntoIterator` selection already gets this right
-            // from the expression's type with no extra `&` needed either way, so only the
-            // *bookkeeping* (what ref-ness to record for the loop-local) differs by shape.
-            let binding_is_ref = matches!(iter, Expr::HostIntrinsic { name, .. } if *name == intrinsics::ARRAY_SLICE_FROM);
+            // `args.slice(N)` (owned `Vec<T::Value>`, see `intrinsics.rs`'s `ARRAY_SLICE_FROM`
+            // template) and `ownKeys`/`ownPropertyKeys` (also an owned `Vec<_>`) both yield
+            // *owned* items when iterated by value — no recognized source produces a borrowed
+            // slice/iterator here anymore, so the loop-local is always owned.
             let saved = LOCAL_REFNESS.with(|m| m.borrow().clone());
             LOCAL_REFNESS.with(|m| {
-                m.borrow_mut().insert(to_snake_case(name), binding_is_ref);
+                m.borrow_mut().insert(to_snake_case(name), false);
             });
             let body_tokens = emit_block(body)?;
             LOCAL_REFNESS.with(|m| *m.borrow_mut() = saved);
@@ -1002,7 +1025,16 @@ fn emit_member(obj: &Expr, prop: &MemberProp) -> Result<TokenStream, IrError> {
             let obj_tokens = emit_expr(obj)?;
             let Expr::Lit(Lit::Num(n)) = index.as_ref() else { unreachable!() };
             let n = *n as usize;
-            Ok(quote! { (#obj_tokens).get(#n).cloned().unwrap_or_else(|| tenant.undefined_value()) })
+            // The fallback deliberately reads a pre-materialized `__undefined` local (always
+            // bound as the first statement of every function/closure body — see
+            // `emit_fn_decl`/`emit_closure`) rather than calling `tenant.undefined_value()`
+            // inline: this expression very often appears *as a call argument* to a
+            // `tenant.<method>(...)`/shimmed call that also borrows `tenant` (as receiver or as
+            // its own leading argument), and a fresh `&mut tenant` borrow from an inline call
+            // here would conflict with that outer borrow — a real, previously-hit compile error,
+            // not a hypothetical one. `__undefined.clone()` only ever needs `&__undefined`, which
+            // never conflicts with anything.
+            Ok(quote! { (#obj_tokens).get(#n).cloned().unwrap_or_else(|| __undefined.clone()) })
         }
         MemberProp::Computed(_) => Err(IrError::Unsupported {
             file: String::new(),
@@ -1645,12 +1677,20 @@ fn emit_closure(func: &FnDecl) -> Result<TokenStream, IrError> {
 
     let body = emit_block(&func.body)?;
 
-    let body_str = body.to_string();
-    let captured: Vec<String> = outer_names
-        .into_iter()
-        .filter(|name| name != "tenant")
-        .filter(|name| word_referenced(&body_str, name))
-        .collect();
+    // A precise IR walk, *not* a text search over the emitted body: this closure's own generated
+    // code routinely spells out Rust struct-literal field labels (`TenantInvocation::Apply {
+    // this_arg: ..., args: ... }`) that collide, as plain text, with genuinely-outer-scope names
+    // like a sibling closure's own `thisArg`/`args` parameters — a text search would treat the
+    // field label as a reference to that outer name and wrongly try to capture it (and, worse,
+    // wrongly try to `.clone()` a name already moved earlier in this same scope, or capture a
+    // borrowed `&[T::Value]` slice tied to a shorter-lived outer closure — both real bugs this
+    // crate hit before switching to this walk). `free_idents` only collects `Expr::Ident`s that
+    // are genuine value reads, explicitly skipping struct/object keys and resolvable call
+    // callees (`tenant.<method>`, a shim, a local function, a cross-file factory — none of which
+    // are ever a captured closure variable).
+    let mut referenced = std::collections::HashSet::new();
+    free_idents_in_fn(func, &mut referenced);
+    let captured: Vec<String> = outer_names.into_iter().filter(|name| name != "tenant" && referenced.contains(name)).collect();
 
     LOCAL_REFNESS.with(|m| *m.borrow_mut() = saved_refness);
     OPTION_LOCALS.with(|m| *m.borrow_mut() = saved_options);
@@ -1663,10 +1703,14 @@ fn emit_closure(func: &FnDecl) -> Result<TokenStream, IrError> {
         })
         .collect();
 
+    // See `emit_member`'s doc comment / `emit_fn_decl`'s matching prelude: every closure gets its
+    // own `__undefined` local for the same reason (each closure is its own borrow scope for
+    // `tenant`).
     Ok(quote! {
         {
             #(#clone_prelude)*
             move |tenant: &mut T, #(#param_tokens),*| -> Result<T::Value, TenantError> {
+                let __undefined = tenant.undefined_value();
                 #body
             }
         }
@@ -1674,14 +1718,183 @@ fn emit_closure(func: &FnDecl) -> Result<TokenStream, IrError> {
 }
 
 /// Whether `word` (an exact identifier, not a substring) appears anywhere in `haystack` — used
-/// both for closure free-variable capture (`emit_closure`) and per-tenant-cache-parameter
-/// injection (`emit_fn_decl`). Operating on the already-emitted token string rather than walking
-/// the IR a second time is a deliberately coarse approximation: it can't distinguish a genuine
-/// reference from an unrelated local that happens to share a name in a *different* scope, but no
-/// name collision like that occurs anywhere in the surveyed source, and a false-positive capture
-/// only costs an extra harmless `.clone()`/parameter — never a wrong answer.
+/// for the per-tenant/cross-file-factory cache-parameter injection in `emit_fn_decl` (checking
+/// for a specific, unambiguous synthetic name this crate itself chose, e.g.
+/// `object_primordial_cache` — not the general free-variable question, which
+/// `free_idents_in_fn` answers precisely instead; see its doc comment for why a text search was
+/// not precise enough for that).
 fn word_referenced(haystack: &str, word: &str) -> bool {
     haystack.split(|c: char| !c.is_alphanumeric() && c != '_').any(|token| token == word)
+}
+
+/// Collects every free (non-parameter) identifier `func`'s body reads as a value, snake_cased,
+/// into `out` — the real free-variable walk `emit_closure` uses for capture detection. "Reads as
+/// a value" deliberately excludes: object/struct-literal *keys* (`PropKey`/named-field
+/// positions), member-access field names, and a call's callee when it resolves to something this
+/// emitter calls by a fixed Rust path anyway (a `tenant.<method>`, a shim, a locally-defined
+/// function, or a cross-file factory) rather than an actual captured closure value.
+fn free_idents_in_fn(func: &FnDecl, out: &mut std::collections::HashSet<String>) {
+    let mut inner = std::collections::HashSet::new();
+    free_idents_in_block(&func.body, &mut inner);
+    let param_names: std::collections::HashSet<String> = func
+        .params
+        .iter()
+        .filter_map(|p| match &p.pattern {
+            Pattern::Ident(name) => Some(to_snake_case(name)),
+            Pattern::ObjectShallow(_) => None,
+        })
+        .collect();
+    out.extend(inner.into_iter().filter(|name| !param_names.contains(name)));
+}
+
+fn free_idents_in_block(block: &Block, out: &mut std::collections::HashSet<String>) {
+    for stmt in &block.0 {
+        free_idents_in_stmt(stmt, out);
+    }
+}
+
+fn free_idents_in_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
+    match stmt {
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init {
+                free_idents_in_expr(e, out);
+            }
+        }
+        Stmt::Expr(e) | Stmt::Throw(e) => free_idents_in_expr(e, out),
+        Stmt::Return(v) => {
+            if let Some(e) = v {
+                free_idents_in_expr(e, out);
+            }
+        }
+        Stmt::If { cond, then_branch, else_branch } => {
+            free_idents_in_expr(cond, out);
+            free_idents_in_block(then_branch, out);
+            if let Some(b) = else_branch {
+                free_idents_in_block(b, out);
+            }
+        }
+        Stmt::ForOf { iter, body, .. } => {
+            free_idents_in_expr(iter, out);
+            free_idents_in_block(body, out);
+        }
+        Stmt::ForCounting { start, bound, body, .. } => {
+            free_idents_in_expr(start, out);
+            free_idents_in_expr(bound, out);
+            free_idents_in_block(body, out);
+        }
+        Stmt::TryCatch { try_block, catch_block, .. } => {
+            free_idents_in_block(try_block, out);
+            free_idents_in_block(catch_block, out);
+        }
+        Stmt::Continue => {}
+    }
+}
+
+/// Whether `callee` resolves to a fixed Rust call target this emitter already knows how to
+/// reach (`tenant.<method>`, a shim, a locally-defined function, or a cross-file factory) —
+/// mirrors the recognition logic in `emit_call` itself. If so, the callee identifier is not a
+/// captured closure value and must not be walked as one.
+fn is_resolvable_call_callee(callee: &Expr) -> bool {
+    match callee {
+        Expr::Member { obj, prop: MemberProp::Ident(method) } => {
+            matches!(obj.as_ref(), Expr::Ident(n) if n == "tenant") && tenant_method(method).is_some()
+        }
+        Expr::Ident(name) => {
+            imported_source(name).is_some_and(|source| shims::lookup(&source, name).is_some() || cross_file::lookup(&source, name).is_some())
+                || LOCAL_FN_PARAMS.with(|m| m.borrow().contains_key(name))
+        }
+        _ => false,
+    }
+}
+
+fn free_idents_in_expr(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+    match expr {
+        Expr::Ident(name) => {
+            out.insert(to_snake_case(name));
+        }
+        Expr::Lit(_) | Expr::ThisArg => {}
+        Expr::TemplateLiteral(parts) => {
+            for p in parts {
+                if let TemplatePart::Expr(e) = p {
+                    free_idents_in_expr(e, out);
+                }
+            }
+        }
+        Expr::Array(elements) => {
+            for e in elements {
+                match e {
+                    ArrayElement::Normal(e) | ArrayElement::Spread(e) => free_idents_in_expr(e, out),
+                }
+            }
+        }
+        Expr::Object(props) => {
+            for p in props {
+                match p {
+                    // The key itself is a struct/descriptor field *label*, not a value read —
+                    // only a `Computed` key (a real runtime expression) counts.
+                    ObjectProp::KeyValue { key: PropKey::Computed(e), value } => {
+                        free_idents_in_expr(e, out);
+                        free_idents_in_expr(value, out);
+                    }
+                    ObjectProp::KeyValue { key: PropKey::Ident(_), value } => free_idents_in_expr(value, out),
+                    ObjectProp::Spread(e) => free_idents_in_expr(e, out),
+                    ObjectProp::Method { func, .. } => free_idents_in_fn(func, out),
+                }
+            }
+        }
+        Expr::Member { obj, prop } => {
+            free_idents_in_expr(obj, out);
+            if let MemberProp::Computed(e) = prop {
+                free_idents_in_expr(e, out);
+            }
+        }
+        Expr::Call { callee, args } => {
+            if !is_resolvable_call_callee(callee) {
+                free_idents_in_expr(callee, out);
+            }
+            for a in args {
+                match a {
+                    CallArg::Normal(e) | CallArg::Spread(e) => free_idents_in_expr(e, out),
+                }
+            }
+        }
+        Expr::New { args, .. } => {
+            // `new TypeError(...)`/`new RangeError(...)` (the only recognized `new` callees,
+            // per `emit_throw`) are never a captured closure value.
+            for a in args {
+                match a {
+                    CallArg::Normal(e) | CallArg::Spread(e) => free_idents_in_expr(e, out),
+                }
+            }
+        }
+        Expr::Closure(func) => free_idents_in_fn(func, out),
+        Expr::TenantYield(e) | Expr::Un { arg: e, .. } | Expr::Spread(e) | Expr::Paren(e) | Expr::Cast { expr: e, .. } => {
+            free_idents_in_expr(e, out)
+        }
+        Expr::Bin { lhs, rhs, .. } => {
+            free_idents_in_expr(lhs, out);
+            free_idents_in_expr(rhs, out);
+        }
+        Expr::Cond { test, cons, alt } => {
+            free_idents_in_expr(test, out);
+            free_idents_in_expr(cons, out);
+            free_idents_in_expr(alt, out);
+        }
+        Expr::Assign { target, value } => {
+            free_idents_in_expr(target, out);
+            free_idents_in_expr(value, out);
+        }
+        Expr::Sequence(exprs) => {
+            for e in exprs {
+                free_idents_in_expr(e, out);
+            }
+        }
+        Expr::HostIntrinsic { args, .. } => {
+            for a in args {
+                free_idents_in_expr(a, out);
+            }
+        }
+    }
 }
 
 fn bin_op_tokens(op: BinOp) -> Result<TokenStream, IrError> {

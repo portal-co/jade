@@ -22,6 +22,12 @@ pub enum TestValue {
     Bool(bool),
     Undefined,
     Null,
+    /// `Tenant::indexed_collection`'s test-double representation — see
+    /// `docs/array-primordial-gap-plan.md`. Deliberately just a flat `Vec`, not an `Object`
+    /// record: this type intentionally makes no `Array.prototype`/exotic-trap claim, so a real
+    /// `.get`/`.set`/`.has` test against it would rightly fail to compile/match rather than
+    /// silently behaving like a real object.
+    List(Vec<TestValue>),
 }
 
 impl TestValue {
@@ -84,7 +90,8 @@ impl Tenant for TestTenant {
 
     fn typeof_tag(&self, value: &Self::Value) -> ValueTag {
         match value {
-            TestValue::Object(_) => ValueTag::Object,
+            TestValue::Object(id) if self.callables.contains_key(id) => ValueTag::Function,
+            TestValue::Object(_) | TestValue::List(_) => ValueTag::Object,
             TestValue::Number(_) => ValueTag::Number,
             TestValue::Str(_) => ValueTag::String,
             TestValue::Bool(_) => ValueTag::Boolean,
@@ -105,7 +112,7 @@ impl Tenant for TestTenant {
             }
             TestValue::Str(s) => s.trim().parse().unwrap_or(f64::NAN),
             TestValue::Null => 0.0,
-            TestValue::Undefined | TestValue::Object(_) => f64::NAN,
+            TestValue::Undefined | TestValue::Object(_) | TestValue::List(_) => f64::NAN,
         }
     }
 
@@ -115,7 +122,7 @@ impl Tenant for TestTenant {
             TestValue::Number(n) => *n != 0.0 && !n.is_nan(),
             TestValue::Str(s) => !s.is_empty(),
             TestValue::Undefined | TestValue::Null => false,
-            TestValue::Object(_) => true,
+            TestValue::Object(_) | TestValue::List(_) => true,
         }
     }
 
@@ -154,6 +161,19 @@ impl Tenant for TestTenant {
         match value {
             TestValue::Null => None,
             other => Some(other.clone()),
+        }
+    }
+
+    fn indexed_collection(&mut self, values: Vec<Self::Value>) -> Result<Self::Value, TenantError> {
+        Ok(TestValue::List(values))
+    }
+
+    fn property_key_value(&mut self, key: &PropertyKey) -> Result<Self::Value, TenantError> {
+        match key {
+            PropertyKey::String(s) => Ok(TestValue::Str(s.clone())),
+            PropertyKey::Symbol(_) => Err(TenantError::type_error(
+                "TestTenant has no guest-value representation for a Symbol property key",
+            )),
         }
     }
 
@@ -347,13 +367,26 @@ impl Tenant for TestTenant {
     }
 
     fn assign(&mut self, dst: &Self::Value, src: &Self::Value) -> Result<(), TenantError> {
-        let idx = require_object(dst)?;
-        if self.callables.contains_key(&idx) {
+        let dst_idx = require_object(dst)?;
+        if self.callables.contains_key(&dst_idx) {
             let dst = dst.clone();
             let src = src.clone();
-            return self.with_handler(idx, |tenant, handler| handler.assign(tenant, &dst, &src)).unwrap();
+            return self.with_handler(dst_idx, |tenant, handler| handler.assign(tenant, &dst, &src)).unwrap();
         }
-        Err(unimplemented("assign (non-exotic target)"))
+        let src_idx = require_object(src)?;
+        if self.callables.contains_key(&src_idx) {
+            return Err(unimplemented("assign (callable exotic source)"));
+        }
+        let entries: Vec<(PropertyKey, TestValue)> = self.objects[src_idx]
+            .props
+            .iter()
+            .filter(|(_, d)| d.enumerable != Some(false))
+            .filter_map(|(k, d)| d.value.clone().map(|v| (k.clone(), v)))
+            .collect();
+        for (key, value) in entries {
+            self.set(dst, &key, value)?;
+        }
+        Ok(())
     }
 
     fn make_exotic(

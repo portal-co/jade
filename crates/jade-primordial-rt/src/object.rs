@@ -1,7 +1,8 @@
 /* This is GENERATED code by gen-primordials, from packages/jade-js/primordials/object.ts. */
 #[allow(unused_imports)]
 use portal_solutions_jade_tenant_rt::{
-    DynFields, PropertyKey, Tenant, TenantError, TenantPropertyDescriptor, ValueTag,
+    DynFields, PropertyKey, Tenant, TenantError, TenantInvocation, TenantPropertyDescriptor,
+    ValueTag,
 };
 pub struct ObjectPrimordial<T: Tenant> {
     pub object: T::Value,
@@ -29,6 +30,7 @@ pub fn install_method<T: Tenant + 'static>(
     name: &str,
     apply: impl FnMut(&mut T, T::Value, &[T::Value]) -> Result<T::Value, TenantError> + 'static,
 ) -> Result<T::Value, TenantError> {
+    let __undefined = tenant.undefined_value();
     let mut fn_ = (crate::types_shim::make_builtin(tenant, name, apply, None, None))?;
     (crate::types_shim::define_data(
         tenant,
@@ -51,6 +53,7 @@ pub fn lock<T: Tenant + 'static>(
     object: &T::Value,
     freeze: bool,
 ) -> Result<T::Value, TenantError> {
+    let __undefined = tenant.undefined_value();
     for key in (tenant.own_property_keys(object))? {
         let mut descriptor = (tenant.get_own_property_descriptor(object, &key))?;
         let Some(descriptor) = descriptor else {
@@ -75,4 +78,531 @@ pub fn lock<T: Tenant + 'static>(
         ));
     }
     return Ok((object).clone());
+}
+pub fn object_primordial<T: Tenant + 'static>(
+    tenant: &mut T,
+    cache: &mut ObjectPrimordialCache<T>,
+) -> Result<ObjectPrimordial<T>, TenantError> {
+    let __undefined = tenant.undefined_value();
+    if let Some(existing) = cache.entry.clone() {
+        return Ok(existing);
+    }
+    let mut object_prototype = (tenant.make(None))?;
+    let mut object_fn = (crate::types_shim::make_builtin(
+        tenant,
+        "Object",
+        {
+            let object_prototype = object_prototype.clone();
+            move |tenant: &mut T,
+                  _this_arg: T::Value,
+                  args: &[T::Value]|
+                  -> Result<T::Value, TenantError> {
+                let __undefined = tenant.undefined_value();
+                let mut value = (args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone());
+                if ((tenant.typeof_tag(&value) == ValueTag::Null)
+                    || (tenant.typeof_tag(&value) == ValueTag::Undefined))
+                {
+                    return Ok((tenant.make(Some((object_prototype).clone())))?);
+                }
+                if ((tenant.typeof_tag(&value) == ValueTag::Object)
+                    || (tenant.typeof_tag(&value) == ValueTag::Function))
+                {
+                    return Ok(value);
+                }
+                return Err(TenantError::TypeError(
+                    ("primitive Object boxing is not available in this Jade realm").to_string(),
+                ));
+            }
+        },
+        Some(Box::new({
+            let object_prototype = object_prototype.clone();
+            move |tenant: &mut T,
+                  _new_target: T::Value,
+                  args: &[T::Value]|
+                  -> Result<T::Value, TenantError> {
+                let __undefined = tenant.undefined_value();
+                let mut value = (args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone());
+                if ((tenant.typeof_tag(&value) == ValueTag::Null)
+                    || (tenant.typeof_tag(&value) == ValueTag::Undefined))
+                {
+                    return Ok((tenant.make(Some((object_prototype).clone())))?);
+                }
+                if ((tenant.typeof_tag(&value) == ValueTag::Object)
+                    || (tenant.typeof_tag(&value) == ValueTag::Function))
+                {
+                    return Ok(value);
+                }
+                return Err(TenantError::TypeError(
+                    ("primitive Object boxing is not available in this Jade realm").to_string(),
+                ));
+            }
+        })),
+        None,
+    ))?;
+    let mut result = ObjectPrimordial {
+        object: (object_fn).clone(),
+        object_prototype: (object_prototype).clone(),
+    };
+    cache.entry = Some((result).clone());
+    (crate::types_shim::define_data(
+        tenant,
+        &object_fn,
+        &PropertyKey::from("prototype"),
+        &object_prototype,
+        TenantPropertyDescriptor {
+            value: None,
+            writable: Some(false),
+            get: None,
+            set: None,
+            enumerable: None,
+            configurable: Some(false),
+        },
+    ))?;
+    (tenant.set_prototype_of(&object_fn, Some((object_prototype).clone())))?;
+    (install_method(tenant, &object_fn, "create", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            let mut proto = (args)
+                .get(0usize)
+                .cloned()
+                .unwrap_or_else(|| __undefined.clone());
+            if (tenant.typeof_tag(&proto) != ValueTag::Null) {
+                (crate::types_shim::assert_object(
+                    tenant,
+                    &proto,
+                    "Object.create prototype must be object or null",
+                ))?;
+            }
+            return Ok((tenant.make(tenant.nullable(&proto)))?);
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "keys", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            return Ok({
+                let __keys = (tenant.own_keys(
+                    &(args)
+                        .get(0usize)
+                        .cloned()
+                        .unwrap_or_else(|| __undefined.clone()),
+                ))?;
+                let __values = __keys
+                    .iter()
+                    .map(|k| tenant.property_key_value(k))
+                    .collect::<Result<Vec<_>, _>>()?;
+                tenant.indexed_collection(__values)?
+            });
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "hasOwn", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            return Ok({
+                let __result = (tenant.has(
+                    &(args)
+                        .get(0usize)
+                        .cloned()
+                        .unwrap_or_else(|| __undefined.clone()),
+                    &tenant.to_property_key(
+                        &(args)
+                            .get(1usize)
+                            .cloned()
+                            .unwrap_or_else(|| __undefined.clone()),
+                    ),
+                ))?;
+                tenant.boolean_value(__result)
+            });
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "assign", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            for source in (args)[(1f64) as usize..].to_vec() {
+                if ((tenant.typeof_tag(&source) != ValueTag::Null)
+                    && (tenant.typeof_tag(&source) != ValueTag::Undefined))
+                {
+                    (crate::types_shim::assert_object(tenant, &source, "expected an object"))?;
+                    (tenant.assign(
+                        &(args)
+                            .get(0usize)
+                            .cloned()
+                            .unwrap_or_else(|| __undefined.clone()),
+                        &source,
+                    ))?;
+                }
+            }
+            return Ok((args)
+                .get(0usize)
+                .cloned()
+                .unwrap_or_else(|| __undefined.clone()));
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "defineProperty", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(2usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "property descriptor must be an object",
+            ))?;
+            let mut descriptor = (crate::types_shim::read_guest_descriptor(
+                tenant,
+                &(args)
+                    .get(2usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+            ))?;
+            if (!((tenant.define_property(
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                &tenant.to_property_key(
+                    &(args)
+                        .get(1usize)
+                        .cloned()
+                        .unwrap_or_else(|| __undefined.clone()),
+                ),
+                descriptor,
+            ))?)) {
+                return Err(TenantError::TypeError(
+                    ("cannot define property").to_string(),
+                ));
+            }
+            return Ok((args)
+                .get(0usize)
+                .cloned()
+                .unwrap_or_else(|| __undefined.clone()));
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "defineProperties", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(1usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "descriptors must be an object",
+            ))?;
+            (tenant.define(
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                &(args)
+                    .get(1usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+            ))?;
+            return Ok((args)
+                .get(0usize)
+                .cloned()
+                .unwrap_or_else(|| __undefined.clone()));
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "getOwnPropertyDescriptor", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            let mut descriptor = (tenant.get_own_property_descriptor(
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                &tenant.to_property_key(
+                    &(args)
+                        .get(1usize)
+                        .cloned()
+                        .unwrap_or_else(|| __undefined.clone()),
+                ),
+            ))?;
+            return Ok(match descriptor {
+                None => tenant.undefined_value(),
+                Some(ref descriptor) => {
+                    (crate::types_shim::descriptor_object(tenant, &descriptor))?
+                }
+            });
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "getPrototypeOf", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            return Ok(((tenant.get_prototype_of(
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+            ))?)
+            .unwrap_or_else(|| tenant.null_value()));
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "setPrototypeOf", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            if (tenant.typeof_tag(
+                &(args)
+                    .get(1usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+            ) != ValueTag::Null)
+            {
+                (crate::types_shim::assert_object(
+                    tenant,
+                    &(args)
+                        .get(1usize)
+                        .cloned()
+                        .unwrap_or_else(|| __undefined.clone()),
+                    "prototype must be object or null",
+                ))?;
+            }
+            if (!((tenant.set_prototype_of(
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                tenant.nullable(
+                    &(args)
+                        .get(1usize)
+                        .cloned()
+                        .unwrap_or_else(|| __undefined.clone()),
+                ),
+            ))?)) {
+                return Err(TenantError::TypeError(("cannot set prototype").to_string()));
+            }
+            return Ok((args)
+                .get(0usize)
+                .cloned()
+                .unwrap_or_else(|| __undefined.clone()));
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "isExtensible", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            return Ok({
+                let __result = (tenant.is_extensible(
+                    &(args)
+                        .get(0usize)
+                        .cloned()
+                        .unwrap_or_else(|| __undefined.clone()),
+                ))?;
+                tenant.boolean_value(__result)
+            });
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "preventExtensions", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            if (!((tenant.prevent_extensions(
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+            ))?)) {
+                return Err(TenantError::TypeError(
+                    ("cannot prevent extensions").to_string(),
+                ));
+            }
+            return Ok((args)
+                .get(0usize)
+                .cloned()
+                .unwrap_or_else(|| __undefined.clone()));
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "seal", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            return Ok((lock(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                false,
+            ))?);
+        }
+    }))?;
+    (install_method(tenant, &object_fn, "freeze", {
+        move |tenant: &mut T,
+              _this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                "expected an object",
+            ))?;
+            return Ok((lock(
+                tenant,
+                &(args)
+                    .get(0usize)
+                    .cloned()
+                    .unwrap_or_else(|| __undefined.clone()),
+                true,
+            ))?);
+        }
+    }))?;
+    (install_method(tenant, &object_prototype, "hasOwnProperty", {
+        move |tenant: &mut T,
+              this_arg: T::Value,
+              args: &[T::Value]|
+              -> Result<T::Value, TenantError> {
+            let __undefined = tenant.undefined_value();
+            (crate::types_shim::assert_object(
+                tenant,
+                &this_arg,
+                "Object.prototype.hasOwnProperty called on non-object",
+            ))?;
+            return Ok({
+                let __result = (tenant.has(
+                    &this_arg,
+                    &tenant.to_property_key(
+                        &(args)
+                            .get(0usize)
+                            .cloned()
+                            .unwrap_or_else(|| __undefined.clone()),
+                    ),
+                ))?;
+                tenant.boolean_value(__result)
+            });
+        }
+    }))?;
+    return Ok(result);
 }

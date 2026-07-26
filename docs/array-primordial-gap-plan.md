@@ -2,13 +2,19 @@
 
 ## Status
 
-Design only — no code changes. Written because `objectPrimordial`'s Rust translation
-(`crates/jade-primordial-rt/src/object.rs`, see `docs/primordial-ir-plan.md`'s "Progress"
-section) is blocked on this, and every other primordial file transitively calls
-`objectPrimordial` for `ObjectPrototype` — so this is the actual critical-path blocker for
-`function.ts`/`reflect.ts`/`proxy.ts`/`array-buffer.ts`/`typed-arrays.ts`'s Rust ports too, not
-an isolated `Object.keys` edge case. Do not extend `jade-tenant-rt::Tenant` until a follow-up
-session picks a scope from this note and someone signs off on it.
+**Closed.** Implemented as proposed below: `Tenant` gained `indexed_collection`/
+`property_key_value` (`crates/jade-tenant-rt/src/lib.rs`), `coerce_return_value`'s
+`KEY_LIST_RETURNING` branch (`crates/jade-primordial-ir/src/emit_rust.rs`) uses them instead of
+rejecting, `TestTenant` got a real (if deliberately non-`Array.prototype`-fidelity) `List`
+variant, and `objectPrimordial`/`functionPrimordial` now generate and compile in full — see
+`docs/primordial-ir-plan.md`'s "Progress" section. The "explicitly still out of scope" list
+below is unchanged and still applies; nothing beyond the proposed shape was built.
+
+Originally: design only, no code changes, written because `objectPrimordial`'s Rust translation
+(`crates/jade-primordial-rt/src/object.rs`) was blocked on this, and every other primordial file
+transitively calls `objectPrimordial` for `ObjectPrototype` — so this was the actual
+critical-path blocker for `function.ts`/`reflect.ts`/`proxy.ts`/`array-buffer.ts`/
+`typed-arrays.ts`'s Rust ports too, not an isolated `Object.keys` edge case.
 
 ## The gap, precisely
 

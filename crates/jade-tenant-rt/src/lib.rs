@@ -316,6 +316,22 @@ pub trait Tenant {
     /// argument, `Object.setPrototypeOf`'s `prototype` argument) into the `Option<Self::Value>`
     /// shape those slots take in this trait — `None` iff `typeof_tag(value) == ValueTag::Null`.
     fn nullable(&self, value: &Self::Value) -> Option<Self::Value>;
+    /// Constructs a tenant-owned, guest-observable ordered collection from `values` — indexed
+    /// numeric access (`0..values.len()`) and a `length` property, and nothing else. Does
+    /// **not** claim `Array.prototype` behavior (no `.map`/`.push`/`Array.isArray`/spread/
+    /// iteration support) — see `docs/array-primordial-gap-plan.md`, which this method
+    /// implements exactly as proposed there. Only ever used to materialize `Object.keys`'/
+    /// `Reflect.ownKeys`'s TS-side `PropertyKey[]` result as a `Self::Value`; a `Tenant`
+    /// implementation is free to back it with a full guest `Array` if one exists in its
+    /// embedding, but this trait only promises the two properties named above.
+    fn indexed_collection(&mut self, values: Vec<Self::Value>) -> Result<Self::Value, TenantError>;
+    /// The inverse of `to_property_key`: the guest value a given key would compare `===` to. A
+    /// string key converts via `string_value`. A symbol key has no guest-value representation
+    /// yet (no primordial surveyed so far constructs a guest-visible `Symbol`) — an
+    /// implementation may error or return a deliberately inert placeholder for that case, but
+    /// must not silently stringify a symbol, which would be observably wrong rather than merely
+    /// incomplete. See `docs/array-primordial-gap-plan.md`.
+    fn property_key_value(&mut self, key: &PropertyKey) -> Result<Self::Value, TenantError>;
 
     fn make(&mut self, proto: Option<Self::Value>) -> Result<Self::Value, TenantError>;
     fn get(&mut self, obj: &Self::Value, key: &PropertyKey) -> Result<Self::Value, TenantError>;

@@ -31,6 +31,7 @@ pub fn function_primordial<T: Tenant + 'static>(
     cache: &mut FunctionPrimordialCache<T>,
     object_primordial_cache: &mut crate::object::ObjectPrimordialCache<T>,
 ) -> Result<FunctionPrimordial<T>, TenantError> {
+    let __undefined = tenant.undefined_value();
     if let Some(existing) = cache.entry.clone() {
         return Ok(existing);
     }
@@ -47,6 +48,7 @@ pub fn function_primordial<T: Tenant + 'static>(
                   _unused_this_arg: T::Value,
                   _unused_args: &[T::Value]|
                   -> Result<T::Value, TenantError> {
+                let __undefined = tenant.undefined_value();
                 return Err(TenantError::TypeError(
                     ("dynamic Function construction is not available in this Jade realm")
                         .to_string(),
@@ -58,6 +60,7 @@ pub fn function_primordial<T: Tenant + 'static>(
                   _unused_this_arg: T::Value,
                   _unused_args: &[T::Value]|
                   -> Result<T::Value, TenantError> {
+                let __undefined = tenant.undefined_value();
                 return Err(TenantError::TypeError(
                     ("dynamic Function construction is not available in this Jade realm")
                         .to_string(),
@@ -94,6 +97,7 @@ pub fn function_primordial<T: Tenant + 'static>(
                   this_arg: T::Value,
                   args: &[T::Value]|
                   -> Result<T::Value, TenantError> {
+                let __undefined = tenant.undefined_value();
                 if (tenant.typeof_tag(&this_arg) != ValueTag::Function) {
                     return Err(TenantError::TypeError(
                         ("Function.prototype.call called on non-function").to_string(),
@@ -105,9 +109,9 @@ pub fn function_primordial<T: Tenant + 'static>(
                         this_arg: ((args)
                             .get(0usize)
                             .cloned()
-                            .unwrap_or_else(|| tenant.undefined_value()))
+                            .unwrap_or_else(|| __undefined.clone()))
                         .clone(),
-                        args: (&(args)[(1f64) as usize..]).to_vec(),
+                        args: ((args)[(1f64) as usize..].to_vec()).to_vec(),
                     },
                 ))?);
             }
@@ -123,6 +127,7 @@ pub fn function_primordial<T: Tenant + 'static>(
                   this_arg: T::Value,
                   args: &[T::Value]|
                   -> Result<T::Value, TenantError> {
+                let __undefined = tenant.undefined_value();
                 if (tenant.typeof_tag(&this_arg) != ValueTag::Function) {
                     return Err(TenantError::TypeError(
                         ("Function.prototype.apply called on non-function").to_string(),
@@ -131,7 +136,7 @@ pub fn function_primordial<T: Tenant + 'static>(
                 let mut list = (args)
                     .get(1usize)
                     .cloned()
-                    .unwrap_or_else(|| tenant.undefined_value());
+                    .unwrap_or_else(|| __undefined.clone());
                 let mut values = (if ((tenant.typeof_tag(&list) == ValueTag::Null)
                     || (tenant.typeof_tag(&list) == ValueTag::Undefined))
                 {
@@ -152,7 +157,7 @@ pub fn function_primordial<T: Tenant + 'static>(
                         this_arg: ((args)
                             .get(0usize)
                             .cloned()
-                            .unwrap_or_else(|| tenant.undefined_value()))
+                            .unwrap_or_else(|| __undefined.clone()))
                         .clone(),
                         args: (values).to_vec(),
                     },
@@ -171,6 +176,7 @@ pub fn function_primordial<T: Tenant + 'static>(
                   this_arg: T::Value,
                   args: &[T::Value]|
                   -> Result<T::Value, TenantError> {
+                let __undefined = tenant.undefined_value();
                 if (tenant.typeof_tag(&this_arg) != ValueTag::Function) {
                     return Err(TenantError::TypeError(
                         ("Function.prototype.bind called on non-function").to_string(),
@@ -180,21 +186,20 @@ pub fn function_primordial<T: Tenant + 'static>(
                 let mut bound_this = (args)
                     .get(0usize)
                     .cloned()
-                    .unwrap_or_else(|| tenant.undefined_value());
-                let mut prefix = &(args)[(1f64) as usize..];
+                    .unwrap_or_else(|| __undefined.clone());
+                let mut prefix = (args)[(1f64) as usize..].to_vec();
                 return Ok((crate::types_shim::make_builtin(
                     tenant,
                     "bound",
                     {
-                        let target = target.clone();
-                        let this_arg = this_arg.clone();
-                        let args = args.clone();
-                        let prefix = prefix.clone();
                         let bound_this = bound_this.clone();
+                        let target = target.clone();
+                        let prefix = prefix.clone();
                         move |tenant: &mut T,
                               _ignored: T::Value,
                               call_args: &[T::Value]|
                               -> Result<T::Value, TenantError> {
+                            let __undefined = tenant.undefined_value();
                             return Ok((tenant.invoke(
                                 &target,
                                 TenantInvocation::Apply {
@@ -209,12 +214,12 @@ pub fn function_primordial<T: Tenant + 'static>(
                     },
                     Some(Box::new({
                         let target = target.clone();
-                        let args = args.clone();
                         let prefix = prefix.clone();
                         move |tenant: &mut T,
                               new_target: T::Value,
                               call_args: &[T::Value]|
                               -> Result<T::Value, TenantError> {
+                            let __undefined = tenant.undefined_value();
                             return Ok((tenant.invoke(
                                 &target,
                                 TenantInvocation::Construct {

@@ -97,7 +97,15 @@ pub const TABLE: &[IntrinsicSpec] = &[
     },
     IntrinsicSpec {
         name: ARRAY_SLICE_FROM,
-        rust_template: "&({0})[({1}) as usize..]",
+        // Owned `Vec`, not a borrowed `&[T::Value]` slice: `Function.prototype.bind`'s `prefix =
+        // args.slice(1)` is captured into a `'static` nested closure (`make_builtin`'s
+        // `ConstructFn`/apply bound both require `'static`) — a borrowed slice tied to the outer
+        // closure's own `args: &[T::Value]` parameter can't outlive that call, so cloning the
+        // *reference* itself (what `&[T]: Clone` does) would still leave a dangling-lifetime
+        // capture. An owned `Vec` sidesteps this uniformly, including at call sites that only
+        // ever iterate the result (a `Vec`'s `IntoIterator`/`.iter()` behave identically to a
+        // slice's for every observed use).
+        rust_template: "({0})[({1}) as usize..].to_vec()",
     },
 ];
 

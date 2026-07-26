@@ -1,7 +1,7 @@
-//! Behavioral tests for the parts of the IR-generated `object.rs` that currently compile —
-//! `install_method` and `lock` (`ObjectPrimordial`/`object_primordial` itself don't yet: see
-//! their `compile_error!` in `crates/jade-primordial-rt/src/object.rs`, a named, principled gap
-//! — `Object.keys`'s return value needs a guest Array primordial that doesn't exist yet).
+//! Behavioral tests for `object.rs`'s two standalone helpers, `install_method` and `lock`, in
+//! isolation from the full `Object` factory — see `object_primordial.rs` for
+//! `object_primordial`/`Object`'s own methods (`Object.keys` included, since
+//! `docs/array-primordial-gap-plan.md` closed).
 
 mod support;
 

@@ -4,44 +4,51 @@
 
 - **Done:** `jade-tenant-rt` (hand-authored `Tenant`/`HostAsyncCapability` traits, extended
   during implementation with `ValueTag`/`typeof_tag`/`to_number`/`to_boolean`/`to_string_value`/
-  `to_property_key`/`nullable` and primitive constructors — needed once real primordial bodies,
-  not just `types.ts`'s helpers, were lowered). `jade-primordial-ir` (parser/IR/`emit_ts`/
-  `emit_rust`, `gen-primordials` binary). `jade-primordial-rt` (generated output crate).
+  `to_property_key`/`nullable`/`indexed_collection`/`property_key_value` and primitive
+  constructors — needed once real primordial bodies, not just `types.ts`'s helpers, were
+  lowered). `jade-primordial-ir` (parser/IR/`emit_ts`/`emit_rust`, `gen-primordials` binary).
+  `jade-primordial-rt` (generated output crate).
 - **`types.ts`:** shimmed, not IR-lowered — see "Shimmed modules" below (added after the initial
   plan; a deliberate correction, not part of the original design). Hand-ported to
   `jade-primordial-rt::types_shim`, covering `defineData`/`readGuestDescriptor`/
   `descriptorObject`/`guestArrayLike`/`assertObject`/`toIndex`/`makeBuiltin`. Fully tested.
-- **`object.ts`:** `installMethod`/`lock` (its two local helpers) and the `ObjectPrimordial`/
-  `ObjectPrimordialCache` types are fully IR-lowered, generated, and behavior-tested.
-  `objectPrimordial` itself is not yet generated: its `Object.keys` closure returns
-  `tenant.ownKeys(...)`'s host-side `Vec<PropertyKey>` directly as a guest value, which has no
-  sound translation without a guest Array primordial. `gen-primordials` reports this on stderr
-  and omits just that one function rather than blocking the rest of the file — see "Per-item
-  emission" below. **This is now a cross-file blocker, not an isolated gap**: every other
-  primordial file calls `objectPrimordial` for `ObjectPrototype`, so none of them can be wired
-  into `jade-primordial-rt`'s module tree until it closes — see
-  `docs/array-primordial-gap-plan.md` for the design note on what closing it actually needs
-  (paused deliberately — no `Tenant` trait changes until that note is acted on).
-- **`function.ts`:** fully IR-lowered and generated (`crates/jade-primordial-rt/src/function.rs`
-  exists on disk with correct content) but **not wired into the module tree** (`lib.rs` doesn't
-  `pub mod function;` it yet) — it calls `crate::object::object_primordial`, which doesn't exist
-  until the gap above closes. Two more real emitter bugs surfaced and were fixed while landing
-  it: `yield EXPR as TARGET` parses as `yield (EXPR as TARGET)`, not `(yield EXPR) as TARGET` (a
-  cast applies to the yield's own operand — see `lower.rs`'s `lower_yield`); and
-  `ArgKind::OptionOwned`/`OptionRef` didn't have `OptionalValue`'s "an explicit `undefined`
-  argument means `None`, not `Some(tenant.undefined_value())`" handling, which
-  `makeBuiltin(tenant, "call", applyClosure, undefined, FunctionPrototype)`-shaped calls (a real
-  closure's `construct` argument omitted) need. Also added: `TenantInvocation` object-literal
-  recognition (`{ kind: "apply", thisArg, args }` / `{ kind: "construct", args, newTarget }`,
-  `tenant.invoke`'s second argument), cross-file factory calls/destructuring
-  (`cross_file.rs` — the generated-code counterpart to `shims.rs`, since `functionPrimordial`
-  calls and destructures `objectPrimordial`'s result), and closures with fewer than 2 declared
-  parameters (`Function`'s own apply/construct closures both ignore all their arguments, padded
-  to the fixed 2-param Rust shape `make_builtin` requires with synthetic unused names).
+- **`object.ts`:** fully IR-lowered and generated, `objectPrimordial` included — see
+  `docs/array-primordial-gap-plan.md`, now closed: `Tenant` gained `indexed_collection`
+  (constructs a tenant-owned indexed/`length` collection from a `Vec<Self::Value>`, deliberately
+  not claiming `Array.prototype` fidelity) and `property_key_value` (the inverse of
+  `to_property_key`), and `coerce_return_value`'s `ownKeys`/`ownPropertyKeys`-returning branch
+  uses both instead of rejecting. Behavior-tested end to end (`object_primordial.rs`), including
+  `Object.keys` itself.
+- **`function.ts`:** fully IR-lowered, generated, and wired into the module tree (unblocked by
+  the same gap closing, since it depends on `crate::object::object_primordial` for
+  `ObjectPrototype`). Behavior-tested end to end (`function_primordial.rs`): `call`/`apply`/
+  `bind` through the tenant invocation ABI. Emitter bugs found and fixed while landing it (beyond
+  the ones already listed below from the first pass): `yield EXPR as TARGET` parses as `yield
+  (EXPR as TARGET)`, not `(yield EXPR) as TARGET` (see `lower.rs`'s `lower_yield`);
+  `ArgKind::OptionOwned`/`OptionRef` needed "an explicit `undefined` argument means `None`, not
+  `Some(tenant.undefined_value())`" handling; a closure's `args[N]` fallback
+  (`.unwrap_or_else(|| tenant.undefined_value())`) and `coerce_return_value`'s
+  `tenant.boolean_value(tenant.<method>(...)?)` wrapping both inlined a *second* live mutable
+  borrow of `tenant` as an argument to a call that already borrows it — fixed by pre-materializing
+  a per-function/closure `__undefined` local (see `emit_member`'s doc comment) and by hoisting the
+  inner call's result into a `let` before wrapping it, respectively; `.slice()` produced a
+  borrowed `&[T::Value]` that couldn't be captured into a `'static` nested closure
+  (`Function.prototype.bind`) — now produces an owned `Vec`; and the closure free-variable
+  *capture* analysis was a text search over the emitted body, which false-positived on
+  `TenantInvocation` struct-literal field labels (`this_arg:`, `args:`) that happen to spell the
+  same word as a real outer-scope name — replaced with a precise IR walk (`free_idents_in_fn`)
+  that skips key/label positions and resolvable call callees. Also added along the way:
+  `TenantInvocation` object-literal recognition (`{ kind: "apply", thisArg, args }` / `{ kind:
+  "construct", args, newTarget }`, `tenant.invoke`'s second argument), cross-file factory
+  calls/destructuring (`cross_file.rs` — the generated-code counterpart to `shims.rs`, since
+  `functionPrimordial` calls and destructures `objectPrimordial`'s result), and closures with
+  fewer than 2 declared parameters (`Function`'s own apply/construct closures both ignore all
+  their arguments, padded to the fixed 2-param Rust shape `make_builtin` requires with synthetic
+  unused names).
 - **Not started:** `reflect.ts`, `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`,
-  `realm.ts`. `reflect.ts`/`proxy.ts` will hit the same `objectPrimordial` cross-file block
-  immediately (`Reflect.ownKeys` has the identical `Vec<PropertyKey>`-as-return-value shape, and
-  `proxy.ts` calls `functionPrimordial`, itself blocked transitively).
+  `realm.ts`. `reflect.ts`'s `Reflect.ownKeys` should now translate cleanly (same
+  `indexed_collection`/`property_key_value` path `Object.keys` uses); `proxy.ts` will need
+  `functionPrimordial` wired the same way `object.ts` was for `function.ts`.
 
 ### Shimmed modules (a correction to the original plan)
 
