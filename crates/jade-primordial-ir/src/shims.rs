@@ -35,6 +35,26 @@ pub enum ArgKind {
     /// conversion, not just a borrow — a plain `Ref` would produce `&&str`, not `&PropertyKey`.
     /// An already-`PropertyKey`-typed identifier still passes through untouched.
     RefKey,
+    /// `Some((expr).clone())` — for a provided-but-optional owned `T::Value` positional argument
+    /// (`makeBuiltin`'s `proto` parameter, `Option<T::Value>`) where the TS call site passes a
+    /// plain, already-owned `T::Value` local (never a literal), so the wrap always needs a clone
+    /// (the source local usually stays alive and in use after the call).
+    OptionRef,
+    /// `Some(expr)` — for a provided-but-optional argument whose TS call-site value is always a
+    /// freshly constructed closure/value (`makeBuiltin`'s `construct` parameter), never an
+    /// existing owned variable, so no clone is needed or correct (closures generally aren't
+    /// `Clone`).
+    OptionOwned,
+    /// For a *required* `Option<T::Value>` parameter (`Tenant::make`'s `proto`,
+    /// `Tenant::set_prototype_of`'s `prototype`) whose TS declared type is `object | null` but
+    /// whose call-site argument is an ordinary, unwrapped expression (`tenant.make(null)`,
+    /// `tenant.make(ObjectPrototype)`) — TS callers never wrap it themselves the way an optional
+    /// trailing parameter's caller might. Three cases, checked in order by `emit_call_arg`: a
+    /// literal `null`/`undefined` argument is already `None` (see the module doc comment on why
+    /// those literals mean the real guest value by default and `None` is the exception here);
+    /// an `EXPR as object | null` cast argument already produces `Option<T::Value>` on its own
+    /// (`Tenant::nullable`); anything else gets `Some((expr).clone())`, the same as `OptionRef`.
+    OptionalValue,
 }
 
 pub struct ShimArg {
@@ -70,35 +90,35 @@ pub const TABLE: &[ShimSpec] = &[
     ShimSpec {
         module: "./types.ts",
         name: "defineData",
-        rust_path: "portal_solutions_jade_primordial_rt::types_shim::define_data",
+        rust_path: "crate::types_shim::define_data",
         inject_tenant: false,
         args: &[required(ArgKind::Owned), required(ArgKind::Ref), required(ArgKind::RefKey), required(ArgKind::Ref), required(ArgKind::Owned)],
     },
     ShimSpec {
         module: "./types.ts",
         name: "readGuestDescriptor",
-        rust_path: "portal_solutions_jade_primordial_rt::types_shim::read_guest_descriptor",
+        rust_path: "crate::types_shim::read_guest_descriptor",
         inject_tenant: false,
         args: &[required(ArgKind::Owned), required(ArgKind::Ref)],
     },
     ShimSpec {
         module: "./types.ts",
         name: "descriptorObject",
-        rust_path: "portal_solutions_jade_primordial_rt::types_shim::descriptor_object",
+        rust_path: "crate::types_shim::descriptor_object",
         inject_tenant: false,
         args: &[required(ArgKind::Owned), required(ArgKind::Ref)],
     },
     ShimSpec {
         module: "./types.ts",
         name: "guestArrayLike",
-        rust_path: "portal_solutions_jade_primordial_rt::types_shim::guest_array_like",
+        rust_path: "crate::types_shim::guest_array_like",
         inject_tenant: false,
         args: &[required(ArgKind::Owned), required(ArgKind::Ref)],
     },
     ShimSpec {
         module: "./types.ts",
         name: "assertObject",
-        rust_path: "portal_solutions_jade_primordial_rt::types_shim::assert_object",
+        rust_path: "crate::types_shim::assert_object",
         inject_tenant: true,
         args: &[
             required(ArgKind::Ref),
@@ -108,21 +128,21 @@ pub const TABLE: &[ShimSpec] = &[
     ShimSpec {
         module: "./types.ts",
         name: "toIndex",
-        rust_path: "portal_solutions_jade_primordial_rt::types_shim::to_index",
+        rust_path: "crate::types_shim::to_index",
         inject_tenant: true,
         args: &[required(ArgKind::Ref)],
     },
     ShimSpec {
         module: "./types.ts",
         name: "makeBuiltin",
-        rust_path: "portal_solutions_jade_primordial_rt::types_shim::make_builtin",
+        rust_path: "crate::types_shim::make_builtin",
         inject_tenant: false,
         args: &[
             required(ArgKind::Owned),
             required(ArgKind::Owned),
             required(ArgKind::Owned),
-            ShimArg { kind: ArgKind::Owned, default_literal: Some("None") },
-            ShimArg { kind: ArgKind::Owned, default_literal: Some("None") },
+            ShimArg { kind: ArgKind::OptionOwned, default_literal: Some("None") },
+            ShimArg { kind: ArgKind::OptionRef, default_literal: Some("None") },
         ],
     },
 ];

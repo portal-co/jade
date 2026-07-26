@@ -16,9 +16,11 @@ pub enum Item {
     /// A value import needed at runtime by both emission targets (rare in the primordials —
     /// only `promise.ts` imports runtime helpers from `async-host.ts`).
     ValueImport { source: String, names: Vec<String> },
-    /// An `interface`/type-alias declaration. Erased from emitted TS bodies (TS emission
-    /// re-declares it verbatim from the original source text instead of round-tripping through
-    /// the IR — see `emit_ts.rs`), but drives the generated Rust struct's field layout.
+    /// An `interface` declaration (a plain type-alias is erased entirely instead — see
+    /// `lower.rs`). Round-trips through the IR for both backends: TS emission reconstructs
+    /// ordinary interface syntax from the field list (not the original source text verbatim,
+    /// but semantically identical for every shape observed in the surveyed source), and it
+    /// drives the generated Rust struct's field layout.
     StructDef(StructDef),
     /// The repeated `const cache = new WeakMap<Tenant, X>()` per-tenant-cache idiom, recognized
     /// specially rather than as a generic `WeakMap` intrinsic — see the plan's "Rust has no
@@ -126,6 +128,11 @@ pub enum Stmt {
         catch_block: Block,
     },
     Throw(Expr),
+    /// `continue;` — always unlabeled in the surveyed source (`lock`'s `if (!descriptor)
+    /// continue;`). `emit_rust.rs` also recognizes the specific `if (!IDENT) continue;` shape as
+    /// an Option-narrowing guard (`let Some(IDENT) = IDENT else { continue; };`) rather than a
+    /// literal `if`; this variant is what makes that pattern-match possible.
+    Continue,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +193,18 @@ pub enum Expr {
     /// source, never a real method-style `this` — kept as its own node so `lower.rs` can assert
     /// that invariant rather than assuming it.
     ThisArg,
+    /// The comma operator, `(e1, e2, ..., en)`: evaluate each for effect, in order, and produce
+    /// the last one's value. Rust has no comma operator; `emit_rust` lowers this to a block
+    /// expression (`{ e1; e2; ...; en }`), which has exactly the same "evaluate in order, value
+    /// is the last one" semantics.
+    Sequence(Vec<Expr>),
+    /// `EXPR as TARGET`. Unlike `TsConstAssertion` (pure erasure, stripped during lowering),
+    /// `as` casts recur at exactly the sites where a raw `T::Value` needs a real, non-erasable
+    /// conversion on the Rust side (`x as PropertyKey` -> `Tenant::to_property_key`; `x as object
+    /// | null` -> `Tenant::nullable`) — see `emit_rust.rs`'s `Expr::Cast` handling. `emit_ts.rs`
+    /// re-emits the cast verbatim; dropping it there would under-type the expression at its use
+    /// site and could turn a currently-type-checking call into a real `tsc` error.
+    Cast { expr: Box<Expr>, target: TypeRef },
 }
 
 #[derive(Debug, Clone)]

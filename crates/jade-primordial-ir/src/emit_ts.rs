@@ -35,9 +35,12 @@ fn emit_item(out: &mut String, item: &Item, level: usize) {
         Item::ValueImport { source, names } => {
             out.push_str(&format!("import {{ {} }} from \"{source}\";\n", names.join(", ")));
         }
-        Item::StructDef(_) => {
-            // Interfaces are erased from the IR and re-declared from the original source text
-            // by the caller, not round-tripped through this emitter.
+        Item::StructDef(def) => {
+            out.push_str(&format!("export interface {} {{\n", def.name));
+            for (name, ty) in &def.fields {
+                out.push_str(&format!("  {name}: {};\n", emit_type_ref(ty)));
+            }
+            out.push_str("}\n");
         }
         Item::PerTenantCache { name, value_ty } => {
             out.push_str(&format!("const {name} = new WeakMap<Tenant, {value_ty}>();\n"));
@@ -93,6 +96,13 @@ fn emit_params(out: &mut String, params: &[Param]) {
 /// `lower.rs`).
 fn emit_type_ref(ty: &TypeRef) -> String {
     match ty {
+        // The sentinel `lower_ts_type` produces for any function-type annotation (see its doc
+        // comment) — every occurrence in the surveyed source is this exact apply-closure shape,
+        // so it's safe to print the fixed original text back rather than reconstructing a
+        // general function-type renderer for one recognized case.
+        TypeRef::Named(name) if name == "__ApplyClosure" => {
+            "(thisArg: unknown, args: readonly unknown[]) => TenantGenerator<unknown>".to_string()
+        }
         TypeRef::Named(name) => name.clone(),
         TypeRef::Generic { name, args } => {
             let args = args.iter().map(emit_type_ref).collect::<Vec<_>>().join(", ");
@@ -219,6 +229,7 @@ fn emit_stmt(out: &mut String, stmt: &Stmt, level: usize) {
             emit_expr(out, expr, level);
             out.push_str(";\n");
         }
+        Stmt::Continue => out.push_str("continue;\n"),
     }
 }
 
@@ -361,6 +372,21 @@ fn emit_expr(out: &mut String, expr: &Expr, level: usize) {
             out.push(')');
         }
         Expr::HostIntrinsic { name, args } => emit_host_intrinsic(out, name, args, level),
+        Expr::Cast { expr, target } => {
+            emit_expr(out, expr, level);
+            out.push_str(" as ");
+            out.push_str(&emit_type_ref(target));
+        }
+        Expr::Sequence(exprs) => {
+            out.push('(');
+            for (i, e) in exprs.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                emit_expr(out, e, level);
+            }
+            out.push(')');
+        }
     }
 }
 

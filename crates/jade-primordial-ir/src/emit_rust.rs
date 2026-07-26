@@ -2,17 +2,33 @@
 //! artifact this crate exists to produce (see the primordial-IR plan's "Rust `Tenant` /
 //! `HostAsyncCapability` traits" section for the trait this code calls into).
 //!
-//! Coverage in this first pass is intentionally narrower than `lower.rs`'s full IR node set —
-//! it handles what's needed for the "pure tenant-operation helper" shape (`types.ts`'s
-//! `defineData` is the first fully-covered example) and returns a clear `IrError::Unsupported`
-//! for constructs it doesn't yet map to Rust, rather than guessing. Notable gaps, discovered
-//! while implementing rather than assumed up front, are called out inline where they bite:
-//! dynamic per-field access on a `TenantPropertyDescriptor` by a runtime key (`descriptor[key]`,
-//! used by `readGuestDescriptor`/`descriptorObject`) and `typeof`/`Number()` coercion on an
-//! opaque `T::Value` (used by `assertObject`/`toIndex`/`guestArrayLike`) both need additional
-//! `Tenant`-trait primitives (a value-tag introspection method, a numeric-coercion method, and a
-//! by-key dynamic accessor for descriptors) that aren't designed yet — see the plan's phased
-//! rollout for where that lands.
+//! Coverage is the closed construct set surveyed in `packages/jade-js/primordials/*.ts` (see
+//! `ir.rs`'s module doc comment) — a construct outside that set is a hard `IrError::Unsupported`,
+//! never a best-effort guess.
+//!
+//! A few source idioms need translation strategies with no line-for-line TS equivalent; each is
+//! called out at its point of use, but the shared themes are:
+//!
+//! - **TS narrowing has no Rust counterpart.** `descriptor === undefined ? undefined : USE
+//!   (descriptor)` and `if (!descriptor) continue; ...USE(descriptor)...` both rely on TS
+//!   narrowing `descriptor`'s type after the check. Rust gets the same effect for free from
+//!   `match`/`let-else` *pattern binding*, which shadows the outer name with the unwrapped
+//!   payload under the identical identifier — see `emit_cond`'s Option-narrowing case and
+//!   `emit_block`'s `if (!X) continue;` peephole. No general narrowing/dataflow analysis exists;
+//!   only these two specific recognized shapes get it.
+//! - **The per-tenant `WeakMap<Tenant, X>` cache has no Rust counterpart, and doesn't need one.**
+//!   "One cache per tenant" becomes "the cache lives in whatever the caller already keeps alive
+//!   alongside that tenant" — a `<X>Cache<T>` struct the generated factory function takes as an
+//!   explicit extra parameter, only when its body actually uses the cache. See `emit_item`'s
+//!   `PerTenantCache` arm and `emit_block`'s cache-lookup peephole.
+//! - **A closure lexically captures outer state in TS; a Rust closure can't borrow non-`'static`
+//!   locals across `make_builtin`'s `'static` bound.** Each captured name gets cloned into a
+//!   fresh binding of the same name immediately before the closure literal (shadowing), so the
+//!   closure body needs no rewriting at all — see `emit_closure`.
+//! - **`Tenant::Value` is opaque**, so anything TS gets for free from raw host values
+//!   (`typeof`, `Number()`, an object/key identity comparison) needs an explicit `Tenant`
+//!   primitive instead — `typeof_tag`, `to_number`, `to_property_key`, `nullable`, etc. See
+//!   `emit_eq_cmp`/`emit_cast`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -26,27 +42,75 @@ use crate::shims;
 use crate::IrError;
 
 const DESCRIPTOR_FIELDS: &[&str] = &["value", "writable", "get", "set", "enumerable", "configurable"];
+/// `TenantPropertyDescriptor` fields whose Rust type is `Option<T::Value>` (needs `.clone()`
+/// when read from a borrowed source) rather than `Option<bool>` (already `Copy`).
+const VALUE_TYPED_DESCRIPTOR_FIELDS: &[&str] = &["value", "get", "set"];
 
 thread_local! {
     /// Bare-identifier -> import-source map for the module currently being emitted, consulted
     /// only by `emit_call` to resolve a shimmed external call (see `shims.rs`). Set once at the
-    /// top of `try_emit_module` and never mutated concurrently — emission is single-threaded and
-    /// non-reentrant, so a thread-local avoids threading an extra parameter through every
-    /// `emit_*` function purely to reach the one call site that needs it.
+    /// top of `try_emit_module`.
     static IMPORT_SOURCES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Locally-defined top-level function name -> its own parameter types, so `emit_call` can
+    /// derive each argument's passing convention from the callee's *own* declared signature
+    /// (`installMethod`/`lock`), the same way `tenant_method`/`shims` do for the other two kinds
+    /// of callee this emitter recognizes.
+    static LOCAL_FN_PARAMS: RefCell<HashMap<String, Vec<Option<TypeRef>>>> = RefCell::new(HashMap::new());
+    /// `interface` name -> its field list, populated from every `Item::StructDef` in the module
+    /// currently being emitted. Consulted by `rust_type` (a `TenantGenerator<ObjectPrimordial>`
+    /// return type needs to resolve to the generated `ObjectPrimordial<T>` struct) and by
+    /// `emit_object_literal` (matching an object literal's key set against a known struct's
+    /// field set to tell a struct literal apart from a `TenantPropertyDescriptor` literal).
+    static STRUCT_DEFS: RefCell<HashMap<String, StructDef>> = RefCell::new(HashMap::new());
+    /// This module's own per-tenant-cache variable name and cached value type
+    /// (`Item::PerTenantCache`'s two fields), if it has one. At most one per file in every
+    /// surveyed source.
+    static PER_TENANT_CACHE: RefCell<Option<(String, String)>> = RefCell::new(None);
+    /// Local-variable-name (snake_case) -> "is this already a Rust reference" map for the
+    /// function/closure body currently being emitted. Reset at the top of every `emit_fn_decl`;
+    /// closures temporarily add their own params' entries on top rather than pushing a real
+    /// scope (see `emit_closure`) — sound for the surveyed source because no closure parameter
+    /// name ever collides with an outer local name, not a fully general scope stack.
+    static LOCAL_REFNESS: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+    /// Local-variable-name (snake_case) -> "this is `Option<_>`-typed" set for the function body
+    /// currently being emitted, populated as each `let` binding is emitted (see `emit_stmt`).
+    /// Drives the `=== undefined`/`!== undefined` -> `.is_none()`/`.is_some()` lowering and the
+    /// Option-narrowing `Cond`/`if (!X) continue;` peepholes.
+    static OPTION_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// Local-variable-name (snake_case) -> "this is a `&str`-typed local" set, reset per function
+    /// (not per closure, matching `LOCAL_REFNESS`'s simplification — see its own doc comment).
+    /// `installMethod`'s `name: string` parameter is the one occurrence so far: it's a plain
+    /// string, not a `PropertyKey`, but reaches `defineData`'s `RefKey`-kind `key` argument —
+    /// `emit_call_arg`'s `RefKey` case consults this to know it needs `PropertyKey::from(...)`
+    /// conversion (already applied automatically for a literal string argument) rather than a
+    /// bare `&`-borrow (correct for an argument that's already `PropertyKey`-typed, e.g. a `for`
+    /// loop variable bound from `ownPropertyKeys`).
+    static STRING_TYPED_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
 }
 
 fn imported_source(name: &str) -> Option<String> {
     IMPORT_SOURCES.with(|map| map.borrow().get(name).cloned())
 }
 
+fn is_option_local(name: &str) -> bool {
+    OPTION_LOCALS.with(|set| set.borrow().contains(name))
+}
+
+fn is_known_ref(name: &str) -> bool {
+    LOCAL_REFNESS.with(|map| map.borrow().get(name).copied().unwrap_or(false))
+}
+
+fn is_string_typed(name: &str) -> bool {
+    STRING_TYPED_LOCALS.with(|set| set.borrow().contains(name))
+}
+
 /// Tenant trait methods this emitter knows how to call, and each positional argument's passing
 /// convention (see `shims::ArgKind`) to match `jade-tenant-rt::Tenant`'s signatures. See the
 /// trait definition in `crates/jade-tenant-rt/src/lib.rs`.
 fn tenant_method(name: &str) -> Option<(&'static str, &'static [shims::ArgKind])> {
-    use shims::ArgKind::{Owned, Ref, RefKey};
+    use shims::ArgKind::{OptionalValue, Owned, Ref, RefKey};
     Some(match name {
-        "make" => ("make", &[Owned] as &[_]),
+        "make" => ("make", &[OptionalValue] as &[_]),
         "get" => ("get", &[Ref, RefKey]),
         "set" => ("set", &[Ref, RefKey, Owned]),
         "has" => ("has", &[Ref, RefKey]),
@@ -56,7 +120,7 @@ fn tenant_method(name: &str) -> Option<(&'static str, &'static [shims::ArgKind])
         "getOwnPropertyDescriptor" => ("get_own_property_descriptor", &[Ref, RefKey]),
         "defineProperty" => ("define_property", &[Ref, RefKey, Owned]),
         "getPrototypeOf" => ("get_prototype_of", &[Ref]),
-        "setPrototypeOf" => ("set_prototype_of", &[Ref, Owned]),
+        "setPrototypeOf" => ("set_prototype_of", &[Ref, OptionalValue]),
         "isExtensible" => ("is_extensible", &[Ref]),
         "preventExtensions" => ("prevent_extensions", &[Ref]),
         "define" => ("define", &[Ref, Ref]),
@@ -67,11 +131,23 @@ fn tenant_method(name: &str) -> Option<(&'static str, &'static [shims::ArgKind])
     })
 }
 
+/// Which [`shims::ArgKind`] a top-level function's own declared parameter type implies — shared
+/// by `emit_param` (deciding how *this* function's parameter is bound) and `emit_call`'s
+/// local-function-call branch (deciding how to pass an argument *to* a locally-defined
+/// function, from its own recorded `LOCAL_FN_PARAMS` signature).
+fn arg_kind_for_type(ty: &TypeRef) -> shims::ArgKind {
+    match ty {
+        TypeRef::Named(n) if n == "object" || n == "Function" || n == "unknown" => shims::ArgKind::Ref,
+        TypeRef::Named(n) if n == "PropertyKey" => shims::ArgKind::RefKey,
+        _ => shims::ArgKind::Owned,
+    }
+}
+
 /// Emits one call argument per its [`shims::ArgKind`] passing convention. Shared by
-/// `tenant.<method>(...)` calls and shimmed external calls (`emit_shim_call`).
+/// `tenant.<method>(...)` calls, shimmed external calls, and locally-defined function calls.
 fn emit_call_arg(expr: &Expr, kind: shims::ArgKind) -> Result<TokenStream, IrError> {
     let tokens = emit_expr(expr)?;
-    let already_ref = matches!(expr, Expr::Ident(_));
+    let already_ref = matches!(expr, Expr::Ident(name) if is_known_ref(&to_snake_case(name)));
     Ok(match kind {
         shims::ArgKind::Owned => tokens,
         shims::ArgKind::Ref => {
@@ -82,7 +158,9 @@ fn emit_call_arg(expr: &Expr, kind: shims::ArgKind) -> Result<TokenStream, IrErr
             }
         }
         shims::ArgKind::RefKey => {
-            if matches!(expr, Expr::Lit(Lit::Str(_))) {
+            let needs_property_key_conversion = matches!(expr, Expr::Lit(Lit::Str(_)))
+                || matches!(expr, Expr::Ident(name) if is_string_typed(&to_snake_case(name)));
+            if needs_property_key_conversion {
                 quote! { &PropertyKey::from(#tokens) }
             } else if already_ref {
                 tokens
@@ -90,22 +168,40 @@ fn emit_call_arg(expr: &Expr, kind: shims::ArgKind) -> Result<TokenStream, IrErr
                 quote! { &#tokens }
             }
         }
+        shims::ArgKind::OptionRef => quote! { Some((#tokens).clone()) },
+        // `make_builtin`'s `construct: Option<ConstructFn<T>>` — `ConstructFn<T>` is a boxed
+        // trait object (`Box<dyn FnMut(...)>`), unlike `apply`'s unboxed `impl FnMut(...) +
+        // 'static` — so the closure literal itself needs an explicit `Box::new`.
+        shims::ArgKind::OptionOwned => quote! { Some(Box::new(#tokens)) },
+        shims::ArgKind::OptionalValue => {
+            if is_nullish_lit(expr) {
+                quote! { None }
+            } else if matches!(expr, Expr::Cast { target: TypeRef::Optional(_), .. }) {
+                tokens
+            } else {
+                quote! { Some((#tokens).clone()) }
+            }
+        }
     })
 }
 
 pub fn emit_module(module: &Module, module_name: &str) -> String {
-    match try_emit_module(module) {
-        Ok(tokens) => {
-            let header = format!(
-                "/* This is GENERATED code by gen-primordials, from packages/jade-js/primordials/{module_name}.ts. */\n"
-            );
-            header + tokens.to_string().as_str()
-        }
-        Err(err) => format!("compile_error!(\"gen-primordials: {err}\");"),
-    }
+    let header = format!(
+        "/* This is GENERATED code by gen-primordials, from packages/jade-js/primordials/{module_name}.ts. */\n"
+    );
+    header + try_emit_module(module).to_string().as_str()
 }
 
-fn try_emit_module(module: &Module) -> Result<TokenStream, IrError> {
+/// Emits every item independently: one item's `IrError` is printed to stderr (naming which
+/// top-level declaration failed and why) and the item is **omitted** from the generated file,
+/// rather than a single not-yet-supported construct anywhere in one factory function blanking
+/// out the whole module (a `compile_error!` embedded in the output would do that just as
+/// thoroughly as dropping the whole file, since one anywhere fails the *entire crate's* build,
+/// not just that item's use sites) — a partially-generated file that actually compiles and is
+/// testable is far more useful while emitter coverage is still growing. Still a hard, loudly
+/// reported rejection at the point it happens, never a silent guess — it just surfaces as a
+/// build-time diagnostic instead of a build-breaking one, since nothing calls the omitted item.
+fn try_emit_module(module: &Module) -> TokenStream {
     IMPORT_SOURCES.with(|map| {
         let mut map = map.borrow_mut();
         map.clear();
@@ -117,33 +213,104 @@ fn try_emit_module(module: &Module) -> Result<TokenStream, IrError> {
             }
         }
     });
+    STRUCT_DEFS.with(|map| {
+        let mut map = map.borrow_mut();
+        map.clear();
+        for item in &module.items {
+            if let Item::StructDef(def) = item {
+                map.insert(def.name.clone(), def.clone());
+            }
+        }
+    });
+    PER_TENANT_CACHE.with(|cache| {
+        *cache.borrow_mut() = module.items.iter().find_map(|item| match item {
+            Item::PerTenantCache { name, value_ty } => Some((name.clone(), value_ty.clone())),
+            _ => None,
+        });
+    });
+    LOCAL_FN_PARAMS.with(|map| {
+        let mut map = map.borrow_mut();
+        map.clear();
+        for item in &module.items {
+            if let Item::FnDecl(func) = item
+                && let Some(name) = &func.name
+            {
+                map.insert(name.clone(), func.params.iter().map(|p| p.ty.clone()).collect());
+            }
+        }
+    });
 
     let mut items = Vec::new();
     items.push(quote! {
         #[allow(unused_imports)]
-        use portal_solutions_jade_tenant_rt::{Tenant, PropertyKey, TenantError, TenantPropertyDescriptor, DynFields};
+        use portal_solutions_jade_tenant_rt::{Tenant, PropertyKey, TenantError, TenantPropertyDescriptor, DynFields, ValueTag};
     });
     for item in &module.items {
-        if let Some(tokens) = emit_item(item)? {
-            items.push(tokens);
+        match emit_item(item) {
+            Ok(Some(tokens)) => items.push(tokens),
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("gen-primordials: skipping {}: {err}", item_label(item));
+            }
         }
     }
-    Ok(quote! { #(#items)* })
+    quote! { #(#items)* }
+}
+
+fn item_label(item: &Item) -> String {
+    match item {
+        Item::FnDecl(func) => format!("fn `{}`", func.name.as_deref().unwrap_or("<anonymous>")),
+        Item::StructDef(def) => format!("interface `{}`", def.name),
+        Item::PerTenantCache { name, .. } => format!("cache `{name}`"),
+        Item::ModuleConst { name, .. } => format!("const `{name}`"),
+        Item::TypeImport { .. } | Item::ValueImport { .. } => "import".to_string(),
+    }
 }
 
 fn emit_item(item: &Item) -> Result<Option<TokenStream>, IrError> {
     match item {
-        Item::TypeImport { .. } | Item::ValueImport { .. } | Item::StructDef(_) => Ok(None),
-        Item::PerTenantCache { .. } => Err(IrError::Unsupported {
-            file: String::new(),
-            construct: "PerTenantCache emission (needs the per-tenant PrimordialCache struct design, Phase 7)".into(),
-        }),
+        Item::TypeImport { .. } | Item::ValueImport { .. } => Ok(None),
+        Item::StructDef(def) => Ok(Some(emit_struct_def(def)?)),
+        Item::PerTenantCache { value_ty, .. } => {
+            let cache_ident = format_ident!("{value_ty}Cache");
+            let value_ident = format_ident!("{value_ty}");
+            Ok(Some(quote! {
+                pub struct #cache_ident<T: Tenant> { entry: Option<#value_ident<T>> }
+                impl<T: Tenant> Default for #cache_ident<T> {
+                    fn default() -> Self { Self { entry: None } }
+                }
+            }))
+        }
         Item::ModuleConst { .. } => Err(IrError::Unsupported {
             file: String::new(),
             construct: "module-level const emission".into(),
         }),
         Item::FnDecl(func) => Ok(Some(emit_fn_decl(func)?)),
     }
+}
+
+/// Emits an `interface`'s generated struct plus a hand-written `Clone` impl (**not**
+/// `#[derive(Clone)]`: the derive would add an overly strict `T: Clone` bound on the struct's
+/// own generic parameter, when only `T::Value: Clone` — already guaranteed by the `Tenant`
+/// supertrait bound — is actually needed by any field).
+fn emit_struct_def(def: &StructDef) -> Result<TokenStream, IrError> {
+    let struct_ident = format_ident!("{}", def.name);
+    let mut field_decls = Vec::new();
+    let mut field_idents = Vec::new();
+    for (name, ty) in &def.fields {
+        let field_ident = format_ident!("{}", to_snake_case(name));
+        let field_ty = rust_type(ty)?;
+        field_decls.push(quote! { pub #field_ident: #field_ty });
+        field_idents.push(field_ident);
+    }
+    Ok(quote! {
+        pub struct #struct_ident<T: Tenant> { #(#field_decls),* }
+        impl<T: Tenant> Clone for #struct_ident<T> {
+            fn clone(&self) -> Self {
+                Self { #(#field_idents: self.#field_idents.clone()),* }
+            }
+        }
+    })
 }
 
 fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
@@ -157,10 +324,15 @@ fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
             "void" | "undefined" => quote! { () },
             "TenantPropertyDescriptor" => quote! { TenantPropertyDescriptor<T::Value> },
             other => {
-                return Err(IrError::Unsupported {
-                    file: String::new(),
-                    construct: format!("type reference `{other}`"),
-                });
+                if STRUCT_DEFS.with(|d| d.borrow().contains_key(other)) {
+                    let ident = format_ident!("{other}");
+                    quote! { #ident<T> }
+                } else {
+                    return Err(IrError::Unsupported {
+                        file: String::new(),
+                        construct: format!("type reference `{other}`"),
+                    });
+                }
             }
         }),
         TypeRef::Generic { name, args } if name == "Partial" && args.len() == 1 => rust_type(&args[0]),
@@ -182,10 +354,10 @@ fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
 /// Whether `func`'s Rust translation needs to return `Result<_, TenantError>`. Broader than
 /// scanning for a literal `throw`: a direct `throw` statement is one source of fallibility, but
 /// so is *any* `TenantYield` (every tenant operation is fallible in Rust, even though TS's
-/// generator/yield ceremony hides that) and any call into a shimmed function that itself returns
-/// `Result` (see `shims.rs`) — both recognized here regardless of nesting depth, since either
-/// one appearing anywhere in the body means the emitted Rust needs `?` to propagate it, which in
-/// turn means the function signature must be fallible.
+/// generator/yield ceremony hides that) and any call into a shimmed/local function that itself
+/// returns `Result` — recognized here regardless of nesting depth, since either one appearing
+/// anywhere in the body means the emitted Rust needs `?` to propagate it, which in turn means
+/// the function signature must be fallible.
 fn block_throws(block: &Block) -> bool {
     block.0.iter().any(stmt_throws)
 }
@@ -202,6 +374,7 @@ fn stmt_throws(stmt: &Stmt) -> bool {
         Stmt::Let { init, .. } => init.as_ref().is_some_and(expr_throws),
         Stmt::Expr(expr) => expr_throws(expr),
         Stmt::Return(value) => value.as_ref().is_some_and(expr_throws),
+        Stmt::Continue => false,
     }
 }
 
@@ -211,7 +384,9 @@ fn expr_throws(expr: &Expr) -> bool {
         Expr::Call { callee, args } => {
             let is_shim_call = matches!(callee.as_ref(), Expr::Ident(name)
                 if imported_source(name).is_some_and(|source| shims::lookup(&source, name).is_some()));
-            is_shim_call || expr_throws(callee) || args.iter().any(call_arg_throws)
+            let is_local_call = matches!(callee.as_ref(), Expr::Ident(name)
+                if LOCAL_FN_PARAMS.with(|m| m.borrow().contains_key(name)));
+            is_shim_call || is_local_call || expr_throws(callee) || args.iter().any(call_arg_throws)
         }
         Expr::New { callee, args } => expr_throws(callee) || args.iter().any(call_arg_throws),
         Expr::Member { obj, prop } => {
@@ -231,6 +406,8 @@ fn expr_throws(expr: &Expr) -> bool {
             ObjectProp::Method { .. } => false,
         }),
         Expr::HostIntrinsic { args, .. } => args.iter().any(expr_throws),
+        Expr::Sequence(exprs) => exprs.iter().any(expr_throws),
+        Expr::Cast { expr, .. } => expr_throws(expr),
         Expr::Ident(_) | Expr::Lit(_) | Expr::ThisArg | Expr::Closure(_) => false,
     }
 }
@@ -249,6 +426,35 @@ fn emit_fn_decl(func: &FnDecl) -> Result<TokenStream, IrError> {
         });
     };
     let fn_ident = format_ident!("{}", to_snake_case(name));
+
+    LOCAL_REFNESS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        for param in &func.params {
+            if let Pattern::Ident(pname) = &param.pattern {
+                let is_string = matches!(param.ty, Some(TypeRef::Named(ref n)) if n == "string");
+                let is_ref = pname == "tenant"
+                    || is_string
+                    || param
+                        .ty
+                        .as_ref()
+                        .is_some_and(|ty| matches!(arg_kind_for_type(ty), shims::ArgKind::Ref | shims::ArgKind::RefKey));
+                m.insert(to_snake_case(pname), is_ref);
+            }
+        }
+    });
+    OPTION_LOCALS.with(|m| m.borrow_mut().clear());
+    STRING_TYPED_LOCALS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        for param in &func.params {
+            if let Pattern::Ident(pname) = &param.pattern
+                && matches!(param.ty, Some(TypeRef::Named(ref n)) if n == "string")
+            {
+                m.insert(to_snake_case(pname));
+            }
+        }
+    });
 
     let mut param_tokens = Vec::new();
     for param in &func.params {
@@ -270,19 +476,25 @@ fn emit_fn_decl(func: &FnDecl) -> Result<TokenStream, IrError> {
     };
 
     let mut body = emit_block(&func.body)?;
-    // A void-returning TS generator is allowed to fall off the end of its body with no
-    // explicit `return;` (the implicit `undefined` return); a non-void one always has an
-    // explicit `return X;` on every path by construction (TS wouldn't type-check otherwise),
-    // which `Stmt::Return`'s own lowering already turns into `return Ok(X);`. So the only gap
-    // to patch here is the void+throws case, where the fallback `Ok(())` needs to be supplied
-    // as the block's trailing expression — safe to always append even when unreachable (e.g.
-    // after an earlier unconditional `return`), since Rust does not treat that as a hard error.
     if throws && is_void {
         body = quote! { #body Ok(()) };
     }
 
+    let cache = PER_TENANT_CACHE.with(|c| c.borrow().clone());
+    if let Some((cache_var, value_ty)) = &cache
+        && word_referenced(&body.to_string(), cache_var)
+    {
+        let cache_ty_ident = format_ident!("{value_ty}Cache");
+        param_tokens.push(quote! { cache: &mut #cache_ty_ident<T> });
+    }
+
+    // `+ 'static` unconditionally: any factory that (transitively) reaches `make_builtin` needs
+    // it (`ConstructFn<T>`/`impl FnMut(...) + 'static` both require it), and it's a harmless
+    // superset requirement for the rest — every real `Tenant` impl in an actual embedding
+    // satisfies it anyway, so this sidesteps tracking "does this specific function's call graph
+    // reach a closure-taking shim" as its own analysis.
     Ok(quote! {
-        pub fn #fn_ident<T: Tenant>(#(#param_tokens),*) #return_ty {
+        pub fn #fn_ident<T: Tenant + 'static>(#(#param_tokens),*) #return_ty {
             #body
         }
     })
@@ -305,33 +517,182 @@ fn emit_param(param: &Param) -> Result<TokenStream, IrError> {
             construct: format!("untyped parameter `{name}`"),
         });
     };
+    // Sentinels recognized structurally rather than through the ordinary `rust_type`/`ArgKind`
+    // machinery — see `lower.rs`'s `lower_ts_type`/`lower_closure_bearing_call` doc comments for
+    // why these two shapes are special-cased at lowering time in the first place.
+    if matches!(ty, TypeRef::Named(n) if n == "__ApplyClosure") {
+        return Ok(quote! {
+            #ident: impl FnMut(&mut T, T::Value, &[T::Value]) -> Result<T::Value, TenantError> + 'static
+        });
+    }
+    if let TypeRef::Array(inner) = ty
+        && matches!(inner.as_ref(), TypeRef::Named(n) if n == "unknown")
+    {
+        return Ok(quote! { #ident: &[T::Value] });
+    }
+    // `&str`, not `rust_type`'s `String` (that mapping is correct for a return/field position,
+    // not a borrowed parameter) — every real call site passes a string literal, which is
+    // already `&str`-compatible with no conversion needed.
+    if matches!(ty, TypeRef::Named(n) if n == "string") {
+        return Ok(quote! { #ident: &str });
+    }
     let base = rust_type(ty)?;
-    // An object/key parameter is borrowed, matching `Tenant`'s own method signatures; a
-    // descriptor-shaped parameter (e.g. `defineData`'s `attributes`) is taken by value since
-    // it's freshly constructed at most call sites and cheap to move.
-    let by_ref = matches!(ty, TypeRef::Named(n) if n == "object" || n == "Function" || n == "PropertyKey" || n == "unknown");
-    Ok(if by_ref {
-        quote! { #ident: &#base }
-    } else if param.default.is_some() {
-        // Defaulted parameters (`attributes: Partial<TenantPropertyDescriptor> = {}`) become a
-        // plain owned parameter; call sites that omitted the argument in TS must pass
-        // `Default::default()` explicitly in Rust — there is no Rust-level default-argument
-        // sugar to lower this into instead.
-        quote! { #ident: #base }
-    } else {
-        quote! { #ident: #base }
+    Ok(match arg_kind_for_type(ty) {
+        shims::ArgKind::Ref | shims::ArgKind::RefKey => quote! { #ident: &#base },
+        _ => quote! { #ident: #base },
     })
+}
+
+/// Whether `init` is a `TenantYield`-wrapped call to a `Tenant` method whose Rust return type is
+/// `Option<_>` — the two the surveyed source narrows immediately afterward
+/// (`getOwnPropertyDescriptor`'s ternary, `getPrototypeOf`, though only the former is exercised
+/// today). Drives `OPTION_LOCALS` population in `emit_stmt`'s `Stmt::Let` handling.
+fn returns_option(init: &Expr) -> bool {
+    tenant_call_method_name(init).is_some_and(|m| matches!(m, "getOwnPropertyDescriptor" | "getPrototypeOf"))
+}
+
+/// If `expr` is `yield tenant.yieldTenant(tenant.<method>(...))`, the bare method name — used to
+/// recognize which `Tenant` methods return which non-`T::Value` Rust type, for `returns_option`
+/// and `coerce_return_value`.
+fn tenant_call_method_name(expr: &Expr) -> Option<&str> {
+    let Expr::TenantYield(inner) = expr else { return None };
+    let Expr::Call { callee, .. } = inner.as_ref() else { return None };
+    let Expr::Member { obj, prop: MemberProp::Ident(method) } = callee.as_ref() else { return None };
+    matches!(obj.as_ref(), Expr::Ident(n) if n == "tenant").then_some(method.as_str())
+}
+
+/// Every closure's declared return type is a plain guest `T::Value` (see `emit_closure`), but a
+/// handful of `Tenant` methods return something else in Rust — `bool`
+/// (`has`/`isExtensible`/`preventExtensions`/`defineProperty`/`setPrototypeOf`) or
+/// `Option<T::Value>` (`getPrototypeOf`) — where the *TS* source gets away with returning the
+/// bare value directly because in the current TS-hosted execution model a host `boolean`/
+/// primitive *is* already a valid guest-observable value with no marshaling boundary at all
+/// (only objects/functions are tenant-managed). Rust's `Tenant::Value` is opaque, so returning
+/// one of these from a closure needs an explicit conversion at exactly this boundary: `bool` via
+/// `Tenant::boolean_value`, `Option<T::Value>` by unwrapping to `Tenant::null_value()`.
+/// `ownKeys`/`ownPropertyKeys` (`Vec<PropertyKey>`) have no such conversion available — a raw
+/// host key list has no guest-visible Array representation without a guest Array primordial,
+/// which doesn't exist yet (see `docs/primordials-plan.md`'s own non-goals) — so returning one
+/// directly is a named, honest rejection rather than a guess.
+fn coerce_return_value(expr: &Expr, tokens: TokenStream) -> Result<TokenStream, IrError> {
+    const BOOL_RETURNING: &[&str] = &["has", "isExtensible", "preventExtensions", "defineProperty", "setPrototypeOf"];
+    const OPTION_VALUE_RETURNING: &[&str] = &["getPrototypeOf"];
+    const KEY_LIST_RETURNING: &[&str] = &["ownKeys", "ownPropertyKeys"];
+    if let Some(method) = tenant_call_method_name(expr) {
+        if BOOL_RETURNING.contains(&method) {
+            return Ok(quote! { tenant.boolean_value(#tokens) });
+        }
+        if OPTION_VALUE_RETURNING.contains(&method) {
+            return Ok(quote! { (#tokens).unwrap_or_else(|| tenant.null_value()) });
+        }
+        if KEY_LIST_RETURNING.contains(&method) {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!(
+                    "returning tenant.{method}(...)'s host-side Vec<PropertyKey> directly as a guest value needs a guest Array primordial, which doesn't exist yet"
+                ),
+            });
+        }
+    }
+    // Returning a bare identifier that's already a Rust reference (a by-ref parameter, or a
+    // loop/match binding — see `LOCAL_REFNESS`) needs an explicit `.clone()`: the function's own
+    // declared return type is always an owned `T::Value`/struct, never a reference.
+    if matches!(expr, Expr::Ident(name) if is_known_ref(&to_snake_case(name))) {
+        return Ok(quote! { (#tokens).clone() });
+    }
+    Ok(tokens)
 }
 
 fn emit_block(block: &Block) -> Result<TokenStream, IrError> {
     let mut stmts = Vec::new();
-    for stmt in &block.0 {
-        stmts.push(emit_stmt(stmt)?);
+    let mut i = 0;
+    while i < block.0.len() {
+        if let Some(tokens) = try_emit_cache_lookup_pair(&block.0[i..])? {
+            stmts.push(tokens);
+            i += 2;
+            continue;
+        }
+        stmts.push(emit_stmt(&block.0[i])?);
+        i += 1;
     }
     Ok(quote! { #(#stmts)* })
 }
 
+/// Recognizes `const existing = cache.get(tenant); if (existing) return existing;` — the
+/// two-statement cache-lookup idiom every per-tenant-cached factory opens with — and emits the
+/// single-parameter-based equivalent: `if let Some(existing) = cache.entry.clone() { return Ok
+/// (existing); }`. See this module's doc comment on why the cache becomes an explicit parameter
+/// rather than a `WeakMap`. Returns `None` (falling through to ordinary per-statement emission)
+/// for anything that isn't exactly this shape, including when the module has no per-tenant cache
+/// at all.
+fn try_emit_cache_lookup_pair(stmts: &[Stmt]) -> Result<Option<TokenStream>, IrError> {
+    let Some((cache_name, _)) = PER_TENANT_CACHE.with(|c| c.borrow().clone()) else { return Ok(None) };
+    let [
+        Stmt::Let { pattern: Pattern::Ident(existing_name), init: Some(Expr::Call { callee, args }) },
+        Stmt::If { cond: Expr::Ident(cond_name), then_branch, else_branch: None },
+        ..,
+    ] = stmts
+    else {
+        return Ok(None);
+    };
+    let Expr::Member { obj, prop: MemberProp::Ident(method) } = callee.as_ref() else { return Ok(None) };
+    let Expr::Ident(obj_name) = obj.as_ref() else { return Ok(None) };
+    if obj_name != &cache_name || method != "get" || cond_name != existing_name {
+        return Ok(None);
+    }
+    let [CallArg::Normal(Expr::Ident(tenant_arg))] = args.as_slice() else { return Ok(None) };
+    if tenant_arg != "tenant" {
+        return Ok(None);
+    }
+    let [Stmt::Return(Some(Expr::Ident(ret_name)))] = then_branch.0.as_slice() else { return Ok(None) };
+    if ret_name != existing_name {
+        return Ok(None);
+    }
+    let ident = format_ident!("{}", to_snake_case(existing_name));
+    Ok(Some(quote! {
+        if let Some(#ident) = cache.entry.clone() { return Ok(#ident); }
+    }))
+}
+
+/// Recognizes `cache.set(tenant, result);` (the one-statement half of the cache idiom — see
+/// `try_emit_cache_lookup_pair` for the other half) inside `emit_stmt`.
+fn try_emit_cache_set(stmt: &Stmt) -> Result<Option<TokenStream>, IrError> {
+    let Some((cache_name, _)) = PER_TENANT_CACHE.with(|c| c.borrow().clone()) else { return Ok(None) };
+    let Stmt::Expr(Expr::Call { callee, args }) = stmt else { return Ok(None) };
+    let Expr::Member { obj, prop: MemberProp::Ident(method) } = callee.as_ref() else { return Ok(None) };
+    let Expr::Ident(obj_name) = obj.as_ref() else { return Ok(None) };
+    if obj_name != &cache_name || method != "set" {
+        return Ok(None);
+    }
+    let [CallArg::Normal(Expr::Ident(_tenant_arg)), CallArg::Normal(result_expr)] = args.as_slice() else {
+        return Ok(None);
+    };
+    let result_tokens = emit_expr(result_expr)?;
+    Ok(Some(quote! { cache.entry = Some((#result_tokens).clone()); }))
+}
+
+/// Recognizes `if (!IDENT) continue;` where `IDENT` is a known `Option<_>`-typed local (`lock`'s
+/// early-exit guard on a per-key `getOwnPropertyDescriptor` result) and emits Rust's `let-else`
+/// form instead, which both performs the guard and shadows `IDENT` with its unwrapped payload
+/// for the rest of the enclosing block — see this module's doc comment on why this sidesteps
+/// needing real narrowing/dataflow analysis.
+fn option_narrow_continue(cond: &Expr, then_branch: &Block) -> Option<TokenStream> {
+    let Expr::Un { op: UnOp::Not, arg } = cond else { return None };
+    let Expr::Ident(name) = arg.as_ref() else { return None };
+    if !is_option_local(&to_snake_case(name)) {
+        return None;
+    }
+    if !matches!(then_branch.0.as_slice(), [Stmt::Continue]) {
+        return None;
+    }
+    let ident = format_ident!("{}", to_snake_case(name));
+    Some(quote! { let Some(#ident) = #ident else { continue; }; })
+}
+
 fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
+    if let Some(tokens) = try_emit_cache_set(stmt)? {
+        return Ok(tokens);
+    }
     match stmt {
         Stmt::Let { pattern, init } => {
             let Pattern::Ident(name) = pattern else {
@@ -350,7 +711,14 @@ fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
                     });
                 }
             };
-            Ok(quote! { let #ident = #value; })
+            LOCAL_REFNESS.with(|m| m.borrow_mut().insert(to_snake_case(name), false));
+            if init.as_ref().is_some_and(returns_option) {
+                OPTION_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(name)));
+            }
+            // Always `mut`: whether a given binding is later reassigned (a struct field write
+            // through it, e.g. `next.writable = false`) isn't tracked separately, and an unused
+            // `mut` is a warning, never a build error — see the module doc comment's framing.
+            Ok(quote! { let mut #ident = #value; })
         }
         Stmt::Expr(expr) => {
             let value = emit_expr(expr)?;
@@ -359,10 +727,14 @@ fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
         Stmt::Return(value) => match value {
             Some(expr) => {
                 let value = emit_expr(expr)?;
+                let value = coerce_return_value(expr, value)?;
                 Ok(quote! { return Ok(#value); })
             }
             None => Ok(quote! { return Ok(()); }),
         },
+        Stmt::If { cond, then_branch, else_branch: None } if option_narrow_continue(cond, then_branch).is_some() => {
+            Ok(option_narrow_continue(cond, then_branch).unwrap())
+        }
         Stmt::If { cond, then_branch, else_branch } => {
             let cond = emit_expr(cond)?;
             let then_branch = emit_block(then_branch)?;
@@ -378,7 +750,31 @@ fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
             let value = emit_throw(expr)?;
             Ok(quote! { return Err(#value); })
         }
-        Stmt::ForOf { .. } | Stmt::ForCounting { .. } | Stmt::TryCatch { .. } => Err(IrError::Unsupported {
+        Stmt::Continue => Ok(quote! { continue; }),
+        Stmt::ForOf { binding, iter, body } => {
+            let Pattern::Ident(name) = binding else {
+                return Err(IrError::Unsupported {
+                    file: String::new(),
+                    construct: "destructured for-of binding".into(),
+                });
+            };
+            let ident = format_ident!("{}", to_snake_case(name));
+            let iter_tokens = emit_expr(iter)?;
+            // Iterating a `&[T::Value]` slice (`args.slice(N)`, already emitted as `&args[N..]`)
+            // yields `&T::Value` items; iterating an owned `Vec<_>` (`ownKeys`/`ownPropertyKeys`)
+            // yields owned items — Rust's own `IntoIterator` selection already gets this right
+            // from the expression's type with no extra `&` needed either way, so only the
+            // *bookkeeping* (what ref-ness to record for the loop-local) differs by shape.
+            let binding_is_ref = matches!(iter, Expr::HostIntrinsic { name, .. } if *name == intrinsics::ARRAY_SLICE_FROM);
+            let saved = LOCAL_REFNESS.with(|m| m.borrow().clone());
+            LOCAL_REFNESS.with(|m| {
+                m.borrow_mut().insert(to_snake_case(name), binding_is_ref);
+            });
+            let body_tokens = emit_block(body)?;
+            LOCAL_REFNESS.with(|m| *m.borrow_mut() = saved);
+            Ok(quote! { for #ident in #iter_tokens { #body_tokens } })
+        }
+        Stmt::ForCounting { .. } | Stmt::TryCatch { .. } => Err(IrError::Unsupported {
             file: String::new(),
             construct: "this statement kind is not yet covered by the Rust emitter".into(),
         }),
@@ -426,35 +822,43 @@ fn emit_expr(expr: &Expr) -> Result<TokenStream, IrError> {
         Expr::Lit(Lit::Str(s)) => Ok(quote! { #s }),
         Expr::Lit(Lit::Num(n)) => Ok(quote! { #n }),
         Expr::Lit(Lit::Bool(b)) => Ok(quote! { #b }),
-        Expr::Lit(Lit::Null) | Expr::Lit(Lit::Undefined) => Ok(quote! { None }),
+        // The guest `null`/`undefined` value itself, by default — `None` is only correct in the
+        // specific `Option<T::Value>`-typed positions `ArgKind::OptionalValue` recognizes (see
+        // its doc comment), which check the raw IR node directly rather than going through this
+        // general expression path.
+        Expr::Lit(Lit::Null) => Ok(quote! { tenant.null_value() }),
+        Expr::Lit(Lit::Undefined) => Ok(quote! { tenant.undefined_value() }),
         Expr::TemplateLiteral(parts) => emit_template(parts),
         Expr::Paren(inner) => {
             let inner = emit_expr(inner)?;
             Ok(quote! { (#inner) })
         }
         Expr::Member { obj, prop } => emit_member(obj, prop),
-        Expr::Object(props) => emit_descriptor_object_literal(props),
+        Expr::Object(props) => emit_object_literal(props),
+        Expr::Array(elements) => emit_array_literal(elements),
         Expr::Call { callee, args } => emit_call(callee, args),
         Expr::TenantYield(inner) => {
             let inner = emit_expr(inner)?;
             Ok(quote! { (#inner)? })
         }
-        Expr::Bin { op: BinOp::Nullish, lhs, rhs } => {
-            let lhs = emit_expr(lhs)?;
-            let rhs = emit_expr(rhs)?;
-            Ok(quote! { (#lhs).unwrap_or(#rhs) })
-        }
-        Expr::Bin { op, lhs, rhs } => {
-            let lhs = emit_expr(lhs)?;
-            let rhs = emit_expr(rhs)?;
-            let op = bin_op_tokens(*op)?;
-            Ok(quote! { (#lhs #op #rhs) })
-        }
+        Expr::Bin { op, lhs, rhs } => emit_bin(*op, lhs, rhs),
         Expr::Un { op: UnOp::Not, arg } => {
             let arg = emit_expr(arg)?;
             Ok(quote! { (!#arg) })
         }
+        Expr::Cond { test, cons, alt } => emit_cond(test, cons, alt),
+        Expr::Assign { target, value } => emit_assign(target, value),
+        Expr::Sequence(exprs) => {
+            let mut parts = Vec::new();
+            for (i, e) in exprs.iter().enumerate() {
+                let tokens = emit_expr(e)?;
+                parts.push(if i + 1 == exprs.len() { quote! { #tokens } } else { quote! { #tokens; } });
+            }
+            Ok(quote! { { #(#parts)* } })
+        }
+        Expr::Cast { expr, target } => emit_cast(expr, target),
         Expr::HostIntrinsic { name, args } => emit_host_intrinsic(name, args),
+        Expr::Closure(func) => emit_closure(func),
         other => Err(IrError::Unsupported {
             file: String::new(),
             construct: format!("expression kind {other:?} is not yet covered by the Rust emitter"),
@@ -478,73 +882,360 @@ fn emit_template(parts: &[TemplatePart]) -> Result<TokenStream, IrError> {
 }
 
 fn emit_member(obj: &Expr, prop: &MemberProp) -> Result<TokenStream, IrError> {
-    let MemberProp::Ident(field) = prop else {
-        return Err(IrError::Unsupported {
+    match prop {
+        MemberProp::Ident(field) => {
+            let obj_tokens = emit_expr(obj)?;
+            let field_ident = format_ident!("{}", to_snake_case(field));
+            Ok(quote! { #obj_tokens.#field_ident })
+        }
+        // A numeric-literal computed index (`args[0]`) is the one recognized computed-member
+        // shape — every occurrence in the surveyed source indexes an apply/construct closure's
+        // `&[T::Value]` arguments slice, which (unlike a real JS array) panics on an
+        // out-of-bounds index rather than yielding `undefined`; `.get(...).cloned().unwrap_or
+        // (undefined)` restores JS's permissive semantics explicitly. Any other computed-member
+        // shape (a dynamic string-keyed lookup, e.g. `descriptor[key]`) remains unsupported — it
+        // would need a real by-key dynamic accessor this emitter doesn't have.
+        MemberProp::Computed(index) if matches!(index.as_ref(), Expr::Lit(Lit::Num(_))) => {
+            let obj_tokens = emit_expr(obj)?;
+            let Expr::Lit(Lit::Num(n)) = index.as_ref() else { unreachable!() };
+            let n = *n as usize;
+            Ok(quote! { (#obj_tokens).get(#n).cloned().unwrap_or_else(|| tenant.undefined_value()) })
+        }
+        MemberProp::Computed(_) => Err(IrError::Unsupported {
             file: String::new(),
-            construct: "computed member access is not yet covered by the Rust emitter".into(),
-        });
-    };
-    let obj_tokens = emit_expr(obj)?;
-    // A descriptor-field read (`attributes.writable`) is a genuine Rust struct field of type
-    // `Option<_>` already, so it passes through as a plain field access — this is exactly what
-    // lets `Bin::Nullish` above lower to `.unwrap_or(...)`.
-    let field_ident = format_ident!("{}", to_snake_case(field));
-    Ok(quote! { #obj_tokens.#field_ident })
+            construct: "dynamic (non-numeric-literal) computed member access is not yet covered by the Rust emitter".into(),
+        }),
+    }
+}
+
+/// Dispatches an object literal to whichever of the two recognized shapes it matches: a
+/// `TenantPropertyDescriptor` control record (every key drawn from `DESCRIPTOR_FIELDS`, see
+/// `emit_descriptor_object_literal`), or a literal matching some locally-`interface`-declared
+/// struct's exact field set (`{ Object: ObjectFn, ObjectPrototype }`, see `emit_struct_literal`).
+/// Anything else is unsupported — in particular a `{ kind: "apply"|"construct", ... }`
+/// `TenantInvocation` literal isn't recognized yet (no primordial covered so far constructs one;
+/// `function.ts`/`reflect.ts` will need it).
+fn emit_object_literal(props: &[ObjectProp]) -> Result<TokenStream, IrError> {
+    let keys: Vec<&str> = props
+        .iter()
+        .filter_map(|p| match p {
+            ObjectProp::KeyValue { key: PropKey::Ident(k), .. } => Some(k.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !keys.is_empty() && keys.iter().all(|k| DESCRIPTOR_FIELDS.contains(k)) {
+        return emit_descriptor_object_literal(props);
+    }
+    let matching_struct = STRUCT_DEFS.with(|defs| {
+        defs.borrow()
+            .values()
+            .find(|def| def.fields.len() == keys.len() && def.fields.iter().all(|(name, _)| keys.contains(&name.as_str())))
+            .cloned()
+    });
+    if let Some(def) = matching_struct {
+        return emit_struct_literal(&def, props);
+    }
+    Err(IrError::Unsupported {
+        file: String::new(),
+        construct: "object literal doesn't match a known TenantPropertyDescriptor or locally-declared interface shape".into(),
+    })
 }
 
 /// Recognizes an object literal whose keys are drawn entirely from `TenantPropertyDescriptor`'s
 /// six known fields and emits a real struct literal (`Some(...)`-wrapping each present field,
-/// defaulting absent ones to `None`) — see this module's doc comment on why this is the correct
-/// translation (these literals are host-side control records, per `tenants/types.ts`'s own doc
-/// comment on `TenantPropertyDescriptor`, not guest-visible objects) rather than a special case.
+/// defaulting absent ones to `None`) — these literals are host-side control records, per
+/// `tenants/types.ts`'s own doc comment on `TenantPropertyDescriptor`, not guest-visible objects.
+/// A single leading `...spread` (`{ ...descriptor, configurable: false }`, `lock`'s clone-and-
+/// override idiom) is also recognized: the base struct's own value is cloned via `..` struct-
+/// update syntax and only the explicitly-listed fields override it.
 fn emit_descriptor_object_literal(props: &[ObjectProp]) -> Result<TokenStream, IrError> {
+    let mut base: Option<&Expr> = None;
     let mut fields: Vec<(&str, &Expr)> = Vec::new();
     for prop in props {
-        let ObjectProp::KeyValue { key, value } = prop else {
+        match prop {
+            ObjectProp::Spread(e) => {
+                if base.is_some() {
+                    return Err(IrError::Unsupported {
+                        file: String::new(),
+                        construct: "object literal with more than one spread".into(),
+                    });
+                }
+                base = Some(e);
+            }
+            ObjectProp::KeyValue { key: PropKey::Ident(key), value } if DESCRIPTOR_FIELDS.contains(&key.as_str()) => {
+                fields.push((key.as_str(), value));
+            }
+            _ => {
+                return Err(IrError::Unsupported {
+                    file: String::new(),
+                    construct: "descriptor object literal member outside the recognized shape".into(),
+                });
+            }
+        }
+    }
+    match base {
+        None => {
+            let mut entries = Vec::new();
+            for name in DESCRIPTOR_FIELDS {
+                let ident = format_ident!("{}", name);
+                entries.push(match fields.iter().find(|(key, _)| key == name) {
+                    Some((_, value)) => {
+                        let value = emit_expr(value)?;
+                        if VALUE_TYPED_DESCRIPTOR_FIELDS.contains(name) {
+                            quote! { #ident: Some((#value).clone()) }
+                        } else {
+                            quote! { #ident: Some(#value) }
+                        }
+                    }
+                    None => quote! { #ident: None },
+                });
+            }
+            Ok(quote! { TenantPropertyDescriptor { #(#entries),* } })
+        }
+        Some(base_expr) => {
+            let base_tokens = emit_expr(base_expr)?;
+            let mut entries = Vec::new();
+            for (name, value) in &fields {
+                let ident = format_ident!("{}", name);
+                let value_tokens = emit_expr(value)?;
+                let wrapped = if VALUE_TYPED_DESCRIPTOR_FIELDS.contains(name) {
+                    quote! { Some((#value_tokens).clone()) }
+                } else {
+                    quote! { Some(#value_tokens) }
+                };
+                entries.push(quote! { #ident: #wrapped });
+            }
+            Ok(quote! { TenantPropertyDescriptor { #(#entries,)* ..(#base_tokens).clone() } })
+        }
+    }
+}
+
+fn emit_struct_literal(def: &StructDef, props: &[ObjectProp]) -> Result<TokenStream, IrError> {
+    let struct_ident = format_ident!("{}", def.name);
+    let mut entries = Vec::new();
+    for (field_name, _ty) in &def.fields {
+        let value_expr = props.iter().find_map(|p| match p {
+            ObjectProp::KeyValue { key: PropKey::Ident(k), value } if k == field_name => Some(value),
+            _ => None,
+        });
+        let Some(value_expr) = value_expr else {
             return Err(IrError::Unsupported {
                 file: String::new(),
-                construct: "non-key-value object literal member is not yet covered by the Rust emitter".into(),
+                construct: format!("struct literal for `{}` missing field `{field_name}`", def.name),
             });
         };
-        let PropKey::Ident(key) = key else {
-            return Err(IrError::Unsupported {
-                file: String::new(),
-                construct: "computed object literal key is not yet covered by the Rust emitter".into(),
-            });
-        };
-        if !DESCRIPTOR_FIELDS.contains(&key.as_str()) {
-            return Err(IrError::Unsupported {
-                file: String::new(),
-                construct: format!(
-                    "object literal with key `{key}` outside TenantPropertyDescriptor's field set is not yet covered by the Rust emitter"
-                ),
+        let field_ident = format_ident!("{}", to_snake_case(field_name));
+        let value_tokens = emit_expr(value_expr)?;
+        entries.push(quote! { #field_ident: (#value_tokens).clone() });
+    }
+    Ok(quote! { #struct_ident { #(#entries),* } })
+}
+
+/// `[...a, ...b]`/`[a, b]` on host-native bookkeeping arrays (`Function.prototype.bind`'s
+/// `[...prefix, ...callArgs]`) — never a guest-visible array. Each spread element is required
+/// (a plain non-spread element mixed into a spread-containing literal would need `once((x,))`
+/// wrapping, not observed in the surveyed source) so every element is uniformly chained.
+fn emit_array_literal(elements: &[ArrayElement]) -> Result<TokenStream, IrError> {
+    if elements.iter().any(|e| matches!(e, ArrayElement::Spread(_))) {
+        let mut chain: Option<TokenStream> = None;
+        for element in elements {
+            let ArrayElement::Spread(e) = element else {
+                return Err(IrError::Unsupported {
+                    file: String::new(),
+                    construct: "array literal mixing spread and non-spread elements".into(),
+                });
+            };
+            let tokens = emit_expr(e)?;
+            let part = quote! { (#tokens).iter().cloned() };
+            chain = Some(match chain {
+                None => part,
+                Some(prev) => quote! { (#prev).chain(#part) },
             });
         }
-        fields.push((key.as_str(), value));
+        let chain = chain.unwrap();
+        return Ok(quote! { (#chain).collect::<Vec<_>>() });
     }
-    // `value`/`get`/`set` are `Option<T::Value>` — `T::Value`-owning fields — while the source
-    // expression is very often a borrowed `&T::Value` parameter (per `emit_param`'s by-ref
-    // convention for `object`/`unknown`-typed parameters); `.clone()` is required there and
-    // harmless when the expression was already owned (`Tenant::Value: Clone` is a supertrait
-    // bound specifically so this is always available). `writable`/`enumerable`/`configurable`
-    // are `Option<bool>`, already `Copy`, so no clone is needed or emitted for those.
-    let value_typed_fields = ["value", "get", "set"];
-    let mut entries = Vec::new();
-    for name in DESCRIPTOR_FIELDS {
-        let ident = format_ident!("{}", name);
-        entries.push(match fields.iter().find(|(key, _)| key == name) {
-            Some((_, value)) => {
-                let value = emit_expr(value)?;
-                if value_typed_fields.contains(name) {
-                    quote! { #ident: Some((#value).clone()) }
-                } else {
-                    quote! { #ident: Some(#value) }
-                }
+    let mut items = Vec::new();
+    for element in elements {
+        let ArrayElement::Normal(e) = element else { unreachable!() };
+        items.push(emit_expr(e)?);
+    }
+    Ok(quote! { vec![#(#items),*] })
+}
+
+fn emit_assign(target: &Expr, value: &Expr) -> Result<TokenStream, IrError> {
+    match target {
+        Expr::Member { obj, prop: MemberProp::Ident(field) } if DESCRIPTOR_FIELDS.contains(&field.as_str()) => {
+            let obj_tokens = emit_expr(obj)?;
+            let field_ident = format_ident!("{}", field);
+            let value_tokens = emit_expr(value)?;
+            let wrapped = if VALUE_TYPED_DESCRIPTOR_FIELDS.contains(&field.as_str()) {
+                quote! { Some((#value_tokens).clone()) }
+            } else {
+                quote! { Some(#value_tokens) }
+            };
+            Ok(quote! { #obj_tokens.#field_ident = #wrapped })
+        }
+        Expr::Ident(name) => {
+            let ident = format_ident!("{}", to_snake_case(name));
+            let value_tokens = emit_expr(value)?;
+            Ok(quote! { #ident = #value_tokens })
+        }
+        _ => Err(IrError::Unsupported {
+            file: String::new(),
+            construct: "assignment target is not yet covered by the Rust emitter".into(),
+        }),
+    }
+}
+
+fn emit_cond(test: &Expr, cons: &Expr, alt: &Expr) -> Result<TokenStream, IrError> {
+    if let Some((name, none_branch, some_branch)) = option_narrow_cond(test, cons, alt)
+        && matches!(none_branch, Expr::Lit(Lit::Null) | Expr::Lit(Lit::Undefined))
+    {
+        let ident = format_ident!("{}", to_snake_case(&name));
+        // The ternary's own result is an ordinary guest `T::Value`, not `Option<T::Value>` — the
+        // "none" arm is the literal `null`/`undefined` guest value (already correctly rendered
+        // by `emit_expr`'s `Expr::Lit` handling as `tenant.null_value()`/`undefined_value()`),
+        // and the "some" arm's own expression is used unwrapped. Only the *match scrutinee* —
+        // the outer host-side `Option<_>` being narrowed — is real Rust `Option` machinery.
+        let none_tokens = emit_expr(none_branch)?;
+        let some_tokens = emit_expr(some_branch)?;
+        return Ok(quote! {
+            match #ident {
+                None => #none_tokens,
+                Some(ref #ident) => #some_tokens,
             }
-            None => quote! { #ident: None },
         });
     }
-    Ok(quote! { TenantPropertyDescriptor { #(#entries),* } })
+    let test_tokens = emit_expr(test)?;
+    let cons_tokens = emit_expr(cons)?;
+    let alt_tokens = emit_expr(alt)?;
+    Ok(quote! { (if #test_tokens { #cons_tokens } else { #alt_tokens }) })
+}
+
+/// If `test` is `IDENT === null|undefined` or `IDENT !== null|undefined` for a known
+/// `Option<_>`-typed `IDENT`, returns `(name, none_branch_expr, some_branch_expr)` — the ternary
+/// arm that runs when `IDENT` is `None`, and the one that runs when it's `Some`, in that order
+/// regardless of which literal `Eq`/`NotEq` puts on which side. See `emit_cond`'s doc comment.
+fn option_narrow_cond<'a>(test: &Expr, cons: &'a Expr, alt: &'a Expr) -> Option<(String, &'a Expr, &'a Expr)> {
+    let Expr::Bin { op: op @ (BinOp::Eq | BinOp::NotEq), lhs, rhs } = test else { return None };
+    if !matches!(rhs.as_ref(), Expr::Lit(Lit::Null) | Expr::Lit(Lit::Undefined)) {
+        return None;
+    }
+    let Expr::Ident(name) = lhs.as_ref() else { return None };
+    if !is_option_local(&to_snake_case(name)) {
+        return None;
+    }
+    Some(if *op == BinOp::Eq { (name.clone(), cons, alt) } else { (name.clone(), alt, cons) })
+}
+
+fn emit_bin(op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<TokenStream, IrError> {
+    match op {
+        BinOp::Nullish => {
+            let lhs_t = emit_expr(lhs)?;
+            let rhs_t = emit_expr(rhs)?;
+            Ok(quote! { (#lhs_t).unwrap_or(#rhs_t) })
+        }
+        BinOp::In => {
+            let Expr::Lit(Lit::Str(key)) = lhs else {
+                return Err(IrError::Unsupported {
+                    file: String::new(),
+                    construct: "`in` operator with a non-string-literal left-hand side".into(),
+                });
+            };
+            let rhs_t = emit_call_arg(rhs, shims::ArgKind::Ref)?;
+            Ok(quote! { (#rhs_t).has_field(#key) })
+        }
+        BinOp::Eq | BinOp::NotEq => emit_eq_cmp(op, lhs, rhs),
+        _ => {
+            let lhs_t = emit_expr(lhs)?;
+            let rhs_t = emit_expr(rhs)?;
+            let op_t = bin_op_tokens(op)?;
+            Ok(quote! { (#lhs_t #op_t #rhs_t) })
+        }
+    }
+}
+
+fn is_nullish_lit(e: &Expr) -> bool {
+    matches!(e, Expr::Lit(Lit::Null) | Expr::Lit(Lit::Undefined))
+}
+
+fn value_tag_variant(tag: &str) -> Option<TokenStream> {
+    Some(match tag {
+        "undefined" => quote! { Undefined },
+        "object" => quote! { Object },
+        "function" => quote! { Function },
+        "string" => quote! { String },
+        "number" => quote! { Number },
+        "boolean" => quote! { Boolean },
+        "symbol" => quote! { Symbol },
+        _ => return None,
+    })
+}
+
+/// `===`/`!==` need several distinct Rust translations depending on what's being compared to
+/// what — see this module's doc comment's "`Tenant::Value` is opaque" point. Tried in order:
+/// `typeof X === "<tag>"` (-> `Tenant::typeof_tag`), a `TenantPropertyDescriptor` field read
+/// against `undefined` (-> `Option::is_some`/`is_none`, the field's Rust type is already
+/// `Option<_>`), a known `Option<_>`-typed local against `null`/`undefined` (same), and finally a
+/// generic opaque `T::Value` against `null`/`undefined` (-> `Tenant::typeof_tag` again, since
+/// there's no other way to ask an opaque value "are you null").
+fn emit_eq_cmp(op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<TokenStream, IrError> {
+    if let Expr::Un { op: UnOp::TypeOf, arg } = lhs
+        && let Expr::Lit(Lit::Str(tag)) = rhs
+        && let Some(variant) = value_tag_variant(tag)
+    {
+        let arg_t = emit_call_arg(arg, shims::ArgKind::Ref)?;
+        let cmp = if op == BinOp::Eq { quote! { == } } else { quote! { != } };
+        return Ok(quote! { (tenant.typeof_tag(#arg_t) #cmp ValueTag::#variant) });
+    }
+    if is_nullish_lit(rhs) {
+        if let Expr::Member { obj, prop: MemberProp::Ident(field) } = lhs
+            && DESCRIPTOR_FIELDS.contains(&field.as_str())
+        {
+            let obj_t = emit_expr(obj)?;
+            let field_ident = format_ident!("{}", field);
+            return Ok(if op == BinOp::Eq {
+                quote! { (#obj_t.#field_ident.is_none()) }
+            } else {
+                quote! { (#obj_t.#field_ident.is_some()) }
+            });
+        }
+        if let Expr::Ident(name) = lhs
+            && is_option_local(&to_snake_case(name))
+        {
+            let lhs_t = emit_expr(lhs)?;
+            return Ok(if op == BinOp::Eq { quote! { (#lhs_t.is_none()) } } else { quote! { (#lhs_t.is_some()) } });
+        }
+        let lhs_t = emit_call_arg(lhs, shims::ArgKind::Ref)?;
+        let variant = if matches!(rhs, Expr::Lit(Lit::Null)) { quote! { Null } } else { quote! { Undefined } };
+        let cmp = if op == BinOp::Eq { quote! { == } } else { quote! { != } };
+        return Ok(quote! { (tenant.typeof_tag(#lhs_t) #cmp ValueTag::#variant) });
+    }
+    if is_nullish_lit(lhs) {
+        return emit_eq_cmp(op, rhs, lhs);
+    }
+    let lhs_t = emit_expr(lhs)?;
+    let rhs_t = emit_expr(rhs)?;
+    let op_t = bin_op_tokens(op)?;
+    Ok(quote! { (#lhs_t #op_t #rhs_t) })
+}
+
+/// `EXPR as TARGET` — the two recognized non-erasable targets are `PropertyKey` (->
+/// `Tenant::to_property_key`) and `object | null` (-> `Tenant::nullable`); anything else is
+/// treated as pure type-level erasure, same as before this node existed.
+fn emit_cast(expr: &Expr, target: &TypeRef) -> Result<TokenStream, IrError> {
+    match target {
+        TypeRef::Named(n) if n == "PropertyKey" => {
+            let e = emit_call_arg(expr, shims::ArgKind::Ref)?;
+            Ok(quote! { tenant.to_property_key(#e) })
+        }
+        TypeRef::Optional(inner) if matches!(inner.as_ref(), TypeRef::Named(n) if n == "object" || n == "Function") => {
+            let e = emit_call_arg(expr, shims::ArgKind::Ref)?;
+            Ok(quote! { tenant.nullable(#e) })
+        }
+        _ => emit_expr(expr),
+    }
 }
 
 fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
@@ -580,9 +1271,49 @@ fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
         return emit_shim_call(spec, args);
     }
 
+    if let Expr::Ident(name) = callee
+        && let Some(param_tys) = LOCAL_FN_PARAMS.with(|m| m.borrow().get(name).cloned())
+    {
+        let fn_ident = format_ident!("{}", to_snake_case(name));
+        if args.len() != param_tys.len() {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!("{name}(...) called with {} args, expected {}", args.len(), param_tys.len()),
+            });
+        }
+        let mut arg_tokens = Vec::new();
+        for (arg, ty) in args.iter().zip(param_tys.iter()) {
+            let CallArg::Normal(expr) = arg else {
+                return Err(IrError::Unsupported {
+                    file: String::new(),
+                    construct: format!("spread argument to local function call `{name}`"),
+                });
+            };
+            let kind = ty.as_ref().map(arg_kind_for_type).unwrap_or(shims::ArgKind::Owned);
+            arg_tokens.push(emit_call_arg(expr, kind)?);
+        }
+        // Never `?`-suffixed here: every local function in the surveyed source is only ever
+        // called wrapped in `TenantYield` (`yield tenant.yieldTenant(installMethod(...))`),
+        // which already appends the `?` — see `emit_shim_call`'s matching note.
+        return Ok(quote! { #fn_ident(#(#arg_tokens),*) });
+    }
+
+    if let Expr::Closure(func) = callee {
+        // An immediately-invoked closure with no captured/injected `tenant` reference of its
+        // own is not a shape this crate's IR lowering ever actually produces (every closure in
+        // the surveyed source is passed to `makeBuiltin`/`installMethod`, never IIFE'd) — kept
+        // as an explicit rejection rather than falling through to the generic error below, so a
+        // future real occurrence gets a specific message instead of a generic one.
+        let _ = func;
+        return Err(IrError::Unsupported {
+            file: String::new(),
+            construct: "immediately-invoked closure expression".into(),
+        });
+    }
+
     Err(IrError::Unsupported {
         file: String::new(),
-        construct: "call expression is not yet covered by the Rust emitter (only tenant.<method>(...) calls and shimmed external calls are)".into(),
+        construct: "call expression is not yet covered by the Rust emitter (only tenant.<method>(...) calls, shimmed external calls, and locally-defined function calls are)".into(),
     })
 }
 
@@ -668,6 +1399,96 @@ fn emit_host_intrinsic(name: &str, args: &[Expr]) -> Result<TokenStream, IrError
         })
 }
 
+/// A closure/function-expression argument (every occurrence in the surveyed source is passed
+/// straight to `makeBuiltin`/`installMethod` as its `apply`/`construct` argument — see
+/// `lower.rs`'s `lower_closure_bearing_call`, which is also what gives every closure's own
+/// params their types). Emits `make_builtin`'s expected shape directly: `fn(&mut T, T::Value,
+/// &[T::Value]) -> Result<T::Value, TenantError>`, with `tenant` injected as an explicit leading
+/// closure parameter (TS closes over it lexically instead) and every other outer name the body
+/// references captured by cloning it into a same-named shadow binding just before the closure
+/// literal — see this module's doc comment's closure-capture point for why cloning-and-shadowing
+/// needs no rewriting of the closure body itself.
+fn emit_closure(func: &FnDecl) -> Result<TokenStream, IrError> {
+    if func.params.len() != 2 {
+        return Err(IrError::Unsupported {
+            file: String::new(),
+            construct: format!(
+                "closure with {} params (only the 2-param apply/construct convention — thisArg/newTarget, args — is recognized)",
+                func.params.len()
+            ),
+        });
+    }
+    let mut param_tokens = Vec::new();
+    let mut own_param_names = Vec::new();
+    for (i, param) in func.params.iter().enumerate() {
+        let Pattern::Ident(name) = &param.pattern else {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: "destructured closure parameter".into(),
+            });
+        };
+        let ident = format_ident!("{}", to_snake_case(name));
+        let ty_tokens = if i == 0 { quote! { T::Value } } else { quote! { &[T::Value] } };
+        param_tokens.push(quote! { #ident: #ty_tokens });
+        own_param_names.push((to_snake_case(name), i == 1));
+    }
+
+    let saved_refness = LOCAL_REFNESS.with(|m| m.borrow().clone());
+    let saved_options = OPTION_LOCALS.with(|m| m.borrow().clone());
+    // The *candidate* capture set is exactly the outer scope's own locals, snapshotted before
+    // this closure's own params (and, once the body below is emitted, its own internal `let`s)
+    // get inserted into the same flat table — using the table's state *after* emitting the body
+    // would wrongly treat the closure's own internal locals as captures too (anything the
+    // closure itself binds is, by definition, referenced in its own body).
+    let outer_names: Vec<String> = saved_refness.keys().cloned().collect();
+    LOCAL_REFNESS.with(|m| {
+        let mut m = m.borrow_mut();
+        for (name, is_slice) in &own_param_names {
+            m.insert(name.clone(), *is_slice);
+        }
+    });
+
+    let body = emit_block(&func.body)?;
+
+    let body_str = body.to_string();
+    let captured: Vec<String> = outer_names
+        .into_iter()
+        .filter(|name| name != "tenant")
+        .filter(|name| word_referenced(&body_str, name))
+        .collect();
+
+    LOCAL_REFNESS.with(|m| *m.borrow_mut() = saved_refness);
+    OPTION_LOCALS.with(|m| *m.borrow_mut() = saved_options);
+
+    let clone_prelude: Vec<TokenStream> = captured
+        .iter()
+        .map(|name| {
+            let ident = format_ident!("{name}");
+            quote! { let #ident = #ident.clone(); }
+        })
+        .collect();
+
+    Ok(quote! {
+        {
+            #(#clone_prelude)*
+            move |tenant: &mut T, #(#param_tokens),*| -> Result<T::Value, TenantError> {
+                #body
+            }
+        }
+    })
+}
+
+/// Whether `word` (an exact identifier, not a substring) appears anywhere in `haystack` — used
+/// both for closure free-variable capture (`emit_closure`) and per-tenant-cache-parameter
+/// injection (`emit_fn_decl`). Operating on the already-emitted token string rather than walking
+/// the IR a second time is a deliberately coarse approximation: it can't distinguish a genuine
+/// reference from an unrelated local that happens to share a name in a *different* scope, but no
+/// name collision like that occurs anywhere in the surveyed source, and a false-positive capture
+/// only costs an extra harmless `.clone()`/parameter — never a wrong answer.
+fn word_referenced(haystack: &str, word: &str) -> bool {
+    haystack.split(|c: char| !c.is_alphanumeric() && c != '_').any(|token| token == word)
+}
+
 fn bin_op_tokens(op: BinOp) -> Result<TokenStream, IrError> {
     Ok(match op {
         BinOp::Add => quote! { + },
@@ -691,6 +1512,17 @@ fn bin_op_tokens(op: BinOp) -> Result<TokenStream, IrError> {
     })
 }
 
+/// Rust reserved words that plausibly collide with a TS identifier in this source (`const fn =
+/// ...` in `types.ts`'s `makeBuiltin`/`installMethod` idiom is the one real occurrence so far).
+/// Not exhaustive of Rust's full keyword list — extended as a real collision is found, the same
+/// "hard rejection over silent guessing" spirit as everywhere else in this emitter, except here
+/// a rename is unambiguously correct rather than a guess.
+const RUST_KEYWORDS: &[&str] = &[
+    "fn", "type", "match", "move", "loop", "impl", "trait", "struct", "enum", "let", "mut", "ref", "self", "Self",
+    "super", "crate", "dyn", "async", "await", "as", "in", "for", "if", "else", "while", "return", "break",
+    "continue", "true", "false", "where", "use", "mod", "pub", "static", "const", "unsafe", "extern", "box", "yield",
+];
+
 fn to_snake_case(name: &str) -> String {
     let mut out = String::new();
     for (i, ch) in name.chars().enumerate() {
@@ -702,6 +1534,9 @@ fn to_snake_case(name: &str) -> String {
         } else {
             out.push(ch);
         }
+    }
+    if RUST_KEYWORDS.contains(&out.as_str()) {
+        out.push('_');
     }
     out
 }

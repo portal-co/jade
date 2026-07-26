@@ -7,6 +7,8 @@
 //! primordials/*.ts` (see `ir.rs`'s module doc comment), not general TypeScript. A source
 //! construct outside that set produces `IrError::Unsupported`, never a best-effort guess.
 
+use std::cell::RefCell;
+
 use swc_common::comments::NoopComments;
 use swc_common::{FileName, SourceMap, sync::Lrc};
 use swc_ecma_ast as ast;
@@ -15,6 +17,22 @@ use swc_ecma_parser::{Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
 use crate::intrinsics;
 use crate::ir::*;
 use crate::IrError;
+
+thread_local! {
+    /// The module's own per-tenant-cache variable name (`"cache"` in every surveyed file that
+    /// has one), if any — set once per `lower_module` call, before any function body is lowered.
+    /// `lower_call`'s `Map`/`WeakMap`-method recognition consults this to avoid swallowing
+    /// `cache.get(tenant)`/`cache.set(tenant, result)` into the generic map-intrinsic table:
+    /// those two calls are `Item::PerTenantCache`'s idiom, not an arbitrary `Map`/`WeakMap`
+    /// instance, and `emit_rust.rs` recognizes their exact two-statement/one-statement shapes
+    /// itself (see its module doc comment) — recognizing them as a generic intrinsic here would
+    /// make that impossible to tell apart from an unrelated `Map`.
+    static CACHE_VAR_NAME: RefCell<Option<String>> = RefCell::new(None);
+}
+
+fn is_cache_var(name: &str) -> bool {
+    CACHE_VAR_NAME.with(|c| c.borrow().as_deref() == Some(name))
+}
 
 /// `Str`/`TplElement` values are `Wtf8Atom` (WTF-8, to allow unpaired surrogates), not a plain
 /// UTF-8 string type — this lossily converts to an ordinary Rust `String`, which is fine for
@@ -36,6 +54,18 @@ pub fn lower_module(file_name: &str, source: &str) -> Result<Module, IrError> {
     let module = parser
         .parse_typescript_module()
         .map_err(|e| IrError::Parse(format!("{file_name}: {e:?}")))?;
+
+    CACHE_VAR_NAME.with(|c| {
+        *c.borrow_mut() = module.body.iter().find_map(|item| {
+            let ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Var(var_decl))) = item else { return None };
+            let [declarator] = var_decl.decls.as_slice() else { return None };
+            let ast::Pat::Ident(id) = &declarator.name else { return None };
+            let init = declarator.init.as_deref()?;
+            let ast::Expr::New(new_expr) = init else { return None };
+            let ast::Expr::Ident(callee) = new_expr.callee.as_ref() else { return None };
+            (callee.sym.as_ref() == "WeakMap").then(|| id.id.sym.to_string())
+        });
+    });
 
     let mut items = Vec::new();
     for item in &module.body {
@@ -96,10 +126,35 @@ fn lower_top_level_stmt(file: &str, stmt: &ast::Stmt) -> Result<Option<Item>, Ir
 
 fn lower_decl(file: &str, decl: &ast::Decl) -> Result<Option<Item>, IrError> {
     match decl {
-        // Type-only declarations are erased entirely — TS emission re-declares the original
-        // source's own interfaces/type aliases verbatim instead of round-tripping them through
-        // the IR (see `emit_ts.rs`).
-        ast::Decl::TsInterface(_) | ast::Decl::TsTypeAlias(_) => Ok(None),
+        // A type alias is erased entirely — TS emission re-declares the original source's own
+        // type aliases verbatim instead of round-tripping them through the IR (see
+        // `emit_ts.rs`). An interface is different: it's erased from *TS* emission the same way,
+        // but it drives the generated Rust struct's field layout, so it becomes a real
+        // `Item::StructDef` here rather than being discarded.
+        ast::Decl::TsInterface(iface) => {
+            if !iface.extends.is_empty() {
+                return Err(unsupported(file, "interface with `extends`"));
+            }
+            let mut fields = Vec::new();
+            for member in &iface.body.body {
+                let ast::TsTypeElement::TsPropertySignature(sig) = member else {
+                    return Err(unsupported(file, format!("interface member {member:?}")));
+                };
+                let name = match sig.key.as_ref() {
+                    ast::Expr::Ident(id) => id.sym.to_string(),
+                    other => return Err(unsupported(file, format!("interface property key {other:?}"))),
+                };
+                let Some(type_ann) = &sig.type_ann else {
+                    return Err(unsupported(file, "interface property with no type annotation"));
+                };
+                fields.push((name, lower_ts_type(file, &type_ann.type_ann)?));
+            }
+            Ok(Some(Item::StructDef(StructDef {
+                name: iface.id.sym.to_string(),
+                fields,
+            })))
+        }
+        ast::Decl::TsTypeAlias(_) => Ok(None),
         ast::Decl::Fn(fn_decl) => {
             let name = fn_decl.ident.sym.to_string();
             let func = lower_function(file, &fn_decl.function, Some(name.clone()))?;
@@ -129,15 +184,25 @@ fn lower_module_var_decl(file: &str, var_decl: &ast::VarDecl) -> Result<Option<I
         && let ast::Expr::Ident(callee) = new_expr.callee.as_ref()
         && callee.sym.as_ref() == "WeakMap"
     {
-        // The per-tenant cache idiom is always `new WeakMap<Tenant, ValueType>()` with no
-        // constructor arguments; the cached value type is carried purely in the TS type
-        // arguments (erased at runtime), so record it as an opaque placeholder name — the
-        // generated Rust struct field's real type comes from the enclosing primordial's own
-        // factory function return type, resolved by `emit_rust.rs`, not from this node.
-        return Ok(Some(Item::PerTenantCache {
-            name,
-            value_ty: "Cached".to_string(),
-        }));
+        // The per-tenant cache idiom is always `new WeakMap<Tenant, ValueType>()` — read the
+        // cached value's type directly off the WeakMap's own second type argument, rather than
+        // deferring to the enclosing factory function's return type: the two must agree in the
+        // source anyway, and reading it here means both `emit_ts.rs` (re-declaring the WeakMap
+        // itself) and `emit_rust.rs` (naming the generated `<ValueType>Cache` struct) share one
+        // resolved name instead of re-deriving it independently.
+        let value_ty = new_expr
+            .type_args
+            .as_ref()
+            .and_then(|args| args.params.get(1))
+            .and_then(|ty| match ty.as_ref() {
+                ast::TsType::TsTypeRef(r) => match &r.type_name {
+                    ast::TsEntityName::Ident(id) => Some(id.sym.to_string()),
+                    ast::TsEntityName::TsQualifiedName(q) => Some(q.right.sym.to_string()),
+                },
+                _ => None,
+            })
+            .ok_or_else(|| unsupported(file, "WeakMap per-tenant cache without a resolvable value type argument"))?;
+        return Ok(Some(Item::PerTenantCache { name, value_ty }));
     }
     let mutable = matches!(var_decl.kind, ast::VarDeclKind::Let | ast::VarDeclKind::Var);
     let value = lower_expr(file, init)?;
@@ -242,6 +307,14 @@ fn lower_ts_type(file: &str, ty: &ast::TsType) -> Result<TypeRef, IrError> {
         }
         ast::TsType::TsArrayType(array) => Ok(TypeRef::Array(Box::new(lower_ts_type(file, &array.elem_type)?))),
         ast::TsType::TsParenthesizedType(paren) => lower_ts_type(file, &paren.type_ann),
+        // A function-type annotation (`(thisArg: unknown, args: readonly unknown[]) =>
+        // TenantGenerator<unknown>`, `installMethod`'s `apply` parameter). Every occurrence in
+        // the surveyed source is this exact apply-closure shape, so it's recognized as a fixed
+        // sentinel rather than modeled as a general function type — `emit_param` maps it
+        // directly to `impl FnMut(&mut T, T::Value, &[T::Value]) -> Result<T::Value,
+        // TenantError> + 'static`, mirroring `make_builtin`'s own hand-written signature.
+        ast::TsType::TsFnOrConstructorType(_) => Ok(TypeRef::Named("__ApplyClosure".to_string())),
+        ast::TsType::TsTypeOperator(op) => lower_ts_type(file, &op.type_ann),
         ast::TsType::TsUnionOrIntersectionType(ast::TsUnionOrIntersectionType::TsUnionType(union)) => {
             let mut non_null: Vec<&ast::TsType> = Vec::new();
             let mut saw_null_ish = false;
@@ -339,6 +412,12 @@ fn lower_stmt(file: &str, stmt: &ast::Stmt) -> Result<Stmt, IrError> {
             Ok(Stmt::ForOf { binding, iter, body })
         }
         ast::Stmt::For(for_stmt) => lower_counting_for(file, for_stmt),
+        ast::Stmt::Continue(c) => {
+            if c.label.is_some() {
+                return Err(unsupported(file, "labeled continue"));
+            }
+            Ok(Stmt::Continue)
+        }
         ast::Stmt::Throw(throw_stmt) => Ok(Stmt::Throw(lower_expr(file, &throw_stmt.arg)?)),
         ast::Stmt::Try(try_stmt) => {
             let try_block = lower_block(file, &try_stmt.block)?;
@@ -419,7 +498,15 @@ fn lower_counting_for(file: &str, for_stmt: &ast::ForStmt) -> Result<Stmt, IrErr
 
 fn lower_expr(file: &str, expr: &ast::Expr) -> Result<Expr, IrError> {
     match expr {
+        // `undefined` is an ordinary global identifier in JS, not a literal keyword — but no
+        // primordial file ever shadows it as a local binding, so it's safe (and much simpler
+        // downstream) to recognize it as the `Lit::Undefined` literal here rather than modeling
+        // it as a real identifier reference.
+        ast::Expr::Ident(id) if id.sym.as_ref() == "undefined" => Ok(Expr::Lit(Lit::Undefined)),
         ast::Expr::Ident(id) => Ok(Expr::Ident(id.sym.to_string())),
+        ast::Expr::Seq(seq) => Ok(Expr::Sequence(
+            seq.exprs.iter().map(|e| lower_expr(file, e)).collect::<Result<Vec<_>, _>>()?,
+        )),
         ast::Expr::This(_) => Ok(Expr::ThisArg),
         ast::Expr::Lit(lit) => lower_lit(file, lit),
         ast::Expr::Tpl(tpl) => lower_template(file, tpl),
@@ -465,7 +552,10 @@ fn lower_expr(file: &str, expr: &ast::Expr) -> Result<Expr, IrError> {
         }),
         ast::Expr::Assign(assign) => lower_assign(file, assign),
         ast::Expr::TsNonNull(inner) => lower_expr(file, &inner.expr),
-        ast::Expr::TsAs(inner) => lower_expr(file, &inner.expr),
+        ast::Expr::TsAs(cast) => Ok(Expr::Cast {
+            expr: Box::new(lower_expr(file, &cast.expr)?),
+            target: lower_ts_type(file, &cast.type_ann)?,
+        }),
         ast::Expr::TsConstAssertion(inner) => lower_expr(file, &inner.expr),
         ast::Expr::TsSatisfies(inner) => lower_expr(file, &inner.expr),
         other => Err(unsupported(file, format!("expression {other:?}"))),
@@ -572,6 +662,63 @@ fn lower_call_args(file: &str, args: &[ast::ExprOrSpread]) -> Result<Vec<CallArg
         .collect()
 }
 
+/// Which closure-parameter role to inject contextual types for — see `lower_closure_bearing_call`.
+#[derive(Clone, Copy)]
+enum ClosureRole {
+    Apply,
+    Construct,
+}
+
+/// `makeBuiltin`/`installMethod`'s `apply`/`construct` closure arguments are never independently
+/// type-annotated in the source (`function* (_thisArg, args) { ... }`) — TS infers their
+/// parameter types purely contextually, from the callee's own declared parameter type. This
+/// crate has no general type inference, so instead it recognizes these two specific call sites
+/// by name and injects the fixed, codebase-wide apply/construct-closure convention onto the
+/// closure argument's own params directly (position 0: `thisArg: unknown` for apply /
+/// `newTarget: Function` for construct; position 1: `args: readonly unknown[]` for both) before
+/// generic lowering ever sees them — see `emit_param`'s handling of the resulting `Array(Named
+/// ("unknown"))`/`Named("unknown")`/`Named("Function")` types.
+fn lower_closure_bearing_call(file: &str, name: &str, raw_args: &[ast::ExprOrSpread]) -> Result<Expr, IrError> {
+    let apply_index = if name == "makeBuiltin" { 2 } else { 3 };
+    let construct_index = if name == "makeBuiltin" { Some(3) } else { None };
+    let mut args = Vec::new();
+    for (i, raw) in raw_args.iter().enumerate() {
+        let role = if i == apply_index {
+            Some(ClosureRole::Apply)
+        } else if Some(i) == construct_index {
+            Some(ClosureRole::Construct)
+        } else {
+            None
+        };
+        let lowered = match role {
+            Some(role) => lower_closure_arg(file, &raw.expr, role)?,
+            None => lower_expr(file, &raw.expr)?,
+        };
+        args.push(if raw.spread.is_some() { CallArg::Spread(lowered) } else { CallArg::Normal(lowered) });
+    }
+    Ok(Expr::Call {
+        callee: Box::new(Expr::Ident(name.to_string())),
+        args,
+    })
+}
+
+fn lower_closure_arg(file: &str, expr: &ast::Expr, role: ClosureRole) -> Result<Expr, IrError> {
+    let mut lowered = lower_expr(file, expr)?;
+    if let Expr::Closure(func) = &mut lowered {
+        if let Some(first) = func.params.get_mut(0) {
+            first.ty = Some(match role {
+                ClosureRole::Apply => TypeRef::Named("unknown".to_string()),
+                ClosureRole::Construct => TypeRef::Named("Function".to_string()),
+            });
+        }
+        if let Some(second) = func.params.get_mut(1) {
+            second.ty = Some(TypeRef::Array(Box::new(TypeRef::Named("unknown".to_string()))));
+        }
+    }
+    let _ = file;
+    Ok(lowered)
+}
+
 /// Recognizes calls against the host-intrinsic table (regex `.test`, `Number(...)`,
 /// `Map`/`WeakMap` accessor methods, array bookkeeping methods) before falling back to an
 /// ordinary tenant/user call. See `intrinsics.rs`.
@@ -579,6 +726,13 @@ fn lower_call(file: &str, call: &ast::CallExpr) -> Result<Expr, IrError> {
     let ast::Callee::Expr(callee_expr) = &call.callee else {
         return Err(unsupported(file, "super()/import() call"));
     };
+
+    if let ast::Expr::Ident(id) = callee_expr.as_ref()
+        && matches!(id.sym.as_ref(), "makeBuiltin" | "installMethod")
+    {
+        return lower_closure_bearing_call(file, id.sym.as_ref(), &call.args);
+    }
+
     let args = lower_call_args(file, &call.args)?;
 
     if let ast::Expr::Member(member) = callee_expr.as_ref()
@@ -595,9 +749,15 @@ fn lower_call(file: &str, call: &ast::CallExpr) -> Result<Expr, IrError> {
                 args: vec![subject.clone()],
             });
         }
-        // `typeof X === "string"` is handled in `lower_bin`, not here.
+        // `tenant.get/set/has/delete(...)` (the fundamental Tenant operations, used everywhere)
+        // structurally collide with the `Map`/`WeakMap` accessor method names below — reserve
+        // that whole shape for the actual `tenant.<method>(...)` recognition (done later, in
+        // `emit_rust.rs`, once a receiver is known to be `tenant` specifically) by excluding it
+        // here, the same as the per-tenant-cache variable's `.get`/`.set`.
+        let receiver_is_tenant_or_cache = matches!(member.obj.as_ref(), ast::Expr::Ident(id)
+            if id.sym.as_ref() == "tenant" || is_cache_var(id.sym.as_ref()));
         let map_methods = ["get", "set", "has", "delete"];
-        if map_methods.contains(&method_name) {
+        if !receiver_is_tenant_or_cache && map_methods.contains(&method_name) {
             let recv = lower_expr(file, &member.obj)?;
             let mapped = match method_name {
                 "get" => intrinsics::MAP_GET,
@@ -714,19 +874,11 @@ fn lower_yield(file: &str, yield_expr: &ast::YieldExpr) -> Result<Expr, IrError>
 }
 
 fn lower_bin(file: &str, bin: &ast::BinExpr) -> Result<Expr, IrError> {
-    // `typeof X === "string"` is recognized as the `is_string_key` intrinsic (see
-    // `intrinsics.rs`) before falling through to a generic comparison.
-    if bin.op == ast::BinaryOp::EqEqEq
-        && let ast::Expr::Unary(unary) = bin.left.as_ref()
-        && unary.op == ast::UnaryOp::TypeOf
-        && let ast::Expr::Lit(ast::Lit::Str(s)) = bin.right.as_ref()
-        && atom_string(&s.value) == "string"
-    {
-        return Ok(Expr::HostIntrinsic {
-            name: intrinsics::IS_STRING_KEY,
-            args: vec![lower_expr(file, &unary.arg)?],
-        });
-    }
+    // `typeof X === "<tag>"`/`!==` (any of the seven type-tag strings) is left as a *generic*
+    // `Bin{Eq/NotEq, Un{TypeOf, X}, Lit(Str(tag))}` shape rather than specially recognized here
+    // — `emit_ts.rs` already re-emits that shape verbatim via its ordinary `UnOp`/`BinOp`
+    // handling, and `emit_rust.rs` pattern-matches the shape directly (via `Tenant::typeof_tag`)
+    // rather than needing a dedicated IR node for it.
     let op = match bin.op {
         ast::BinaryOp::Add => BinOp::Add,
         ast::BinaryOp::Sub => BinOp::Sub,

@@ -301,6 +301,21 @@ pub trait Tenant {
     fn undefined_value(&mut self) -> Self::Value;
     /// Construct the canonical guest `null` value.
     fn null_value(&mut self) -> Self::Value;
+    /// `ToString(value)` for a value already known to be a string (`typeof_tag` is `String`) —
+    /// extracts its content. The inverse of `string_value`; needed for e.g. `Object.hasOwn`'s
+    /// `key` argument, which TS narrows with an unchecked `as PropertyKey` cast (see
+    /// `to_property_key`) rather than a real runtime conversion.
+    fn to_string_value(&self, value: &Self::Value) -> String;
+    /// ECMAScript `ToPropertyKey(value)`, restricted to the cases this codebase's `as
+    /// PropertyKey` casts actually rely on: a string value's own content, or (best-effort) a
+    /// string representation of anything else. Real symbol-value extraction is deferred — no
+    /// primordial in the current IR-lowered coverage passes a genuine guest `Symbol` through one
+    /// of these cast sites.
+    fn to_property_key(&self, value: &Self::Value) -> PropertyKey;
+    /// Converts a value that TS typed as `object | null` (e.g. `Object.create`'s `proto`
+    /// argument, `Object.setPrototypeOf`'s `prototype` argument) into the `Option<Self::Value>`
+    /// shape those slots take in this trait — `None` iff `typeof_tag(value) == ValueTag::Null`.
+    fn nullable(&self, value: &Self::Value) -> Option<Self::Value>;
 
     fn make(&mut self, proto: Option<Self::Value>) -> Result<Self::Value, TenantError>;
     fn get(&mut self, obj: &Self::Value, key: &PropertyKey) -> Result<Self::Value, TenantError>;

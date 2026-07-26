@@ -64,6 +64,41 @@ pub const TABLE: &[IntrinsicSpec] = &[
         name: MATH_ROUND,
         rust_template: "f64::round({0})",
     },
+    IntrinsicSpec {
+        name: MAP_GET,
+        rust_template: "({0}).get(&{1}).cloned()",
+    },
+    IntrinsicSpec {
+        name: MAP_SET,
+        rust_template: "{ ({0}).insert({1}, {2}); }",
+    },
+    IntrinsicSpec {
+        name: MAP_HAS,
+        rust_template: "({0}).contains_key(&{1})",
+    },
+    IntrinsicSpec {
+        name: MAP_DELETE,
+        rust_template: "{ ({0}).remove(&{1}); }",
+    },
+    IntrinsicSpec {
+        name: ARRAY_FILTER,
+        // Only a plain predicate-closure-argument shape is recognized (see `lower.rs`); the
+        // closure itself is emitted like any other `Expr::Closure`, just called through
+        // `.iter().filter(...)` rather than `make_builtin`.
+        rust_template: "({0}).iter().cloned().filter({1}).collect::<Vec<_>>()",
+    },
+    IntrinsicSpec {
+        name: ARRAY_SORT_BY,
+        rust_template: "{ ({0}).sort_by({1}); }",
+    },
+    IntrinsicSpec {
+        name: ARRAY_PUSH,
+        rust_template: "{ ({0}).push({1}); }",
+    },
+    IntrinsicSpec {
+        name: ARRAY_SLICE_FROM,
+        rust_template: "&({0})[({1}) as usize..]",
+    },
 ];
 
 pub fn spec(name: &str) -> Option<&'static IntrinsicSpec> {

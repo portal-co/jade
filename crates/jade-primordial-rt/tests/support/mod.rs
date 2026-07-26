@@ -139,6 +139,24 @@ impl Tenant for TestTenant {
         TestValue::Null
     }
 
+    fn to_string_value(&self, value: &Self::Value) -> String {
+        match value {
+            TestValue::Str(s) => s.clone(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    fn to_property_key(&self, value: &Self::Value) -> PropertyKey {
+        PropertyKey::String(self.to_string_value(value))
+    }
+
+    fn nullable(&self, value: &Self::Value) -> Option<Self::Value> {
+        match value {
+            TestValue::Null => None,
+            other => Some(other.clone()),
+        }
+    }
+
     fn make(&mut self, proto: Option<Self::Value>) -> Result<Self::Value, TenantError> {
         self.objects.push(ObjectRecord {
             proto,
