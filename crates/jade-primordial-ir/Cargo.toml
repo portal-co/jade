@@ -1,0 +1,20 @@
+[package]
+name = "portal-solutions-jade-primordial-ir"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description.workspace = true
+
+[[bin]]
+name = "gen-primordials"
+path = "src/bin/gen-primordials.rs"
+
+[dependencies]
+swc_atoms = { workspace = true }
+swc_common = { workspace = true }
+swc_ecma_ast = { workspace = true }
+swc_ecma_parser = { workspace = true }
+swc_ecma_codegen = { workspace = true }
+swc_ecma_visit = { workspace = true }
+proc-macro2 = { workspace = true }
+quote = { workspace = true }

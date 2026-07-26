@@ -1,5 +1,5 @@
 [workspace]
-members=["crates/jade-vm", "crates/jade-vm-core", "crates/jade-vm-wasm", "crates/jade-vm-wsdom", "crates/jade-vm-jit", "crates/jade-vm-frontend", "crates/jade-swc-tenant-exposure", "crates/jade-vm-e2e-tests", "crates/jade-cfg-opt", "crates/jade-vm-jit-swc"]
+members=["crates/jade-vm", "crates/jade-vm-core", "crates/jade-vm-wasm", "crates/jade-vm-wsdom", "crates/jade-vm-jit", "crates/jade-vm-frontend", "crates/jade-swc-tenant-exposure", "crates/jade-vm-e2e-tests", "crates/jade-cfg-opt", "crates/jade-vm-jit-swc", "crates/jade-tenant-rt", "crates/jade-primordial-ir", "crates/jade-primordial-rt"]
 resolver="3"
 
 [workspace.package]
@@ -35,6 +35,9 @@ swc_bundler = "^44.0.0"
 swc_ecma_loader = "^19.0.0"
 swc_ecma_parser = "^35.0.0"
 swc_ecma_codegen = "^24"
+
+proc-macro2 = "^1.0"
+quote = "^1.0"
 
 
 portal-solutions-swibb = {version="^0.6.0-alpha.1",git="https://github.com/portal-co/swibb.git"}

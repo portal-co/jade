@@ -1,0 +1,11 @@
+[package]
+name = "portal-solutions-jade-primordial-rt"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description.workspace = true
+
+[dependencies]
+portal-solutions-jade-tenant-rt = { path = "../jade-tenant-rt" }
+
+[dev-dependencies]
