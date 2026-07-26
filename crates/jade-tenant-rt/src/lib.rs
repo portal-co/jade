@@ -149,89 +149,158 @@ pub enum TenantInvocation<V> {
 /// **missing native exotic trap** always fails closed (never silently falls back to target
 /// behavior — that fallback is only ever a *guest* `Proxy` handler concern, one layer above
 /// this trait; see `proxy.ts`'s two-layer trap design).
-pub trait TenantExoticHandler<V> {
-    fn get(&mut self, _receiver: &V, _key: &PropertyKey) -> Result<V, TenantError> {
+///
+/// Generic over `T: Tenant` (not just its `Value`), and every trap takes `tenant: &mut T` —
+/// discovered necessary while hand-porting `types.ts`'s `makeBuiltin` (`types_shim.rs`): a
+/// handler's own trap bodies routinely need to perform further tenant operations (`makeBuiltin`'s
+/// `define`/`assign` traps call `tenant.ownKeys`/`tenant.get` on a source object, and its
+/// `apply`/`construct` traps invoke a caller-supplied closure that itself does tenant work). A
+/// trap signature with no way to reach the tenant at all can't express that, unlike the TS
+/// version where every trap is a closure over its enclosing `tenant` parameter for free.
+pub trait TenantExoticHandler<T: Tenant> {
+    fn get(&mut self, _tenant: &mut T, _receiver: &T::Value, _key: &PropertyKey) -> Result<T::Value, TenantError> {
         Err(TenantError::type_error("exotic trap 'get' is not implemented"))
     }
-    fn set(&mut self, _receiver: &V, _key: &PropertyKey, _value: V) -> Result<(), TenantError> {
+    fn set(&mut self, _tenant: &mut T, _receiver: &T::Value, _key: &PropertyKey, _value: T::Value) -> Result<(), TenantError> {
         Err(TenantError::type_error("exotic trap 'set' is not implemented"))
     }
-    fn has(&mut self, _receiver: &V, _key: &PropertyKey) -> Result<bool, TenantError> {
+    fn has(&mut self, _tenant: &mut T, _receiver: &T::Value, _key: &PropertyKey) -> Result<bool, TenantError> {
         Err(TenantError::type_error("exotic trap 'has' is not implemented"))
     }
-    fn delete(&mut self, _receiver: &V, _key: &PropertyKey) -> Result<(), TenantError> {
+    fn delete(&mut self, _tenant: &mut T, _receiver: &T::Value, _key: &PropertyKey) -> Result<(), TenantError> {
         Err(TenantError::type_error("exotic trap 'delete' is not implemented"))
     }
-    fn own_keys(&mut self, _receiver: &V) -> Result<Vec<PropertyKey>, TenantError> {
+    fn own_keys(&mut self, _tenant: &mut T, _receiver: &T::Value) -> Result<Vec<PropertyKey>, TenantError> {
         Err(TenantError::type_error("exotic trap 'ownKeys' is not implemented"))
     }
-    fn own_property_keys(&mut self, _receiver: &V) -> Result<Vec<PropertyKey>, TenantError> {
+    fn own_property_keys(&mut self, _tenant: &mut T, _receiver: &T::Value) -> Result<Vec<PropertyKey>, TenantError> {
         Err(TenantError::type_error(
             "exotic trap 'ownPropertyKeys' is not implemented",
         ))
     }
     fn get_own_property_descriptor(
         &mut self,
-        _receiver: &V,
+        _tenant: &mut T,
+        _receiver: &T::Value,
         _key: &PropertyKey,
-    ) -> Result<Option<TenantPropertyDescriptor<V>>, TenantError> {
+    ) -> Result<Option<TenantPropertyDescriptor<T::Value>>, TenantError> {
         Err(TenantError::type_error(
             "exotic trap 'getOwnPropertyDescriptor' is not implemented",
         ))
     }
     fn define_property(
         &mut self,
-        _receiver: &V,
+        _tenant: &mut T,
+        _receiver: &T::Value,
         _key: &PropertyKey,
-        _descriptor: TenantPropertyDescriptor<V>,
+        _descriptor: TenantPropertyDescriptor<T::Value>,
     ) -> Result<bool, TenantError> {
         Err(TenantError::type_error(
             "exotic trap 'defineProperty' is not implemented",
         ))
     }
-    fn get_prototype_of(&mut self, _receiver: &V) -> Result<Option<V>, TenantError> {
+    fn get_prototype_of(&mut self, _tenant: &mut T, _receiver: &T::Value) -> Result<Option<T::Value>, TenantError> {
         Err(TenantError::type_error(
             "exotic trap 'getPrototypeOf' is not implemented",
         ))
     }
-    fn set_prototype_of(&mut self, _receiver: &V, _prototype: Option<V>) -> Result<bool, TenantError> {
+    fn set_prototype_of(
+        &mut self,
+        _tenant: &mut T,
+        _receiver: &T::Value,
+        _prototype: Option<T::Value>,
+    ) -> Result<bool, TenantError> {
         Err(TenantError::type_error(
             "exotic trap 'setPrototypeOf' is not implemented",
         ))
     }
-    fn is_extensible(&mut self, _receiver: &V) -> Result<bool, TenantError> {
+    fn is_extensible(&mut self, _tenant: &mut T, _receiver: &T::Value) -> Result<bool, TenantError> {
         Err(TenantError::type_error(
             "exotic trap 'isExtensible' is not implemented",
         ))
     }
-    fn prevent_extensions(&mut self, _receiver: &V) -> Result<bool, TenantError> {
+    fn prevent_extensions(&mut self, _tenant: &mut T, _receiver: &T::Value) -> Result<bool, TenantError> {
         Err(TenantError::type_error(
             "exotic trap 'preventExtensions' is not implemented",
         ))
     }
-    fn define(&mut self, _receiver: &V, _descriptors: &V) -> Result<(), TenantError> {
+    fn define(&mut self, _tenant: &mut T, _receiver: &T::Value, _descriptors: &T::Value) -> Result<(), TenantError> {
         Err(TenantError::type_error("exotic trap 'define' is not implemented"))
     }
-    fn assign(&mut self, _receiver: &V, _source: &V) -> Result<(), TenantError> {
+    fn assign(&mut self, _tenant: &mut T, _receiver: &T::Value, _source: &T::Value) -> Result<(), TenantError> {
         Err(TenantError::type_error("exotic trap 'assign' is not implemented"))
     }
 }
 
 /// Mirrors `TenantCallableExoticHandler` in `packages/jade-js/tenants/types.ts`.
-pub trait TenantCallableExoticHandler<V>: TenantExoticHandler<V> {
-    fn apply(&mut self, receiver: &V, this_arg: &V, args: &[V]) -> Result<V, TenantError>;
-    fn construct(&mut self, receiver: &V, new_target: &V, args: &[V]) -> Result<V, TenantError>;
+pub trait TenantCallableExoticHandler<T: Tenant>: TenantExoticHandler<T> {
+    fn apply(&mut self, tenant: &mut T, receiver: &T::Value, this_arg: &T::Value, args: &[T::Value]) -> Result<T::Value, TenantError>;
+    fn construct(&mut self, tenant: &mut T, receiver: &T::Value, new_target: &T::Value, args: &[T::Value]) -> Result<T::Value, TenantError>;
+}
+
+/// Mirrors the ECMAScript `typeof`-family distinction a value's *shape* falls into, as needed
+/// by helpers like `types.ts`'s `assertObject`/`toIndex` that branch on whether an argument is
+/// an object, a primitive, or nullish before doing anything tenant-mediated. `Null` is split out
+/// from `Object` (unlike real JS `typeof null === "object"`) because every source usage that
+/// inspects this actually wants to distinguish the two (`value === null` guards).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueTag {
+    Undefined,
+    Null,
+    Boolean,
+    Number,
+    String,
+    Symbol,
+    Object,
+    Function,
 }
 
 /// Mirrors the object-model surface of `Tenant` in `packages/jade-js/tenants/types.ts`. See the
 /// module doc comment for what was deliberately dropped (the TS-only generator/ABI-driver
 /// plumbing) and why.
+///
+/// `typeof_tag`/`to_number` and the primitive constructors below have no direct TS-interface
+/// counterpart: on the TS side, a primitive argument crossing the tenant boundary is already a
+/// raw host `unknown` (`typeof`/`Number()` are just ordinary host operations there). Once
+/// `Value` is an opaque associated type on the Rust side, inspecting or constructing a
+/// primitive needs an explicit tenant-mediated operation instead — these exist because
+/// `assertObject`/`toIndex`/`guestArrayLike`'s hand-written Rust port (`types_shim.rs`) needs
+/// them, not because any TS source line maps onto them directly.
 pub trait Tenant {
-    type Value: Clone;
+    /// `PartialEq` (added alongside the primitive-inspection methods below) is required by
+    /// hand-written shim code (`types_shim.rs`'s `makeBuiltin` port) that needs reference-
+    /// identity-style `prototype !== next` checks — `Tenant` has no other way to compare two
+    /// values generically.
+    type Value: Clone + PartialEq;
     /// Stable per-object identity, used as the key for non-tenant-keyed caches (buffer/typed
     /// array/descriptor records). TS has no equivalent concept because a `WeakMap<object, V>`
     /// keys directly off object identity; Rust needs an explicit, hashable/comparable stand-in.
     type ObjectId: Eq + Hash + Clone;
+
+    /// Which ECMAScript value-shape category `value` falls into. Pure inspection — never
+    /// triggers guest-visible behavior (no `valueOf`/`toString`/`Symbol.toPrimitive` calls),
+    /// matching the "primitive boxing deferred" rule primordials already follow.
+    fn typeof_tag(&self, value: &Self::Value) -> ValueTag;
+    /// `Number(value)` for a value already known to be primitive (`typeof_tag` is not
+    /// `Object`/`Function`) — returns `NaN` for a non-numeric primitive, exactly like the real
+    /// global `Number()` function does for a string that doesn't parse. Calling this on an
+    /// object/function value is a caller error (implementations may panic or return `NaN`);
+    /// every real call site in `types_shim.rs` checks `typeof_tag` first.
+    fn to_number(&self, value: &Self::Value) -> f64;
+    /// `ToBoolean(value)` — ordinary JS truthy/falsy coercion, needed by e.g.
+    /// `readGuestDescriptor`'s `writable`/`enumerable`/`configurable` fields, which a guest
+    /// descriptor object may supply as any value, not necessarily a real boolean.
+    fn to_boolean(&self, value: &Self::Value) -> bool;
+    /// Construct the canonical guest `true`/`false` value.
+    fn boolean_value(&mut self, value: bool) -> Self::Value;
+    /// Construct a guest string value (e.g. `makeBuiltin`'s `name` property).
+    fn string_value(&mut self, value: &str) -> Self::Value;
+    /// Construct a guest number value.
+    fn number_value(&mut self, value: f64) -> Self::Value;
+    /// Construct the canonical guest `undefined` value.
+    fn undefined_value(&mut self) -> Self::Value;
+    /// Construct the canonical guest `null` value.
+    fn null_value(&mut self) -> Self::Value;
 
     fn make(&mut self, proto: Option<Self::Value>) -> Result<Self::Value, TenantError>;
     fn get(&mut self, obj: &Self::Value, key: &PropertyKey) -> Result<Self::Value, TenantError>;
@@ -266,14 +335,18 @@ pub trait Tenant {
     fn make_exotic(
         &mut self,
         proto: Option<Self::Value>,
-        handler: Box<dyn TenantExoticHandler<Self::Value>>,
-    ) -> Result<Self::Value, TenantError>;
+        handler: Box<dyn TenantExoticHandler<Self>>,
+    ) -> Result<Self::Value, TenantError>
+    where
+        Self: Sized;
     /// Create a callable exotic represented by a constructible native function.
     fn make_callable_exotic(
         &mut self,
         proto: Option<Self::Value>,
-        handler: Box<dyn TenantCallableExoticHandler<Self::Value>>,
-    ) -> Result<Self::Value, TenantError>;
+        handler: Box<dyn TenantCallableExoticHandler<Self>>,
+    ) -> Result<Self::Value, TenantError>
+    where
+        Self: Sized;
     /// Route normal apply or construction through the tenant callable ABI.
     fn invoke(&mut self, callee: &Self::Value, invocation: TenantInvocation<Self::Value>) -> Result<Self::Value, TenantError>;
     /// Invoke a property-descriptor getter/setter ("trap").

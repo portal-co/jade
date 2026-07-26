@@ -12,6 +12,7 @@ pub mod emit_ts;
 pub mod intrinsics;
 pub mod ir;
 pub mod lower;
+pub mod shims;
 
 use std::fmt;
 

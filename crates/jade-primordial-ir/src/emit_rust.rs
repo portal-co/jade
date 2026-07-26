@@ -14,39 +14,82 @@
 //! by-key dynamic accessor for descriptors) that aren't designed yet — see the plan's phased
 //! rollout for where that lands.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::intrinsics;
 use crate::ir::*;
+use crate::shims;
 use crate::IrError;
 
 const DESCRIPTOR_FIELDS: &[&str] = &["value", "writable", "get", "set", "enumerable", "configurable"];
 
-/// Tenant trait methods this emitter knows how to call, and which positional arguments need a
-/// `&` reference to match `jade-tenant-rt::Tenant`'s signatures (an object/key argument is
-/// borrowed; a descriptor/invocation argument is passed by value). See the trait definition in
-/// `crates/jade-tenant-rt/src/lib.rs`.
-fn tenant_method(name: &str) -> Option<(&'static str, &'static [bool])> {
+thread_local! {
+    /// Bare-identifier -> import-source map for the module currently being emitted, consulted
+    /// only by `emit_call` to resolve a shimmed external call (see `shims.rs`). Set once at the
+    /// top of `try_emit_module` and never mutated concurrently — emission is single-threaded and
+    /// non-reentrant, so a thread-local avoids threading an extra parameter through every
+    /// `emit_*` function purely to reach the one call site that needs it.
+    static IMPORT_SOURCES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+fn imported_source(name: &str) -> Option<String> {
+    IMPORT_SOURCES.with(|map| map.borrow().get(name).cloned())
+}
+
+/// Tenant trait methods this emitter knows how to call, and each positional argument's passing
+/// convention (see `shims::ArgKind`) to match `jade-tenant-rt::Tenant`'s signatures. See the
+/// trait definition in `crates/jade-tenant-rt/src/lib.rs`.
+fn tenant_method(name: &str) -> Option<(&'static str, &'static [shims::ArgKind])> {
+    use shims::ArgKind::{Owned, Ref, RefKey};
     Some(match name {
-        "make" => ("make", &[false]),
-        "get" => ("get", &[true, true]),
-        "set" => ("set", &[true, true, false]),
-        "has" => ("has", &[true, true]),
-        "delete" => ("delete", &[true, true]),
-        "ownKeys" => ("own_keys", &[true]),
-        "ownPropertyKeys" => ("own_property_keys", &[true]),
-        "getOwnPropertyDescriptor" => ("get_own_property_descriptor", &[true, true]),
-        "defineProperty" => ("define_property", &[true, true, false]),
-        "getPrototypeOf" => ("get_prototype_of", &[true]),
-        "setPrototypeOf" => ("set_prototype_of", &[true, false]),
-        "isExtensible" => ("is_extensible", &[true]),
-        "preventExtensions" => ("prevent_extensions", &[true]),
-        "define" => ("define", &[true, true]),
-        "assign" => ("assign", &[true, true]),
-        "invoke" => ("invoke", &[true, false]),
-        "invokeTrap" => ("invoke_trap", &[true, true, false]),
+        "make" => ("make", &[Owned] as &[_]),
+        "get" => ("get", &[Ref, RefKey]),
+        "set" => ("set", &[Ref, RefKey, Owned]),
+        "has" => ("has", &[Ref, RefKey]),
+        "delete" => ("delete", &[Ref, RefKey]),
+        "ownKeys" => ("own_keys", &[Ref]),
+        "ownPropertyKeys" => ("own_property_keys", &[Ref]),
+        "getOwnPropertyDescriptor" => ("get_own_property_descriptor", &[Ref, RefKey]),
+        "defineProperty" => ("define_property", &[Ref, RefKey, Owned]),
+        "getPrototypeOf" => ("get_prototype_of", &[Ref]),
+        "setPrototypeOf" => ("set_prototype_of", &[Ref, Owned]),
+        "isExtensible" => ("is_extensible", &[Ref]),
+        "preventExtensions" => ("prevent_extensions", &[Ref]),
+        "define" => ("define", &[Ref, Ref]),
+        "assign" => ("assign", &[Ref, Ref]),
+        "invoke" => ("invoke", &[Ref, Owned]),
+        "invokeTrap" => ("invoke_trap", &[Ref, Ref, Owned]),
         _ => return None,
+    })
+}
+
+/// Emits one call argument per its [`shims::ArgKind`] passing convention. Shared by
+/// `tenant.<method>(...)` calls and shimmed external calls (`emit_shim_call`).
+fn emit_call_arg(expr: &Expr, kind: shims::ArgKind) -> Result<TokenStream, IrError> {
+    let tokens = emit_expr(expr)?;
+    let already_ref = matches!(expr, Expr::Ident(_));
+    Ok(match kind {
+        shims::ArgKind::Owned => tokens,
+        shims::ArgKind::Ref => {
+            if already_ref {
+                tokens
+            } else {
+                quote! { &#tokens }
+            }
+        }
+        shims::ArgKind::RefKey => {
+            if matches!(expr, Expr::Lit(Lit::Str(_))) {
+                quote! { &PropertyKey::from(#tokens) }
+            } else if already_ref {
+                tokens
+            } else {
+                quote! { &#tokens }
+            }
+        }
     })
 }
 
@@ -63,6 +106,18 @@ pub fn emit_module(module: &Module, module_name: &str) -> String {
 }
 
 fn try_emit_module(module: &Module) -> Result<TokenStream, IrError> {
+    IMPORT_SOURCES.with(|map| {
+        let mut map = map.borrow_mut();
+        map.clear();
+        for item in &module.items {
+            if let Item::ValueImport { source, names } = item {
+                for name in names {
+                    map.insert(name.clone(), source.clone());
+                }
+            }
+        }
+    });
+
     let mut items = Vec::new();
     items.push(quote! {
         #[allow(unused_imports)]
@@ -124,20 +179,66 @@ fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
     }
 }
 
+/// Whether `func`'s Rust translation needs to return `Result<_, TenantError>`. Broader than
+/// scanning for a literal `throw`: a direct `throw` statement is one source of fallibility, but
+/// so is *any* `TenantYield` (every tenant operation is fallible in Rust, even though TS's
+/// generator/yield ceremony hides that) and any call into a shimmed function that itself returns
+/// `Result` (see `shims.rs`) — both recognized here regardless of nesting depth, since either
+/// one appearing anywhere in the body means the emitted Rust needs `?` to propagate it, which in
+/// turn means the function signature must be fallible.
+fn block_throws(block: &Block) -> bool {
+    block.0.iter().any(stmt_throws)
+}
+
 fn stmt_throws(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Throw(_) => true,
-        Stmt::If { then_branch, else_branch, .. } => {
-            block_throws(then_branch) || else_branch.as_ref().is_some_and(block_throws)
+        Stmt::If { cond, then_branch, else_branch } => {
+            expr_throws(cond) || block_throws(then_branch) || else_branch.as_ref().is_some_and(block_throws)
         }
-        Stmt::ForOf { body, .. } | Stmt::ForCounting { body, .. } => block_throws(body),
+        Stmt::ForOf { iter, body, .. } => expr_throws(iter) || block_throws(body),
+        Stmt::ForCounting { start, bound, body, .. } => expr_throws(start) || expr_throws(bound) || block_throws(body),
         Stmt::TryCatch { try_block, catch_block, .. } => block_throws(try_block) || block_throws(catch_block),
-        Stmt::Let { .. } | Stmt::Expr(_) | Stmt::Return(_) => false,
+        Stmt::Let { init, .. } => init.as_ref().is_some_and(expr_throws),
+        Stmt::Expr(expr) => expr_throws(expr),
+        Stmt::Return(value) => value.as_ref().is_some_and(expr_throws),
     }
 }
 
-fn block_throws(block: &Block) -> bool {
-    block.0.iter().any(stmt_throws)
+fn expr_throws(expr: &Expr) -> bool {
+    match expr {
+        Expr::TenantYield(_) => true,
+        Expr::Call { callee, args } => {
+            let is_shim_call = matches!(callee.as_ref(), Expr::Ident(name)
+                if imported_source(name).is_some_and(|source| shims::lookup(&source, name).is_some()));
+            is_shim_call || expr_throws(callee) || args.iter().any(call_arg_throws)
+        }
+        Expr::New { callee, args } => expr_throws(callee) || args.iter().any(call_arg_throws),
+        Expr::Member { obj, prop } => {
+            expr_throws(obj) || matches!(prop, MemberProp::Computed(e) if expr_throws(e))
+        }
+        Expr::Bin { lhs, rhs, .. } => expr_throws(lhs) || expr_throws(rhs),
+        Expr::Un { arg, .. } | Expr::Spread(arg) | Expr::Paren(arg) => expr_throws(arg),
+        Expr::Cond { test, cons, alt } => expr_throws(test) || expr_throws(cons) || expr_throws(alt),
+        Expr::Assign { target, value } => expr_throws(target) || expr_throws(value),
+        Expr::TemplateLiteral(parts) => parts.iter().any(|p| matches!(p, TemplatePart::Expr(e) if expr_throws(e))),
+        Expr::Array(elements) => elements.iter().any(|e| match e {
+            ArrayElement::Normal(e) | ArrayElement::Spread(e) => expr_throws(e),
+        }),
+        Expr::Object(props) => props.iter().any(|p| match p {
+            ObjectProp::KeyValue { value, .. } => expr_throws(value),
+            ObjectProp::Spread(e) => expr_throws(e),
+            ObjectProp::Method { .. } => false,
+        }),
+        Expr::HostIntrinsic { args, .. } => args.iter().any(expr_throws),
+        Expr::Ident(_) | Expr::Lit(_) | Expr::ThisArg | Expr::Closure(_) => false,
+    }
+}
+
+fn call_arg_throws(arg: &CallArg) -> bool {
+    match arg {
+        CallArg::Normal(e) | CallArg::Spread(e) => expr_throws(e),
+    }
 }
 
 fn emit_fn_decl(func: &FnDecl) -> Result<TokenStream, IrError> {
@@ -460,30 +561,91 @@ fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
             });
         }
         let mut arg_tokens = Vec::new();
-        for (arg, needs_ref) in args.iter().zip(arg_refs) {
+        for (arg, kind) in args.iter().zip(arg_refs) {
             let CallArg::Normal(expr) = arg else {
                 return Err(IrError::Unsupported {
                     file: String::new(),
                     construct: "spread argument to a tenant method".into(),
                 });
             };
-            let tokens = emit_expr(expr)?;
-            // A bare identifier naming an `object`/`Function`/`PropertyKey`/`unknown`-typed
-            // parameter is *already* `&T::Value`/`&PropertyKey` per `emit_param`'s by-ref
-            // convention, so passing it on needs no extra `&` — only a freshly-constructed
-            // value (a struct literal, a `TenantYield`-derived owned result, ...) needs one
-            // taken here. This is a bare-identifier heuristic, not real type tracking: it's
-            // correct as long as no local rebinds an object-typed parameter to a differently-
-            // owned value, which doesn't happen anywhere in the current emitter's coverage.
-            let already_ref = matches!(expr, Expr::Ident(_));
-            arg_tokens.push(if *needs_ref && !already_ref { quote! { &#tokens } } else { tokens });
+            arg_tokens.push(emit_call_arg(expr, *kind)?);
         }
         return Ok(quote! { tenant.#method_ident(#(#arg_tokens),*) });
     }
+
+    if let Expr::Ident(name) = callee
+        && let Some(source) = imported_source(name)
+        && let Some(spec) = shims::lookup(&source, name)
+    {
+        return emit_shim_call(spec, args);
+    }
+
     Err(IrError::Unsupported {
         file: String::new(),
-        construct: "call expression is not yet covered by the Rust emitter (only tenant.<method>(...) calls are)".into(),
+        construct: "call expression is not yet covered by the Rust emitter (only tenant.<method>(...) calls and shimmed external calls are)".into(),
     })
+}
+
+/// Emits a call resolved through the shim registry (see `shims.rs`) — `tenant` is either passed
+/// through bare (already `&mut T`, matching how `emit_param` types it) or injected as a leading
+/// argument the TS call site never supplied, depending on `spec.inject_tenant`.
+fn emit_shim_call(spec: &shims::ShimSpec, args: &[CallArg]) -> Result<TokenStream, IrError> {
+    if args.len() > spec.args.len() {
+        return Err(IrError::Unsupported {
+            file: String::new(),
+            construct: format!(
+                "{}(...) called with {} args, at most {} are recognized",
+                spec.name,
+                args.len(),
+                spec.args.len()
+            ),
+        });
+    }
+    let mut arg_tokens = Vec::new();
+    if spec.inject_tenant {
+        arg_tokens.push(quote! { tenant });
+    }
+    for (i, arg_spec) in spec.args.iter().enumerate() {
+        let tokens = match args.get(i) {
+            Some(CallArg::Normal(expr)) => emit_call_arg(expr, arg_spec.kind)?,
+            Some(CallArg::Spread(_)) => {
+                return Err(IrError::Unsupported {
+                    file: String::new(),
+                    construct: format!("spread argument to shimmed call `{}`", spec.name),
+                });
+            }
+            None => {
+                let Some(default_literal) = arg_spec.default_literal else {
+                    return Err(IrError::Unsupported {
+                        file: String::new(),
+                        construct: format!("{}(...) is missing its required argument #{i}", spec.name),
+                    });
+                };
+                default_literal.parse::<TokenStream>().map_err(|e| IrError::Unsupported {
+                    file: String::new(),
+                    construct: format!("shim `{}` default literal did not parse as Rust: {e}", spec.name),
+                })?
+            }
+        };
+        arg_tokens.push(tokens);
+    }
+    let path: TokenStream = spec.rust_path.parse().map_err(|e| IrError::Unsupported {
+        file: String::new(),
+        construct: format!("shim `{}` rust_path did not parse as Rust: {e}", spec.name),
+    })?;
+    // Every current shim target returns `Result<_, TenantError>` in Rust. A generator-shaped TS
+    // export (`inject_tenant: false`: `defineData`/`readGuestDescriptor`/...) is only ever
+    // called wrapped in `yield tenant.yieldTenant(...)` per this codebase's own invariant (every
+    // `TenantGenerator`-returning call is composed that way — see `tenants/types.ts`'s doc
+    // comment), and `Expr::TenantYield`'s own lowering already appends the `?` there. A
+    // synchronous TS export (`inject_tenant: true`: `assertObject`/`toIndex`) is never wrapped
+    // that way — TS gets ordinary unchecked exception propagation for free, which Rust's
+    // `Result` needs an explicit `?` to match, so it's added here instead.
+    if spec.inject_tenant {
+        Ok(quote! { (#path(#(#arg_tokens),*))? })
+    } else {
+        Ok(quote! { #path(#(#arg_tokens),*) })
+    }
 }
 
 fn emit_host_intrinsic(name: &str, args: &[Expr]) -> Result<TokenStream, IrError> {
