@@ -10,10 +10,16 @@
 //! `install_method`/`lock` and the `ObjectPrimordial`/`ObjectPrimordialCache` types are fully
 //! generated and tested. `objectPrimordial` itself is not yet — `Object.keys`'s closure returns
 //! `tenant.ownKeys(...)`'s host-side `Vec<PropertyKey>` directly as a guest value, which has no
-//! sound Rust translation without a guest Array primordial (out of scope per
-//! `docs/primordials-plan.md`'s own non-goals). `gen-primordials` reports this on stderr and
-//! omits just that one function, rather than embedding a `compile_error!` that would block the
-//! whole crate from building — see `jade-primordial-ir::emit_rust`'s module doc comment.
+//! sound Rust translation without a guest Array primordial. `gen-primordials` reports this on
+//! stderr and omits just that one function, rather than embedding a `compile_error!` that would
+//! block the whole crate from building — see `jade-primordial-ir::emit_rust`'s module doc
+//! comment. See `docs/array-primordial-gap-plan.md` for the design note on what closing this
+//! gap actually needs.
+//!
+//! `function.rs` (from `function.ts`) is fully IR-lowered and generated, sitting in this
+//! directory but **not yet wired into this module tree**: `functionPrimordial` calls
+//! `crate::object::object_primordial`, which doesn't exist until the gap above closes. Add
+//! `pub mod function;` back once it does — `cargo build` will immediately say so if not.
 
 pub mod types_shim;
 pub mod object;

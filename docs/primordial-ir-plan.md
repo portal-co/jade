@@ -15,12 +15,33 @@
   `ObjectPrimordialCache` types are fully IR-lowered, generated, and behavior-tested.
   `objectPrimordial` itself is not yet generated: its `Object.keys` closure returns
   `tenant.ownKeys(...)`'s host-side `Vec<PropertyKey>` directly as a guest value, which has no
-  sound translation without a guest Array primordial (out of scope per this document's own
-  non-goals, matching `docs/primordials-plan.md`'s). `gen-primordials` reports this on stderr
+  sound translation without a guest Array primordial. `gen-primordials` reports this on stderr
   and omits just that one function rather than blocking the rest of the file — see "Per-item
-  emission" below.
-- **Not started:** `function.ts`, `reflect.ts`, `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`,
-  `promise.ts`, `realm.ts`.
+  emission" below. **This is now a cross-file blocker, not an isolated gap**: every other
+  primordial file calls `objectPrimordial` for `ObjectPrototype`, so none of them can be wired
+  into `jade-primordial-rt`'s module tree until it closes — see
+  `docs/array-primordial-gap-plan.md` for the design note on what closing it actually needs
+  (paused deliberately — no `Tenant` trait changes until that note is acted on).
+- **`function.ts`:** fully IR-lowered and generated (`crates/jade-primordial-rt/src/function.rs`
+  exists on disk with correct content) but **not wired into the module tree** (`lib.rs` doesn't
+  `pub mod function;` it yet) — it calls `crate::object::object_primordial`, which doesn't exist
+  until the gap above closes. Two more real emitter bugs surfaced and were fixed while landing
+  it: `yield EXPR as TARGET` parses as `yield (EXPR as TARGET)`, not `(yield EXPR) as TARGET` (a
+  cast applies to the yield's own operand — see `lower.rs`'s `lower_yield`); and
+  `ArgKind::OptionOwned`/`OptionRef` didn't have `OptionalValue`'s "an explicit `undefined`
+  argument means `None`, not `Some(tenant.undefined_value())`" handling, which
+  `makeBuiltin(tenant, "call", applyClosure, undefined, FunctionPrototype)`-shaped calls (a real
+  closure's `construct` argument omitted) need. Also added: `TenantInvocation` object-literal
+  recognition (`{ kind: "apply", thisArg, args }` / `{ kind: "construct", args, newTarget }`,
+  `tenant.invoke`'s second argument), cross-file factory calls/destructuring
+  (`cross_file.rs` — the generated-code counterpart to `shims.rs`, since `functionPrimordial`
+  calls and destructures `objectPrimordial`'s result), and closures with fewer than 2 declared
+  parameters (`Function`'s own apply/construct closures both ignore all their arguments, padded
+  to the fixed 2-param Rust shape `make_builtin` requires with synthetic unused names).
+- **Not started:** `reflect.ts`, `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`,
+  `realm.ts`. `reflect.ts`/`proxy.ts` will hit the same `objectPrimordial` cross-file block
+  immediately (`Reflect.ownKeys` has the identical `Vec<PropertyKey>`-as-return-value shape, and
+  `proxy.ts` calls `functionPrimordial`, itself blocked transitively).
 
 ### Shimmed modules (a correction to the original plan)
 
@@ -316,12 +337,15 @@ async bridge the specific Rust embedding actually has (a `Future`, a callback, e
 generated `promise.rs` covers the state machine (pending/fulfilled/rejected, reaction queue,
 thenable assimilation) but not this boundary.
 
-**Newly discovered gap, not yet resolved:** `Object.keys`/`Reflect.ownKeys`'s closures return
-`tenant.ownKeys(...)`'s host-side `Vec<PropertyKey>` directly as their own guest-visible return
-value — sound in the current TS-hosted execution model (a host array *is* already a valid
-guest-observable value there), unsound in Rust without a guest Array primordial. No primitive
-for this is designed yet; `gen-primordials` omits the enclosing function and reports why (see
-"Per-item emission" above) rather than guessing at one.
+**Newly discovered gap, design paused (not yet resolved):** `Object.keys`/`Reflect.ownKeys`'s
+closures return `tenant.ownKeys(...)`'s host-side `Vec<PropertyKey>` directly as their own
+guest-visible return value — sound in the current TS-hosted execution model (a host array *is*
+already a valid guest-observable value there), unsound in Rust without a guest Array primordial.
+This has turned out to be a cross-file blocker (see "Progress" above), not an isolated gap —
+`docs/array-primordial-gap-plan.md` is the design note for what a minimal, honest fix needs
+(two new `Tenant` primitives, deliberately *not* a full `Array.prototype`); no `Tenant` change
+has landed from it yet. `gen-primordials` omits the enclosing function and reports why (see
+"Per-item emission" above) in the meantime, rather than guessing at a primitive.
 
 ## Implementation phases
 

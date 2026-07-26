@@ -36,6 +36,7 @@ use std::collections::HashMap;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
+use crate::cross_file;
 use crate::intrinsics;
 use crate::ir::*;
 use crate::shims;
@@ -168,11 +169,28 @@ fn emit_call_arg(expr: &Expr, kind: shims::ArgKind) -> Result<TokenStream, IrErr
                 quote! { &#tokens }
             }
         }
-        shims::ArgKind::OptionRef => quote! { Some((#tokens).clone()) },
+        // Both check for an explicit `undefined` argument first (`makeBuiltin(tenant, "call",
+        // applyClosure, undefined, FunctionPrototype)` — `call`/`apply`/`bind` all omit a real
+        // construct closure this way) and emit plain `None` rather than `Some(Box::new(tenant
+        // .undefined_value()))`/`Some((tenant.undefined_value()).clone())`, matching
+        // `OptionalValue`'s same distinction below.
+        shims::ArgKind::OptionRef => {
+            if is_nullish_lit(expr) {
+                quote! { None }
+            } else {
+                quote! { Some((#tokens).clone()) }
+            }
+        }
         // `make_builtin`'s `construct: Option<ConstructFn<T>>` — `ConstructFn<T>` is a boxed
         // trait object (`Box<dyn FnMut(...)>`), unlike `apply`'s unboxed `impl FnMut(...) +
-        // 'static` — so the closure literal itself needs an explicit `Box::new`.
-        shims::ArgKind::OptionOwned => quote! { Some(Box::new(#tokens)) },
+        // 'static` — so a *real* closure literal needs an explicit `Box::new`.
+        shims::ArgKind::OptionOwned => {
+            if is_nullish_lit(expr) {
+                quote! { None }
+            } else {
+                quote! { Some(Box::new(#tokens)) }
+            }
+        }
         shims::ArgKind::OptionalValue => {
             if is_nullish_lit(expr) {
                 quote! { None }
@@ -243,8 +261,18 @@ fn try_emit_module(module: &Module) -> TokenStream {
     let mut items = Vec::new();
     items.push(quote! {
         #[allow(unused_imports)]
-        use portal_solutions_jade_tenant_rt::{Tenant, PropertyKey, TenantError, TenantPropertyDescriptor, DynFields, ValueTag};
+        use portal_solutions_jade_tenant_rt::{Tenant, PropertyKey, TenantError, TenantPropertyDescriptor, TenantInvocation, DynFields, ValueTag};
     });
+    // Every registered cross-file factory's struct, unconditionally — small, fixed registry, so
+    // this is simpler than scanning for which ones a given file actually destructures (see
+    // `cross_file.rs`).
+    for factory in cross_file::TABLE {
+        let path: TokenStream = factory.struct_path.parse().unwrap_or_default();
+        items.push(quote! {
+            #[allow(unused_imports)]
+            use #path;
+        });
+    }
     for item in &module.items {
         match emit_item(item) {
             Ok(Some(tokens)) => items.push(tokens),
@@ -386,7 +414,9 @@ fn expr_throws(expr: &Expr) -> bool {
                 if imported_source(name).is_some_and(|source| shims::lookup(&source, name).is_some()));
             let is_local_call = matches!(callee.as_ref(), Expr::Ident(name)
                 if LOCAL_FN_PARAMS.with(|m| m.borrow().contains_key(name)));
-            is_shim_call || is_local_call || expr_throws(callee) || args.iter().any(call_arg_throws)
+            let is_cross_file_call = matches!(callee.as_ref(), Expr::Ident(name)
+                if imported_source(name).is_some_and(|source| cross_file::lookup(&source, name).is_some()));
+            is_shim_call || is_local_call || is_cross_file_call || expr_throws(callee) || args.iter().any(call_arg_throws)
         }
         Expr::New { callee, args } => expr_throws(callee) || args.iter().any(call_arg_throws),
         Expr::Member { obj, prop } => {
@@ -486,6 +516,20 @@ fn emit_fn_decl(func: &FnDecl) -> Result<TokenStream, IrError> {
     {
         let cache_ty_ident = format_ident!("{value_ty}Cache");
         param_tokens.push(quote! { cache: &mut #cache_ty_ident<T> });
+    }
+    // Any registered cross-file factory this function's body calls needs its cache threaded in
+    // too, one extra parameter per distinct factory referenced — see `cross_file.rs`.
+    let body_str = body.to_string();
+    for factory in cross_file::TABLE {
+        let cache_param = cross_file::cache_param_name(factory);
+        if word_referenced(&body_str, &cache_param) {
+            let cache_ident = format_ident!("{cache_param}");
+            let cache_ty: TokenStream = format!("{}Cache", factory.struct_path).parse().map_err(|e| IrError::Unsupported {
+                file: String::new(),
+                construct: format!("cross-file factory `{}` struct_path did not parse as Rust: {e}", factory.name),
+            })?;
+            param_tokens.push(quote! { #cache_ident: &mut #cache_ty<T> });
+        }
     }
 
     // `+ 'static` unconditionally: any factory that (transitively) reaches `make_builtin` needs
@@ -689,11 +733,70 @@ fn option_narrow_continue(cond: &Expr, then_branch: &Block) -> Option<TokenStrea
     Some(quote! { let Some(#ident) = #ident else { continue; }; })
 }
 
+/// `const { ObjectPrototype } = yield tenant.yieldTenant(objectPrimordial(tenant));` — the one
+/// destructuring shape in the surveyed source, always over a cross-file factory's result (see
+/// `cross_file.rs`). Rust struct-pattern destructuring gives this the same effect with no
+/// further rewriting needed downstream: `let ObjectPrimordial { object_prototype, .. } = ...;`
+/// binds `object_prototype` for the rest of the block exactly like the TS `const` does.
+fn emit_destructuring_let(bindings: &[ShallowBinding], init_expr: &Expr) -> Result<TokenStream, IrError> {
+    let struct_name = destructure_struct_name(init_expr)?;
+    let struct_ident = format_ident!("{struct_name}");
+    let init_tokens = emit_expr(init_expr)?;
+    let mut field_pats = Vec::new();
+    for binding in bindings {
+        let field_ident = format_ident!("{}", to_snake_case(&binding.key));
+        let binding_ident = format_ident!("{}", to_snake_case(&binding.binding));
+        field_pats.push(quote! { #field_ident: #binding_ident });
+        // Destructured struct fields are owned `T::Value` — see `emit_struct_def`.
+        LOCAL_REFNESS.with(|m| m.borrow_mut().insert(to_snake_case(&binding.binding), false));
+    }
+    Ok(quote! { let #struct_ident { #(#field_pats),*, .. } = #init_tokens; })
+}
+
+/// Which generated struct type `init_expr` (a destructuring `let`'s initializer) produces — the
+/// only recognized shape is `yield tenant.yieldTenant(<registered cross-file factory>(tenant))`.
+fn destructure_struct_name(init_expr: &Expr) -> Result<&'static str, IrError> {
+    let Expr::TenantYield(inner) = init_expr else {
+        return Err(IrError::Unsupported {
+            file: String::new(),
+            construct: "destructuring a non-`yield tenant.yieldTenant(...)` initializer".into(),
+        });
+    };
+    let Expr::Call { callee, .. } = inner.as_ref() else {
+        return Err(IrError::Unsupported {
+            file: String::new(),
+            construct: "destructuring a non-call initializer".into(),
+        });
+    };
+    let Expr::Ident(name) = callee.as_ref() else {
+        return Err(IrError::Unsupported {
+            file: String::new(),
+            construct: "destructuring a call through a non-identifier callee".into(),
+        });
+    };
+    let source = imported_source(name).ok_or_else(|| IrError::Unsupported {
+        file: String::new(),
+        construct: format!("destructuring the result of `{name}(...)`, which isn't an imported cross-file factory"),
+    })?;
+    let factory = cross_file::lookup(&source, name).ok_or_else(|| IrError::Unsupported {
+        file: String::new(),
+        construct: format!("destructuring the result of `{name}(...)`, which isn't a registered cross-file factory"),
+    })?;
+    Ok(factory.struct_name)
+}
+
 fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
     if let Some(tokens) = try_emit_cache_set(stmt)? {
         return Ok(tokens);
     }
     match stmt {
+        Stmt::Let { pattern: Pattern::ObjectShallow(bindings), init: Some(init_expr) } => {
+            emit_destructuring_let(bindings, init_expr)
+        }
+        Stmt::Let { pattern: Pattern::ObjectShallow(_), init: None } => Err(IrError::Unsupported {
+            file: String::new(),
+            construct: "uninitialized destructured let-binding".into(),
+        }),
         Stmt::Let { pattern, init } => {
             let Pattern::Ident(name) = pattern else {
                 return Err(IrError::Unsupported {
@@ -908,14 +1011,17 @@ fn emit_member(obj: &Expr, prop: &MemberProp) -> Result<TokenStream, IrError> {
     }
 }
 
-/// Dispatches an object literal to whichever of the two recognized shapes it matches: a
-/// `TenantPropertyDescriptor` control record (every key drawn from `DESCRIPTOR_FIELDS`, see
-/// `emit_descriptor_object_literal`), or a literal matching some locally-`interface`-declared
-/// struct's exact field set (`{ Object: ObjectFn, ObjectPrototype }`, see `emit_struct_literal`).
-/// Anything else is unsupported — in particular a `{ kind: "apply"|"construct", ... }`
-/// `TenantInvocation` literal isn't recognized yet (no primordial covered so far constructs one;
-/// `function.ts`/`reflect.ts` will need it).
+/// Dispatches an object literal to whichever of the three recognized shapes it matches: a
+/// `TenantInvocation` (`{ kind: "apply", thisArg, args }` / `{ kind: "construct", args,
+/// newTarget }`, always the second argument to `tenant.invoke(...)` — see
+/// `try_emit_tenant_invocation_literal`), a `TenantPropertyDescriptor` control record (every key
+/// drawn from `DESCRIPTOR_FIELDS`, see `emit_descriptor_object_literal`), or a literal matching
+/// some locally-`interface`-declared struct's exact field set (`{ Object: ObjectFn,
+/// ObjectPrototype }`, see `emit_struct_literal`). Anything else is unsupported.
 fn emit_object_literal(props: &[ObjectProp]) -> Result<TokenStream, IrError> {
+    if let Some(tokens) = try_emit_tenant_invocation_literal(props)? {
+        return Ok(tokens);
+    }
     let keys: Vec<&str> = props
         .iter()
         .filter_map(|p| match p {
@@ -939,6 +1045,57 @@ fn emit_object_literal(props: &[ObjectProp]) -> Result<TokenStream, IrError> {
         file: String::new(),
         construct: "object literal doesn't match a known TenantPropertyDescriptor or locally-declared interface shape".into(),
     })
+}
+
+/// Recognizes `{ kind: "apply", thisArg, args }` / `{ kind: "construct", args, newTarget }` —
+/// the two `TenantInvocation` shapes constructed as `tenant.invoke(...)`'s second argument.
+/// `args`'s value is `.to_vec()`-ed regardless of whether the source expression is already an
+/// owned `Vec<T::Value>` (an array literal, `guestArrayLike`'s result) or a borrowed slice
+/// (`args.slice(N)`) — a redundant clone in the former case, but uniform and always correct,
+/// which matters more here than avoiding one extra `Vec` allocation in a builtin-call path.
+fn try_emit_tenant_invocation_literal(props: &[ObjectProp]) -> Result<Option<TokenStream>, IrError> {
+    let mut kind: Option<&str> = None;
+    let mut this_arg: Option<&Expr> = None;
+    let mut args: Option<&Expr> = None;
+    let mut new_target: Option<&Expr> = None;
+    for prop in props {
+        let ObjectProp::KeyValue { key: PropKey::Ident(k), value } = prop else { return Ok(None) };
+        match k.as_str() {
+            "kind" => {
+                let Expr::Lit(Lit::Str(s)) = value else { return Ok(None) };
+                kind = Some(s.as_str());
+            }
+            "thisArg" => this_arg = Some(value),
+            "args" => args = Some(value),
+            "newTarget" => new_target = Some(value),
+            _ => return Ok(None),
+        }
+    }
+    match kind {
+        Some("apply") => {
+            let (Some(this_arg), Some(args)) = (this_arg, args) else { return Ok(None) };
+            if new_target.is_some() {
+                return Ok(None);
+            }
+            let this_arg_tokens = emit_expr(this_arg)?;
+            let args_tokens = emit_expr(args)?;
+            Ok(Some(quote! {
+                TenantInvocation::Apply { this_arg: (#this_arg_tokens).clone(), args: (#args_tokens).to_vec() }
+            }))
+        }
+        Some("construct") => {
+            let (Some(args), Some(new_target)) = (args, new_target) else { return Ok(None) };
+            if this_arg.is_some() {
+                return Ok(None);
+            }
+            let new_target_tokens = emit_expr(new_target)?;
+            let args_tokens = emit_expr(args)?;
+            Ok(Some(quote! {
+                TenantInvocation::Construct { args: (#args_tokens).to_vec(), new_target: (#new_target_tokens).clone() }
+            }))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Recognizes an object literal whose keys are drawn entirely from `TenantPropertyDescriptor`'s
@@ -1272,6 +1429,33 @@ fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
     }
 
     if let Expr::Ident(name) = callee
+        && let Some(source) = imported_source(name)
+        && let Some(factory) = cross_file::lookup(&source, name)
+    {
+        let [CallArg::Normal(Expr::Ident(tenant_arg))] = args else {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!("{name}(...) called with an argument shape other than the bare `tenant` this crate expects"),
+            });
+        };
+        if tenant_arg != "tenant" {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!("{name}(...) called with a non-`tenant` argument"),
+            });
+        }
+        let path: TokenStream = factory.rust_fn_path.parse().map_err(|e| IrError::Unsupported {
+            file: String::new(),
+            construct: format!("cross-file factory `{name}` rust_fn_path did not parse as Rust: {e}"),
+        })?;
+        let cache_ident = format_ident!("{}", cross_file::cache_param_name(factory));
+        // Never `?`-suffixed here either — same reasoning as the local-function-call and shim
+        // branches: every real call site wraps this in `yield tenant.yieldTenant(...)`, which
+        // already appends the `?`.
+        return Ok(quote! { #path(tenant, #cache_ident) });
+    }
+
+    if let Expr::Ident(name) = callee
         && let Some(param_tys) = LOCAL_FN_PARAMS.with(|m| m.borrow().get(name).cloned())
     {
         let fn_ident = format_ident!("{}", to_snake_case(name));
@@ -1408,8 +1592,15 @@ fn emit_host_intrinsic(name: &str, args: &[Expr]) -> Result<TokenStream, IrError
 /// references captured by cloning it into a same-named shadow binding just before the closure
 /// literal — see this module's doc comment's closure-capture point for why cloning-and-shadowing
 /// needs no rewriting of the closure body itself.
+/// The closure body's own declared parameter names — used to pad a JS closure that declares
+/// fewer than 2 params (e.g. `Function`'s own `function* () { throw ...; }` apply/construct,
+/// which ignores both) out to the fixed 2-param Rust shape `make_builtin` always requires:
+/// unlike JS, a Rust closure's arity is part of its type, so the trailing parameters missing
+/// from the source still need *some* declared (unused) name.
+const SYNTHETIC_PARAM_NAMES: [&str; 2] = ["_unused_this_arg", "_unused_args"];
+
 fn emit_closure(func: &FnDecl) -> Result<TokenStream, IrError> {
-    if func.params.len() != 2 {
+    if func.params.len() > 2 {
         return Err(IrError::Unsupported {
             file: String::new(),
             construct: format!(
@@ -1420,17 +1611,21 @@ fn emit_closure(func: &FnDecl) -> Result<TokenStream, IrError> {
     }
     let mut param_tokens = Vec::new();
     let mut own_param_names = Vec::new();
-    for (i, param) in func.params.iter().enumerate() {
-        let Pattern::Ident(name) = &param.pattern else {
-            return Err(IrError::Unsupported {
-                file: String::new(),
-                construct: "destructured closure parameter".into(),
-            });
+    for i in 0..2 {
+        let name = match func.params.get(i) {
+            Some(Param { pattern: Pattern::Ident(name), .. }) => to_snake_case(name),
+            Some(Param { pattern: Pattern::ObjectShallow(_), .. }) => {
+                return Err(IrError::Unsupported {
+                    file: String::new(),
+                    construct: "destructured closure parameter".into(),
+                });
+            }
+            None => SYNTHETIC_PARAM_NAMES[i].to_string(),
         };
-        let ident = format_ident!("{}", to_snake_case(name));
         let ty_tokens = if i == 0 { quote! { T::Value } } else { quote! { &[T::Value] } };
+        let ident = format_ident!("{name}");
         param_tokens.push(quote! { #ident: #ty_tokens });
-        own_param_names.push((to_snake_case(name), i == 1));
+        own_param_names.push((name, i == 1));
     }
 
     let saved_refness = LOCAL_REFNESS.with(|m| m.borrow().clone());

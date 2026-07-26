@@ -92,7 +92,19 @@ pub const TABLE: &[ShimSpec] = &[
         name: "defineData",
         rust_path: "crate::types_shim::define_data",
         inject_tenant: false,
-        args: &[required(ArgKind::Owned), required(ArgKind::Ref), required(ArgKind::RefKey), required(ArgKind::Ref), required(ArgKind::Owned)],
+        args: &[
+            required(ArgKind::Owned),
+            required(ArgKind::Ref),
+            required(ArgKind::RefKey),
+            required(ArgKind::Ref),
+            // TS's `attributes: Partial<TenantPropertyDescriptor> = {}` — the 5th argument is
+            // optional at the TS call site (`function.ts`'s `defineData(tenant, proto, "call",
+            // call)`, no explicit attributes); every real call site's `TenantPropertyDescriptor`
+            // is either a real value or this default, never an arbitrary expression, so a fixed
+            // default literal (rather than plumbing TS's own default-expression AST through) is
+            // sufficient.
+            ShimArg { kind: ArgKind::Owned, default_literal: Some("TenantPropertyDescriptor::default()") },
+        ],
     },
     ShimSpec {
         module: "./types.ts",

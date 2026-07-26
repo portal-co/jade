@@ -7,6 +7,7 @@
 //!
 //! See the primordial-IR plan for the full design and phased rollout.
 
+pub mod cross_file;
 pub mod emit_rust;
 pub mod emit_ts;
 pub mod intrinsics;

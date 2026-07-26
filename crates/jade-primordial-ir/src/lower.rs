@@ -852,7 +852,21 @@ fn lower_yield(file: &str, yield_expr: &ast::YieldExpr) -> Result<Expr, IrError>
     let Some(arg) = &yield_expr.arg else {
         return Err(unsupported(file, "bare `yield` with no argument"));
     };
-    let ast::Expr::Call(call) = arg.as_ref() else {
+    // `yield EXPR as TARGET` parses as `yield (EXPR as TARGET)` — `as` binds to the yield's own
+    // operand, not the other way around (`bind`'s construct closure:
+    // `yield tenant.yieldTenant(tenant.invoke(...)) as object`). Recognize the cast here and
+    // apply it *after* lowering the wrapped yield, rather than letting it defeat the `Call`
+    // match below.
+    if let ast::Expr::TsAs(cast) = arg.as_ref() {
+        let target = lower_ts_type(file, &cast.type_ann)?;
+        let inner = lower_yield_call(file, &cast.expr)?;
+        return Ok(Expr::Cast { expr: Box::new(inner), target });
+    }
+    lower_yield_call(file, arg)
+}
+
+fn lower_yield_call(file: &str, arg: &ast::Expr) -> Result<Expr, IrError> {
+    let ast::Expr::Call(call) = arg else {
         return Err(unsupported(file, "yield of a non-call expression (expected `tenant.yieldTenant(...)`)"));
     };
     let ast::Callee::Expr(callee) = &call.callee else {
