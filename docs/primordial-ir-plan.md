@@ -63,7 +63,16 @@
   its `Box<dyn FnMut>` unsizing coercion). Also extended `coerce_return_value` to wrap a bare
   `return true;`/`return false;` (`Reflect.set`/`deleteProperty`'s own literal boolean results,
   not derived from a `tenant.<method>()` call) the same way as a `bool`-returning tenant method.
-- **Not started:** `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`, `realm.ts`.
+- **Not started:** `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`, `realm.ts`. The
+  first three are qualitatively harder than anything landed so far (a shared object-literal-of-
+  generator-methods-as-`TenantExoticHandler` pattern used by all three; `proxy.ts`'s own
+  shared-*mutable*-closure-capture, discriminated-union, and tuple/holey-destructuring needs;
+  `array-buffer.ts`/`typed-arrays.ts`'s reliance on real host `ArrayBuffer`/`DataView` builtins
+  with no `Self::Value` translation) — see `docs/proxy-and-buffer-primordial-gap-plan.md` for the
+  design note on what each actually needs and a recommended order, written the same way
+  `docs/array-primordial-gap-plan.md` was before that gap closed. Paused deliberately, same
+  discipline: no closure-capture-model or `Tenant`/new-hand-authored-trait changes until that
+  note is acted on.
   `proxy.ts` will need `functionPrimordial` wired the same way `object.ts` was for `function.ts`.
 
 ### Shimmed modules (a correction to the original plan)
