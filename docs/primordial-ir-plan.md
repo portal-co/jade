@@ -45,10 +45,26 @@
   fewer than 2 declared parameters (`Function`'s own apply/construct closures both ignore all
   their arguments, padded to the fixed 2-param Rust shape `make_builtin` requires with synthetic
   unused names).
-- **Not started:** `reflect.ts`, `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`,
-  `realm.ts`. `reflect.ts`'s `Reflect.ownKeys` should now translate cleanly (same
-  `indexed_collection`/`property_key_value` path `Object.keys` uses); `proxy.ts` will need
-  `functionPrimordial` wired the same way `object.ts` was for `function.ts`.
+- **`reflect.ts`:** fully IR-lowered, generated, and wired into the module tree
+  (`reflect_primordial`, second cross-file consumer of `objectPrimordial`). Behavior-tested end
+  to end (`reflect_primordial.rs`): `get`/`set`/`has`/`deleteProperty`/`ownKeys`/
+  `getOwnPropertyDescriptor`/`defineProperty`/`apply`/`construct`. `Reflect.ownKeys` confirmed the
+  `indexed_collection`/`property_key_value` path generalizes past `Object.keys`. One more emitter
+  bug found and fixed while landing it, a *third* variant of the repeated "second live mutable
+  borrow of `tenant` inline in an argument position" hazard (see `function.ts`'s entry above):
+  `Reflect.defineProperty`'s `tenant.defineProperty(a, b, yield tenant.yieldTenant
+  (readGuestDescriptor(tenant, c)))` — a tenant-method-call argument that itself makes a nested
+  tenant/shim call. Rather than another point patch, this one got the systemic fix: `emit_call`'s
+  `tenant.<method>(...)` branch and `emit_shim_call` now both hoist any argument whose rendered
+  text contains `?` or the word `tenant` into its own `let` first (`maybe_hoist_arg` — excluding
+  the bare `tenant` argument itself, and excluding closure-literal arguments, both of which
+  needed their own carve-outs after the first attempt regressed `object.ts`/`function.ts`: hoisting
+  `tenant` moves a non-`Copy` `&mut T`, and hoisting a closure into an unannotated `let` breaks
+  its `Box<dyn FnMut>` unsizing coercion). Also extended `coerce_return_value` to wrap a bare
+  `return true;`/`return false;` (`Reflect.set`/`deleteProperty`'s own literal boolean results,
+  not derived from a `tenant.<method>()` call) the same way as a `bool`-returning tenant method.
+- **Not started:** `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`, `realm.ts`.
+  `proxy.ts` will need `functionPrimordial` wired the same way `object.ts` was for `function.ts`.
 
 ### Shimmed modules (a correction to the original plan)
 

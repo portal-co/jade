@@ -182,7 +182,10 @@ pub fn object_primordial<T: Tenant + 'static>(
                     "Object.create prototype must be object or null",
                 ))?;
             }
-            return Ok((tenant.make(tenant.nullable(&proto)))?);
+            return Ok(({
+                let __hoisted_arg0 = tenant.nullable(&proto);
+                tenant.make(__hoisted_arg0)
+            })?);
         }
     }))?;
     (install_method(tenant, &object_fn, "keys", {
@@ -229,18 +232,21 @@ pub fn object_primordial<T: Tenant + 'static>(
                 "expected an object",
             ))?;
             return Ok({
-                let __result = (tenant.has(
-                    &(args)
-                        .get(0usize)
-                        .cloned()
-                        .unwrap_or_else(|| __undefined.clone()),
-                    &tenant.to_property_key(
+                let __result = ({
+                    let __hoisted_arg1 = &tenant.to_property_key(
                         &(args)
                             .get(1usize)
                             .cloned()
                             .unwrap_or_else(|| __undefined.clone()),
-                    ),
-                ))?;
+                    );
+                    tenant.has(
+                        &(args)
+                            .get(0usize)
+                            .cloned()
+                            .unwrap_or_else(|| __undefined.clone()),
+                        __hoisted_arg1,
+                    )
+                })?;
                 tenant.boolean_value(__result)
             });
         }
@@ -308,19 +314,22 @@ pub fn object_primordial<T: Tenant + 'static>(
                     .cloned()
                     .unwrap_or_else(|| __undefined.clone()),
             ))?;
-            if (!((tenant.define_property(
-                &(args)
-                    .get(0usize)
-                    .cloned()
-                    .unwrap_or_else(|| __undefined.clone()),
-                &tenant.to_property_key(
+            if (!(({
+                let __hoisted_arg1 = &tenant.to_property_key(
                     &(args)
                         .get(1usize)
                         .cloned()
                         .unwrap_or_else(|| __undefined.clone()),
-                ),
-                descriptor,
-            ))?)) {
+                );
+                tenant.define_property(
+                    &(args)
+                        .get(0usize)
+                        .cloned()
+                        .unwrap_or_else(|| __undefined.clone()),
+                    __hoisted_arg1,
+                    descriptor,
+                )
+            })?)) {
                 return Err(TenantError::TypeError(
                     ("cannot define property").to_string(),
                 ));
@@ -383,18 +392,21 @@ pub fn object_primordial<T: Tenant + 'static>(
                     .unwrap_or_else(|| __undefined.clone()),
                 "expected an object",
             ))?;
-            let mut descriptor = (tenant.get_own_property_descriptor(
-                &(args)
-                    .get(0usize)
-                    .cloned()
-                    .unwrap_or_else(|| __undefined.clone()),
-                &tenant.to_property_key(
+            let mut descriptor = ({
+                let __hoisted_arg1 = &tenant.to_property_key(
                     &(args)
                         .get(1usize)
                         .cloned()
                         .unwrap_or_else(|| __undefined.clone()),
-                ),
-            ))?;
+                );
+                tenant.get_own_property_descriptor(
+                    &(args)
+                        .get(0usize)
+                        .cloned()
+                        .unwrap_or_else(|| __undefined.clone()),
+                    __hoisted_arg1,
+                )
+            })?;
             return Ok(match descriptor {
                 None => tenant.undefined_value(),
                 Some(ref descriptor) => {
@@ -456,18 +468,21 @@ pub fn object_primordial<T: Tenant + 'static>(
                     "prototype must be object or null",
                 ))?;
             }
-            if (!((tenant.set_prototype_of(
-                &(args)
-                    .get(0usize)
-                    .cloned()
-                    .unwrap_or_else(|| __undefined.clone()),
-                tenant.nullable(
+            if (!(({
+                let __hoisted_arg1 = tenant.nullable(
                     &(args)
                         .get(1usize)
                         .cloned()
                         .unwrap_or_else(|| __undefined.clone()),
-                ),
-            ))?)) {
+                );
+                tenant.set_prototype_of(
+                    &(args)
+                        .get(0usize)
+                        .cloned()
+                        .unwrap_or_else(|| __undefined.clone()),
+                    __hoisted_arg1,
+                )
+            })?)) {
                 return Err(TenantError::TypeError(("cannot set prototype").to_string()));
             }
             return Ok((args)
@@ -591,15 +606,15 @@ pub fn object_primordial<T: Tenant + 'static>(
                 "Object.prototype.hasOwnProperty called on non-object",
             ))?;
             return Ok({
-                let __result = (tenant.has(
-                    &this_arg,
-                    &tenant.to_property_key(
+                let __result = ({
+                    let __hoisted_arg1 = &tenant.to_property_key(
                         &(args)
                             .get(0usize)
                             .cloned()
                             .unwrap_or_else(|| __undefined.clone()),
-                    ),
-                ))?;
+                    );
+                    tenant.has(&this_arg, __hoisted_arg1)
+                })?;
                 tenant.boolean_value(__result)
             });
         }

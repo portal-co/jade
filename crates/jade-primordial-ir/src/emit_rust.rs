@@ -663,6 +663,13 @@ fn coerce_return_value(expr: &Expr, tokens: TokenStream) -> Result<TokenStream, 
             });
         }
     }
+    // A bare `return true;`/`return false;` (`Reflect.set`/`deleteProperty`'s own always-`true`
+    // result, matching the ECMAScript `Reflect` methods that report success as a boolean) needs
+    // the same `T::Value` conversion as a `has`/`isExtensible`-returning call above, just with no
+    // inner call to hoist first.
+    if matches!(expr, Expr::Lit(Lit::Bool(_))) {
+        return Ok(quote! { tenant.boolean_value(#tokens) });
+    }
     // Returning a bare identifier that's already a Rust reference (a by-ref parameter, or a
     // loop/match binding — see `LOCAL_REFNESS`) needs an explicit `.clone()`: the function's own
     // declared return type is always an owned `T::Value`/struct, never a reference.
@@ -1440,17 +1447,20 @@ fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
                 construct: format!("tenant.{method}(...) called with {} args, expected {}", args.len(), arg_refs.len()),
             });
         }
+        let mut lets = Vec::new();
         let mut arg_tokens = Vec::new();
-        for (arg, kind) in args.iter().zip(arg_refs) {
+        for (i, (arg, kind)) in args.iter().zip(arg_refs).enumerate() {
             let CallArg::Normal(expr) = arg else {
                 return Err(IrError::Unsupported {
                     file: String::new(),
                     construct: "spread argument to a tenant method".into(),
                 });
             };
-            arg_tokens.push(emit_call_arg(expr, *kind)?);
+            let tokens = emit_call_arg(expr, *kind)?;
+            arg_tokens.push(maybe_hoist_arg(expr, tokens, i, &mut lets));
         }
-        return Ok(quote! { tenant.#method_ident(#(#arg_tokens),*) });
+        let call = quote! { tenant.#method_ident(#(#arg_tokens),*) };
+        return Ok(if lets.is_empty() { call } else { quote! { { #(#lets)* #call } } });
     }
 
     if let Expr::Ident(name) = callee
@@ -1536,6 +1546,43 @@ fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
 /// Emits a call resolved through the shim registry (see `shims.rs`) — `tenant` is either passed
 /// through bare (already `&mut T`, matching how `emit_param` types it) or injected as a leading
 /// argument the TS call site never supplied, depending on `spec.inject_tenant`.
+/// Hoists an already-`ArgKind`-wrapped argument token into its own `let` binding right before
+/// the call, if its rendered text suggests it might need a *fresh* mutable borrow of `tenant`
+/// mid-evaluation (contains a `?` — some fallible sub-call — or the bare word `tenant`). Both
+/// `emit_call`'s `tenant.<method>(...)` branch and `emit_shim_call` use this: a call that already
+/// borrows `tenant` (as receiver, or as its own leading argument) can't also evaluate another
+/// argument that needs its own live mutable borrow of `tenant` inline — a class of borrow-checker
+/// rejection this crate hit repeatedly in different call shapes (`args[N]`'s `undefined`
+/// fallback, `coerce_return_value`'s `boolean_value` wrapping, and now a tenant-method argument
+/// that itself performs a nested `TenantYield`-wrapped call, e.g. `Reflect.defineProperty`'s
+/// `tenant.defineProperty(a, b, yield tenant.yieldTenant(readGuestDescriptor(tenant, c)))`).
+/// Hoisting the inner evaluation into its own statement first releases its borrow before the
+/// outer call starts. A coarse text-based heuristic, deliberately conservative (a false positive
+/// only costs an extra harmless `let`, never a wrong answer) rather than a precise borrow
+/// analysis.
+fn maybe_hoist_arg(expr: &Expr, tokens: TokenStream, index: usize, lets: &mut Vec<TokenStream>) -> TokenStream {
+    let text = tokens.to_string();
+    // The bare `tenant` argument itself (`&mut T`, not `Copy`) must never be hoisted: there's
+    // nothing nested inside it to release a borrow from, and moving it into a temporary would
+    // make every *later* use of `tenant` in this same call/scope a use-after-move. A closure
+    // literal (`makeBuiltin`'s `apply`/`construct` arguments) must never be hoisted either, for a
+    // different reason: constructing a closure doesn't touch `tenant` until the closure is later
+    // *invoked* (a separate, deferred borrow, not a conflict here), and hoisting it into an
+    // unannotated `let` loses the call site's expected-type hint that `Box::new(closure)` needs
+    // to unsize-coerce to `Box<dyn FnMut(...)>` — a real regression this crate hit (the
+    // intermediate binding infers the closure's own concrete type instead).
+    if text == "tenant" || matches!(expr, Expr::Closure(_)) {
+        return tokens;
+    }
+    if text.contains('?') || word_referenced(&text, "tenant") {
+        let ident = format_ident!("__hoisted_arg{index}");
+        lets.push(quote! { let #ident = #tokens; });
+        quote! { #ident }
+    } else {
+        tokens
+    }
+}
+
 fn emit_shim_call(spec: &shims::ShimSpec, args: &[CallArg]) -> Result<TokenStream, IrError> {
     if args.len() > spec.args.len() {
         return Err(IrError::Unsupported {
@@ -1548,13 +1595,14 @@ fn emit_shim_call(spec: &shims::ShimSpec, args: &[CallArg]) -> Result<TokenStrea
             ),
         });
     }
+    let mut lets = Vec::new();
     let mut arg_tokens = Vec::new();
     if spec.inject_tenant {
         arg_tokens.push(quote! { tenant });
     }
     for (i, arg_spec) in spec.args.iter().enumerate() {
-        let tokens = match args.get(i) {
-            Some(CallArg::Normal(expr)) => emit_call_arg(expr, arg_spec.kind)?,
+        let (expr_opt, tokens) = match args.get(i) {
+            Some(CallArg::Normal(expr)) => (Some(expr), emit_call_arg(expr, arg_spec.kind)?),
             Some(CallArg::Spread(_)) => {
                 return Err(IrError::Unsupported {
                     file: String::new(),
@@ -1568,13 +1616,19 @@ fn emit_shim_call(spec: &shims::ShimSpec, args: &[CallArg]) -> Result<TokenStrea
                         construct: format!("{}(...) is missing its required argument #{i}", spec.name),
                     });
                 };
-                default_literal.parse::<TokenStream>().map_err(|e| IrError::Unsupported {
+                let tokens = default_literal.parse::<TokenStream>().map_err(|e| IrError::Unsupported {
                     file: String::new(),
                     construct: format!("shim `{}` default literal did not parse as Rust: {e}", spec.name),
-                })?
+                })?;
+                (None, tokens)
             }
         };
-        arg_tokens.push(tokens);
+        arg_tokens.push(match expr_opt {
+            Some(expr) => maybe_hoist_arg(expr, tokens, i, &mut lets),
+            // A default-literal argument (`"None"`) is never a closure and never references
+            // `tenant`, so it never needs hoisting — no real `Expr` exists for it to check.
+            None => tokens,
+        });
     }
     let path: TokenStream = spec.rust_path.parse().map_err(|e| IrError::Unsupported {
         file: String::new(),
@@ -1588,11 +1642,12 @@ fn emit_shim_call(spec: &shims::ShimSpec, args: &[CallArg]) -> Result<TokenStrea
     // synchronous TS export (`inject_tenant: true`: `assertObject`/`toIndex`) is never wrapped
     // that way — TS gets ordinary unchecked exception propagation for free, which Rust's
     // `Result` needs an explicit `?` to match, so it's added here instead.
-    if spec.inject_tenant {
-        Ok(quote! { (#path(#(#arg_tokens),*))? })
+    let call = if spec.inject_tenant {
+        quote! { (#path(#(#arg_tokens),*))? }
     } else {
-        Ok(quote! { #path(#(#arg_tokens),*) })
-    }
+        quote! { #path(#(#arg_tokens),*) }
+    };
+    Ok(if lets.is_empty() { call } else { quote! { { #(#lets)* #call } } })
 }
 
 fn emit_host_intrinsic(name: &str, args: &[Expr]) -> Result<TokenStream, IrError> {

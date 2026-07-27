@@ -192,9 +192,9 @@ pub fn function_primordial<T: Tenant + 'static>(
                     tenant,
                     "bound",
                     {
-                        let bound_this = bound_this.clone();
-                        let target = target.clone();
                         let prefix = prefix.clone();
+                        let target = target.clone();
+                        let bound_this = bound_this.clone();
                         move |tenant: &mut T,
                               _ignored: T::Value,
                               call_args: &[T::Value]|
@@ -213,8 +213,8 @@ pub fn function_primordial<T: Tenant + 'static>(
                         }
                     },
                     Some(Box::new({
-                        let target = target.clone();
                         let prefix = prefix.clone();
+                        let target = target.clone();
                         move |tenant: &mut T,
                               new_target: T::Value,
                               call_args: &[T::Value]|

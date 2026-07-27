@@ -49,7 +49,13 @@ fn object_keys_returns_an_indexed_collection_of_the_own_enumerable_keys() {
     tenant.set(&target, &PropertyKey::from("b"), TestValue::Number(2.0)).unwrap();
 
     let keys = call_method(&mut tenant, &object.object, "keys", vec![target]);
-    let TestValue::List(keys) = keys else { panic!("Object.keys should return an indexed_collection, got {keys:?}") };
+    let TestValue::List(mut keys) = keys else { panic!("Object.keys should return an indexed_collection, got {keys:?}") };
+    // `TestTenant`'s own property store is a `HashMap`, so its own-key order is unspecified —
+    // sort before comparing rather than asserting a specific (and non-guaranteed) order.
+    keys.sort_by_key(|k| match k {
+        TestValue::Str(s) => s.clone(),
+        other => panic!("expected string keys, got {other:?}"),
+    });
     assert_eq!(keys, vec![TestValue::Str("a".to_string()), TestValue::Str("b".to_string())]);
 }
 
