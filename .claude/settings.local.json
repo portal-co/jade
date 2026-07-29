@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(bash packages/jade-data/build.sh)",
+      "Bash(npx tsx *)",
+      "Bash(node --import tsx/esm scripts/regen.ts)",
+      "Bash(node --experimental-strip-types /Users/grahamkelly/Code/portal-hot/jade/scripts/regen.ts)",
+      "Bash(cargo build *)",
+      "Bash(cargo test *)"
+    ]
+  }
+}
