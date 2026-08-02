@@ -165,6 +165,72 @@ IR-lowered/generated targets — only the concrete native adapter is hand-writte
 hand-port the same way, or to fold into the same `BufferHooks`-adjacent shim module — a
 naming/placement detail to decide when this is picked up, not a design blocker.
 
+**`BufferHooks` trait + `NativeBufferHooks` shim: DONE.** `jade-tenant-rt::buffer::BufferHooks`
+(a `BufferKind` enum + the six trait methods above, `identity` dropped per the simplification
+already decided) and `jade-primordial-rt::buffer_shim::NativeBufferHooks` (a genuinely native
+Rust in-memory adapter — `Rc<RefCell<Vec<u8>>>`-backed handles, not a port of
+`nativeBufferHooks`'s JS internals, since there's no host `ArrayBuffer` to wrap in a pure-Rust
+embedding) are both written and unit-tested (6 tests: allocate/read/write round-trip, both
+out-of-bounds error cases, slice's independent-copy semantics, `supports_shared_array_buffer`).
+
+**Also fixed while landing this:** `lower_module` was all-or-nothing — a single top-level item
+that can never lower (`nativeBufferHooks` itself, which uses `instanceof`, a `BinOp` this crate
+doesn't model) aborted lowering for the *entire file*, silently preventing `bufferPrimordial`
+from ever reaching the (already-existing, per-item-resilient) emission stage at all. Now
+per-item resilient at the lowering stage too, matching `emit_rust.rs`'s already-established
+per-item emission policy exactly (`eprintln!` and skip, never a whole-file abort for one bad
+item) — see `lower_module`'s updated doc comment.
+
+### More granular blockers found by actually running `array-buffer.ts` through the pipeline
+
+Running the current (unrefactored) file through `gen-primordials --rust` after the two fixes
+above surfaces four more gaps, all needed *before* the self-referential-closure problem even
+becomes reachable — `bufferPrimordial` itself doesn't lower yet, for reasons independent of its
+own body:
+
+1. **`BufferKind` is a string-literal-union type alias** (`type BufferKind = "array-buffer" |
+   "shared-array-buffer"`), used both as a type annotation and compared against its own string
+   literals (`kind === "shared-array-buffer"`) throughout the file. The natural Rust target is
+   the `BufferKind` enum *already hand-written* in `jade-tenant-rt::buffer` (built for this exact
+   purpose) — meaning `BufferKind` needs **type-name shimming**: recognizing the TS name
+   `BufferKind` as an alias for `portal_solutions_jade_tenant_rt::BufferKind`, and lowering each
+   `kind === "<literal>"` comparison to a variant comparison (`kind == BufferKind::SharedArrayBuffer`),
+   the same shape of translation `value_tag_variant`/`typeof_tag` already does for the seven
+   `typeof` tag strings, just for a second, smaller closed vocabulary. This is a new kind of
+   shimming this codebase doesn't have yet — `shims.rs`/`cross_file.rs` both resolve *calls*, not
+   *type names*.
+2. **`BufferHooks` needs to become a generic trait-bound parameter, not a struct.** Every other
+   interface handled so far (`ObjectPrimordial`, `BufferRecord`, ...) becomes a concrete
+   per-primordial generated struct. `BufferHooks` is different: it's the TS interface the
+   *hand-written* `jade-tenant-rt::BufferHooks` trait already mirrors, so `bufferPrimordial(tenant:
+   Tenant, hooks: BufferHooks)` needs to become `pub fn buffer_primordial<T: Tenant, H:
+   BufferHooks>(tenant: &mut T, hooks: &mut H) -> ...` — an *additional* generic parameter on the
+   enclosing function, not a type substitution at the parameter position alone. `emit_fn_decl`
+   currently hardcodes `<T: Tenant>` as the only generic parameter on every generated function;
+   this needs a way to detect "this function has a `BufferHooks`-typed parameter" and extend its
+   own generic parameter list accordingly.
+3. **`BufferHooks`/`BufferRecord`'s interface members are method-shaped** (`allocate(kind,
+   byteLength): TenantGenerator<BufferHandle>`, TS method-signature syntax), not the
+   `name: Type` property-signature shape every interface lowered so far has used.
+   `lower_decl`'s `TsInterface` handling only recognizes `TsPropertySignature` today — needs a
+   `TsMethodSignature` arm too (matters most for the type-checking side of things here, since
+   `BufferHooks` itself becomes a trait-bound shim per (2) rather than a generated struct with
+   real fields — but `BufferRecord`, a plain data interface with no method members, hits the same
+   parse gap for an unrelated reason: see (4) below).
+
+   Correction while writing this up: re-checking, `BufferRecord`'s own members
+   (`readonly kind: BufferKind; readonly handle: BufferHandle;`) are plain property signatures,
+   not method-shaped — its actual lowering failure is `BufferKind` not resolving (1) transitively.
+   The `TsMethodSignature` gap is real but only actually blocks `BufferHooks` itself.
+4. **The per-tenant cache's value type is an inline anonymous object type**, not a named
+   interface: `new WeakMap<Tenant, { identity: object; primordial: BufferPrimordial }>()`.
+   `lower_module_var_decl`'s `PerTenantCache` recognition only extracts a *named* type reference
+   (`TsTypeRef`) from the `WeakMap`'s second type argument today; an inline `TsTypeLit` needs
+   either its own synthesized `StructDef` (giving it a made-up name, e.g. `BufferPrimordialCache
+   Entry`) or a decision that this specific shape (cache entry = `{ identity, primordial }`) is
+   common enough across future files to deserve first-class recognition rather than a generic
+   fallback.
+
 ## Newly discovered: `array-buffer.ts`'s `shell`/`constructor` are self-referential local closures
 
 Found while actually designing (1)'s follow-on — not previously flagged. `bufferPrimordial`'s
@@ -182,30 +248,51 @@ structurally a local **struct with inherent methods** (`struct BufferPrimordialB
 hooks: H, records: HashMap<...>, prototypes: HashMap<BufferKind, T::Value> }`, with `shell`/
 `constructor` as `fn shell(&mut self, tenant: &mut T, kind, handle) -> ... { ...
 self.shell(tenant, ...) ... }`), since methods can call themselves/each other via `self.method
-(...)` with none of a closure's self-reference problem. This is a real, if scoped, generalization
-beyond arbitrary-signature closures alone: recognizing "this function has multiple co-referencing
-local generator closures sharing captured state" and restructuring the whole function into a
-struct+impl, not just widening `emit_closure`'s parameter handling.
+(...)` with none of a closure's self-reference problem.
 
-This affects the recommended order below: (2) (`BufferHooks` shim) is necessary but **not
-sufficient** to fully generate `array-buffer.ts` — the struct-ification above is a separate,
-comparably-sized piece of work, worth scoping on its own once (2) is landed and the *remaining*
-gap is visible in isolation. `typed-arrays.ts` should be checked against the same pattern before
-assuming it's simpler (not yet re-verified since this finding).
+**Decided (2026-08-02): use the same mechanism as `proxy.ts`'s `ProxyState` problem below, not a
+bespoke "detect co-referencing local closures" heuristic.** Refactor the *source* — turn
+`shell`/`constructor`'s shared captured state (`records`, `prototypes`, and `hooks` itself) into
+a real TS `class` in `array-buffer.ts`, the same way `ProxyState` becomes a class. This means
+building exactly one new IR capability (`class` lowering — fields with readonly/mutable and
+`#private` detection, constructor, methods) and using it for *two* real call sites, which is
+better evidence it's a genuinely general capability than building it for one. See "Recommended
+order" below for how this reorders the remaining work, and the `ProxyState` entry below for the
+class-instance-as-`Rc<RefCell<Inner>>` Rust translation this implies (uniformly for *every* class
+instance, not conditionally — see that entry's own note on why no per-instance capture-sharing
+analysis is needed once instances are always `Rc<RefCell<_>>`: `emit_closure`'s existing
+clone-prelude mechanism already does the right thing for free, since `Rc::clone` is cheap and
+`.clone()` is exactly what that mechanism already emits for every capture).
+
+This affects the recommended order below: (2) (`BufferHooks` shim, done) plus the type-system
+gaps just above are necessary but **not sufficient** to fully generate `array-buffer.ts` — the
+class-lowering work is a separate, comparably-sized piece, worth scoping and building once, then
+applied to both files. `typed-arrays.ts` should be checked against the same self-reference
+pattern before assuming it's simpler (not yet re-verified since this finding).
 
 ## Recommended order for whoever picks this up
 
-1. ~~Build the shared `TenantExoticHandler`-from-object-literal codegen first~~ **Done** — see
-   above.
-2. Author `jade-tenant-rt::BufferHooks` + hand-port `nativeBufferHooks`/`codecs` as shims, the
-   same relationship `types_shim.rs` has to `types.ts`.
-3. Design and build the local-struct-ification described above for `bufferPrimordial`'s
-   `shell`/`constructor` (and check `typedArraysPrimordial` against the same pattern). (2) + (3)
-   together should be enough to fully generate `array-buffer.ts` and `typed-arrays.ts`.
-4. `proxy.ts` last: needs generalized arbitrary-signature closure emission (partially motivated by
-   (3) above too), tuple types/holey array destructuring, discriminated-union-as-enum type
-   aliases, and a real decision on `Rc<RefCell<...>>`-style shared-mutable capture detection —
-   likely worth its own follow-up note once (2) and (3) have proven out in practice.
+1. ~~Build the shared `TenantExoticHandler`-from-object-literal codegen first~~ **Done.**
+2. ~~Author `jade-tenant-rt::BufferHooks` + hand-port `nativeBufferHooks`/`codecs` as shims~~
+   **Done** for `BufferHooks` (`codecs` not ported yet — not needed until `typed-arrays.ts`).
+   Also landed: `lower_module`'s per-item resilience fix (was blocking `bufferPrimordial` from
+   lowering at all because of `nativeBufferHooks` alone, unrelated to anything below).
+3. Close the type-system gaps found by actually running `array-buffer.ts` through the pipeline
+   (see "More granular blockers" above): `BufferKind` type-name shimming to the hand-written enum,
+   `BufferHooks` as an added generic trait-bound parameter (not a struct), `TsMethodSignature`
+   interface members, and the inline-object-type per-tenant-cache value. None of these need class
+   lowering — purely type-resolution work, tractable on its own.
+4. Design and build `class` lowering (fields incl. `#private`/readonly, constructor, methods;
+   Rust target: `Rc<RefCell<Inner>>` wrapper + inherent-method `impl` block, uniformly for every
+   class instance — see the `ProxyState` entry below). Refactor `array-buffer.ts`'s `shell`/
+   `constructor` state into a class using it (and check `typedArraysPrimordial` for the same
+   self-reference pattern). (3) + (4) together should be enough to fully generate
+   `array-buffer.ts` and `typed-arrays.ts`.
+5. `proxy.ts` last: reuses (4)'s class lowering for `ProxyState` (now the *primary* motivating
+   case, not a follow-on), needs a real Rust method-call-on-class-instance emission path (`emit_call`
+   has no such branch yet — every call target recognized today is `tenant.<method>`, a shim, a
+   local function, a cross-file factory, or an exotic-handler literal), plus tuple types/holey
+   array destructuring and discriminated-union-as-enum type aliases for `TrapResult`.
 
 ## Explicitly not proposed here
 

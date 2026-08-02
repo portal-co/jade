@@ -13,6 +13,7 @@
 //! which this closes).
 
 pub mod types_shim;
+pub mod buffer_shim;
 pub mod object;
 pub mod function;
 pub mod reflect;

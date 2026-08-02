@@ -67,10 +67,21 @@ pub fn lower_module(file_name: &str, source: &str) -> Result<Module, IrError> {
         });
     });
 
+    // Per-item resilience, not all-or-nothing: one top-level item that can never lower (e.g.
+    // `array-buffer.ts`'s `nativeBufferHooks`, built directly from real host `ArrayBuffer`/
+    // `SharedArrayBuffer`/`Uint8Array` with no IR translation — see
+    // `docs/proxy-and-buffer-primordial-gap-plan.md`) must not block every *other* top-level
+    // item in the same file from lowering and generating normally. Mirrors `emit_rust.rs`'s
+    // already-established per-item emission resilience (`try_emit_module`'s `match emit_item
+    // (item) { ... Err(err) => eprintln!(...) }`) — same policy, applied one stage earlier, so a
+    // file that can't fully lower doesn't silently produce nothing downstream of the first
+    // failure either.
     let mut items = Vec::new();
     for item in &module.body {
-        if let Some(lowered) = lower_module_item(file_name, item)? {
-            items.push(lowered);
+        match lower_module_item(file_name, item) {
+            Ok(Some(lowered)) => items.push(lowered),
+            Ok(None) => {}
+            Err(err) => eprintln!("gen-primordials: skipping an item in {file_name}: {err}"),
         }
     }
     Ok(Module { items })

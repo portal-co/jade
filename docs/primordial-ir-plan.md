@@ -78,15 +78,29 @@
   `shell`/`constructor` are self-referential local closures (a plain Rust closure can't reference
   itself), which needs restructuring the whole function into a local struct+impl, not just wider
   closure-signature support — also written up in that note.
-- **Not started:** `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`, `realm.ts` —
-  see `docs/proxy-and-buffer-primordial-gap-plan.md`'s "Recommended order" for the remaining
-  pieces (a hand-authored `BufferHooks` trait/shim, the local-struct-ification above, and
-  `proxy.ts`'s own remaining problems — including a proposed direction for its shared-mutable-
-  state problem: rewriting `ProxyState` as a real `class` with `#private` fields, making the Rust
-  translation mechanical rather than requiring capture-mutation analysis). Paused deliberately,
-  same discipline: no closure-capture-model or `Tenant`/new-hand-authored-trait changes until that
-  note's remaining items are acted on.
-  `proxy.ts` will need `functionPrimordial` wired the same way `object.ts` was for `function.ts`.
+- **`jade-tenant-rt::buffer::BufferHooks` + `jade-primordial-rt::buffer_shim::NativeBufferHooks`
+  are done and unit-tested** (6 tests) — a genuinely native Rust in-memory buffer adapter
+  (`Rc<RefCell<Vec<u8>>>`-backed), not a port of `nativeBufferHooks`'s host-`ArrayBuffer`
+  internals. Also fixed: `lower_module` was all-or-nothing per file (one unlowerable top-level
+  item — `nativeBufferHooks` itself, which uses `instanceof`, unmodeled — aborted lowering the
+  *whole file*, silently blocking `bufferPrimordial` too); now per-item resilient at lowering,
+  matching emission's already-established policy.
+- Actually running `array-buffer.ts` through the pipeline after that surfaced four more
+  granular, independent type-resolution gaps before `bufferPrimordial` itself even lowers
+  (`BufferKind` needs type-name shimming to the hand-written enum, `BufferHooks` needs to become
+  an added generic trait-bound parameter rather than a struct, interface members can be
+  method-shaped, and a per-tenant cache's value type can be an inline anonymous object type) —
+  see `docs/proxy-and-buffer-primordial-gap-plan.md`'s "More granular blockers" section.
+- **Decided:** `array-buffer.ts`'s self-referential-closure problem (previous entry) and
+  `proxy.ts`'s shared-mutable-`ProxyState` problem should be solved by the *same* mechanism, not
+  two bespoke ones — refactor both into real TS `class`es and build one `class`-lowering IR
+  capability (Rust target: `Rc<RefCell<Inner>>` + inherent-method `impl`, uniformly for every
+  class instance) rather than a bespoke "detect co-referencing local closures" heuristic just for
+  `array-buffer.ts`. See the gap note's updated "Recommended order".
+- **Not started:** `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`, `realm.ts`.
+  Paused deliberately, same discipline: no closure-capture-model or `Tenant`/new-hand-authored-
+  trait changes until the gap note's remaining items are acted on. `proxy.ts` will need
+  `functionPrimordial` wired the same way `object.ts` was for `function.ts`.
 
 ### Shimmed modules (a correction to the original plan)
 

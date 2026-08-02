@@ -19,7 +19,10 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+pub mod buffer;
 pub mod intrinsics;
+
+pub use buffer::{BufferHooks, BufferKind};
 
 /// Opaque per-realm symbol identity. The embedder is responsible for allocating distinct ids;
 /// this crate never inspects a symbol's description.
