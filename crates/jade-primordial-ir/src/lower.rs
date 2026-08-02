@@ -142,13 +142,21 @@ fn lower_decl(file: &str, decl: &ast::Decl) -> Result<Option<Item>, IrError> {
         // `emit_ts.rs`). An interface is different: it's erased from *TS* emission the same way,
         // but it drives the generated Rust struct's field layout, so it becomes a real
         // `Item::StructDef` here rather than being discarded.
-        // `BufferHooks` is erased the same way a type alias is (`Ok(None)`, not a `StructDef`):
-        // it's method-shaped (`TsMethodSignature`, which the generic branch below doesn't parse
-        // — a real gap, but not worth closing for an interface that would be discarded anyway),
-        // and it already has a hand-written Rust counterpart (`jade-tenant-rt::BufferHooks`) — a
-        // function parameter typed `BufferHooks` becomes an added generic trait-bound parameter
-        // instead of a generated struct; see `docs/proxy-and-buffer-primordial-gap-plan.md`.
-        ast::Decl::TsInterface(iface) if iface.id.sym.as_ref() == "BufferHooks" => Ok(None),
+        // A method-shaped interface (any `TsMethodSignature` member) can't become a plain
+        // `StructDef` (no generic method-signature parsing here) — erased the same way a type
+        // alias is (`Ok(None)`), rather than a hard rejection, on the assumption that a `class`
+        // elsewhere in this same module `implements` it and *that* becomes the real Rust type a
+        // reference to this interface name resolves to (see `emit_rust.rs`'s `rust_type`, which
+        // falls back to a same-module class's own type — by class name or by its `implements`
+        // list — for any interface name it doesn't have a `StructDef` for). `BufferHooks` was the
+        // first such interface (before any class existed to back it, hence its own hand-written
+        // `jade-tenant-rt::BufferHooks` trait counterpart and `emit_param`'s/`rust_type`'s direct
+        // name-based special cases for it); `BufferPrimordial` (backed by `BufferPrimordialImpl`)
+        // is the first one backed by a *generated* class. See
+        // `docs/proxy-and-buffer-primordial-gap-plan.md`.
+        ast::Decl::TsInterface(iface) if iface.body.body.iter().any(|m| matches!(m, ast::TsTypeElement::TsMethodSignature(_))) => {
+            Ok(None)
+        }
         ast::Decl::TsInterface(iface) => {
             if !iface.extends.is_empty() {
                 return Err(unsupported(file, "interface with `extends`"));
@@ -179,8 +187,146 @@ fn lower_decl(file: &str, decl: &ast::Decl) -> Result<Option<Item>, IrError> {
             Ok(Some(Item::FnDecl(func)))
         }
         ast::Decl::Var(var_decl) => lower_module_var_decl(file, var_decl),
+        ast::Decl::Class(class_decl) => {
+            let name = class_decl.ident.sym.to_string();
+            Ok(Some(Item::ClassDef(lower_class(file, &class_decl.class, name)?)))
+        }
         other => Err(unsupported(file, format!("declaration {other:?}"))),
     }
+}
+
+/// Lowers a `class ... implements X { ... }` declaration into a [`ClassDef`] — see its doc
+/// comment for the exact closed shape recognized. No `extends`, no static members, no
+/// decorators, no accessors/auto-accessors/index signatures: every one of those is a hard
+/// rejection here rather than a guess.
+fn lower_class(file: &str, class: &ast::Class, name: String) -> Result<ClassDef, IrError> {
+    if class.super_class.is_some() {
+        return Err(unsupported(file, format!("class `{name}` has an `extends` clause")));
+    }
+    if !class.decorators.is_empty() {
+        return Err(unsupported(file, format!("class `{name}` has decorators")));
+    }
+    let implements = class
+        .implements
+        .iter()
+        .map(|i| match i.expr.as_ref() {
+            ast::Expr::Ident(id) => Ok(id.sym.to_string()),
+            other => Err(unsupported(file, format!("class `{name}` implements a non-identifier type {other:?}"))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut fields = Vec::new();
+    let mut constructor = None;
+    let mut methods = Vec::new();
+    for member in &class.body {
+        match member {
+            ast::ClassMember::Constructor(ctor) => {
+                if constructor.is_some() {
+                    return Err(unsupported(file, format!("class `{name}` has more than one constructor")));
+                }
+                constructor = Some(lower_constructor(file, ctor)?);
+            }
+            ast::ClassMember::ClassProp(prop) => {
+                fields.push(lower_class_field(file, &name, prop)?);
+            }
+            ast::ClassMember::PrivateProp(prop) => {
+                fields.push(lower_private_class_field(file, &name, prop)?);
+            }
+            ast::ClassMember::Method(method) => {
+                if method.is_static {
+                    return Err(unsupported(file, format!("class `{name}` has a static method")));
+                }
+                if method.kind != ast::MethodKind::Method {
+                    return Err(unsupported(file, format!("class `{name}` has a getter/setter")));
+                }
+                let method_name = match &method.key {
+                    ast::PropName::Ident(id) => id.sym.to_string(),
+                    other => return Err(unsupported(file, format!("class `{name}` method key {other:?}"))),
+                };
+                let func = lower_function(file, &method.function, Some(method_name.clone()))?;
+                methods.push(ClassMethod { name: method_name, is_private: false, func });
+            }
+            ast::ClassMember::PrivateMethod(method) => {
+                if method.is_static {
+                    return Err(unsupported(file, format!("class `{name}` has a static private method")));
+                }
+                if method.kind != ast::MethodKind::Method {
+                    return Err(unsupported(file, format!("class `{name}` has a private getter/setter")));
+                }
+                let method_name = method.key.name.to_string();
+                let func = lower_function(file, &method.function, Some(method_name.clone()))?;
+                methods.push(ClassMethod { name: method_name, is_private: true, func });
+            }
+            other => return Err(unsupported(file, format!("class `{name}` member {other:?}"))),
+        }
+    }
+    Ok(ClassDef { name, implements, fields, constructor, methods })
+}
+
+fn lower_class_field(file: &str, class_name: &str, prop: &ast::ClassProp) -> Result<ClassField, IrError> {
+    if prop.is_static {
+        return Err(unsupported(file, format!("class `{class_name}` has a static field")));
+    }
+    let name = match &prop.key {
+        ast::PropName::Ident(id) => id.sym.to_string(),
+        other => return Err(unsupported(file, format!("class `{class_name}` field key {other:?}"))),
+    };
+    let Some(type_ann) = &prop.type_ann else {
+        return Err(unsupported(file, format!("class `{class_name}` field `{name}` has no type annotation")));
+    };
+    let ty = lower_ts_type(file, &type_ann.type_ann)?;
+    let init = prop.value.as_deref().map(|e| lower_expr(file, e)).transpose()?;
+    Ok(ClassField {
+        name,
+        is_private: false,
+        ty,
+        init,
+        optional: prop.is_optional,
+        definite_assignment: prop.definite,
+    })
+}
+
+fn lower_private_class_field(file: &str, class_name: &str, prop: &ast::PrivateProp) -> Result<ClassField, IrError> {
+    if prop.is_static {
+        return Err(unsupported(file, format!("class `{class_name}` has a static private field")));
+    }
+    let name = prop.key.name.to_string();
+    let Some(type_ann) = &prop.type_ann else {
+        return Err(unsupported(file, format!("class `{class_name}` field `#{name}` has no type annotation")));
+    };
+    let ty = lower_ts_type(file, &type_ann.type_ann)?;
+    let init = prop.value.as_deref().map(|e| lower_expr(file, e)).transpose()?;
+    Ok(ClassField {
+        name,
+        is_private: true,
+        ty,
+        init,
+        optional: prop.is_optional,
+        definite_assignment: prop.definite,
+    })
+}
+
+fn lower_constructor(file: &str, ctor: &ast::Constructor) -> Result<FnDecl, IrError> {
+    let params = ctor
+        .params
+        .iter()
+        .map(|p| match p {
+            ast::ParamOrTsParamProp::Param(p) => lower_pat_as_param(file, &p.pat),
+            ast::ParamOrTsParamProp::TsParamProp(_) => Err(unsupported(file, "constructor parameter-property shorthand")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(body) = &ctor.body else {
+        return Err(unsupported(file, "constructor with no body"));
+    };
+    let stmts = lower_block(file, body)?;
+    Ok(FnDecl {
+        name: None,
+        is_generator: false,
+        params,
+        body: stmts,
+        captures: Vec::new(),
+        return_type: None,
+    })
 }
 
 /// Recognizes the `const cache = new WeakMap<Tenant, X>();` per-tenant-cache idiom specially
@@ -592,7 +738,7 @@ fn lower_expr(file: &str, expr: &ast::Expr) -> Result<Expr, IrError> {
             alt: Box::new(lower_expr(file, &cond.alt)?),
         }),
         ast::Expr::Assign(assign) => lower_assign(file, assign),
-        ast::Expr::TsNonNull(inner) => lower_expr(file, &inner.expr),
+        ast::Expr::TsNonNull(inner) => Ok(Expr::NonNull(Box::new(lower_expr(file, &inner.expr)?))),
         ast::Expr::TsAs(cast) => Ok(Expr::Cast {
             expr: Box::new(lower_expr(file, &cast.expr)?),
             target: lower_ts_type(file, &cast.type_ann)?,
@@ -683,9 +829,7 @@ fn lower_member(file: &str, member: &ast::MemberExpr) -> Result<Expr, IrError> {
     let prop = match &member.prop {
         ast::MemberProp::Ident(id) => MemberProp::Ident(id.sym.to_string()),
         ast::MemberProp::Computed(computed) => MemberProp::Computed(Box::new(lower_expr(file, &computed.expr)?)),
-        ast::MemberProp::PrivateName(_) => {
-            return Err(unsupported(file, "#private field reference"));
-        }
+        ast::MemberProp::PrivateName(name) => MemberProp::Private(name.name.to_string()),
     };
     Ok(Expr::Member { obj, prop })
 }
@@ -780,6 +924,26 @@ fn lower_call(file: &str, call: &ast::CallExpr) -> Result<Expr, IrError> {
         && let ast::MemberProp::Ident(method) = &member.prop
     {
         let method_name = method.sym.as_ref();
+        // `Math.min/max/round(...)`, `Number.isInteger(...)` — fixed global-namespace intrinsics
+        // (see `intrinsics.rs`'s table). Checked by receiver identity first since none of these
+        // method names collide with the `Map`/`WeakMap`/array method names recognized below.
+        if let ast::Expr::Ident(recv) = member.obj.as_ref() {
+            let mapped = match (recv.sym.as_ref(), method_name) {
+                ("Math", "min") => Some(intrinsics::MATH_MIN),
+                ("Math", "max") => Some(intrinsics::MATH_MAX),
+                ("Math", "round") => Some(intrinsics::MATH_ROUND),
+                ("Number", "isInteger") => Some(intrinsics::NUMBER_IS_INTEGER),
+                _ => None,
+            };
+            if let Some(mapped) = mapped {
+                return Ok(Expr::HostIntrinsic {
+                    name: mapped,
+                    args: args.iter().map(|a| match a {
+                        CallArg::Normal(e) | CallArg::Spread(e) => e.clone(),
+                    }).collect(),
+                });
+            }
+        }
         // `/regex/.test(x)` — the one recognized regex intrinsic.
         if method_name == "test"
             && matches!(member.obj.as_ref(), ast::Expr::Lit(ast::Lit::Regex(r)) if r.exp.as_ref() == r"^(0|[1-9][0-9]*)$")
@@ -816,13 +980,20 @@ fn lower_call(file: &str, call: &ast::CallExpr) -> Result<Expr, IrError> {
                 args: full_args,
             });
         }
+        // `.slice(...)` collides by name with `BufferHooks.slice(...)` (`this.#hooks.slice(...)`/
+        // `that.#hooks.slice(...)`) the same way `.get`/`.set`/`.has`/`.delete` collide with
+        // `Tenant`'s own methods — excluded here by receiver shape (a private-field access is
+        // never a plain bookkeeping array in the surveyed source) so `emit_rust.rs`'s
+        // `BufferHooks`-field-method-call recognition (an ordinary `Expr::Call`, not a
+        // `HostIntrinsic`) actually gets to see the call.
+        let receiver_is_private_field = matches!(member.obj.as_ref(), ast::Expr::Member(m) if matches!(m.prop, ast::MemberProp::PrivateName(_)));
         let array_methods = [
             ("filter", intrinsics::ARRAY_FILTER),
             ("sort", intrinsics::ARRAY_SORT_BY),
             ("push", intrinsics::ARRAY_PUSH),
             ("slice", intrinsics::ARRAY_SLICE_FROM),
         ];
-        if let Some((_, mapped)) = array_methods.iter().find(|(name, _)| *name == method_name) {
+        if !receiver_is_private_field && let Some((_, mapped)) = array_methods.iter().find(|(name, _)| *name == method_name) {
             let recv = lower_expr(file, &member.obj)?;
             let mut full_args = vec![recv];
             full_args.extend(args.iter().map(|a| match a {

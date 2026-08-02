@@ -17,3 +17,4 @@ pub mod buffer_shim;
 pub mod object;
 pub mod function;
 pub mod reflect;
+pub mod array_buffer;

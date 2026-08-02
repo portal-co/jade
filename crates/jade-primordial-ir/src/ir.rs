@@ -40,6 +40,64 @@ pub enum Item {
     /// `typed-arrays.ts`'s `codecs` table).
     ModuleConst { name: String, mutable: bool, init: Expr },
     FnDecl(FnDecl),
+    /// A `class ... implements X { ... }` declaration. Lowered only for the closed shape
+    /// actually used (see `docs/proxy-and-buffer-primordial-gap-plan.md`'s class-lowering
+    /// note): private/public fields (plain-initialized, or declared `!`/`?` with no
+    /// initializer and set later), a single constructor, and methods (including generator
+    /// methods) that may reference `this`/`this.#field`. No `extends`, no static members, no
+    /// accessors/auto-accessors — every one of those is a hard `lower.rs` rejection.
+    ///
+    /// Rust emission targets a `Rc<RefCell<Inner>>`-backed wrapper type (see `emit_rust.rs`'s
+    /// module doc comment): every JS class instance is reference-shared, so this needs no
+    /// per-instance mutation/capture analysis, and every generated inherent method takes `&self`
+    /// (never `&mut self`) — mutation happens through the shared `RefCell`, which is also
+    /// exactly what makes capturing `self` into a nested closure (`const self = this;`, used for
+    /// self-recursive/self-referencing closures like `array-buffer.ts`'s `shell`) just an
+    /// ordinary cheap `.clone()` like any other captured value.
+    ClassDef(ClassDef),
+}
+
+#[derive(Debug, Clone)]
+pub struct ClassDef {
+    pub name: String,
+    /// `implements X` interface name(s), as written. TS re-emission reproduces this verbatim;
+    /// Rust emission doesn't need it — the generated inherent methods simply exist, with no
+    /// trait to satisfy (the source interface's own struct, if any, is never generated for a
+    /// name that a class implements instead — see `lower.rs`).
+    pub implements: Vec<String>,
+    pub fields: Vec<ClassField>,
+    /// `constructor(...) { this.#x = ...; ... }`. TS allows a class with no constructor; not
+    /// observed in the surveyed source, but not rejected at the IR level either.
+    pub constructor: Option<FnDecl>,
+    pub methods: Vec<ClassMethod>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClassField {
+    pub name: String,
+    pub is_private: bool,
+    pub ty: TypeRef,
+    /// An inline initializer (`#records = new WeakMap()`). Mutually exclusive with
+    /// `optional`/`definite_assignment` in the surveyed source — a `!`/`?`-declared field is
+    /// always set only from the constructor or later, never inline.
+    pub init: Option<Expr>,
+    /// `field?: T` — TS keeps this `T | undefined` at read sites. The Rust translation stores
+    /// `Option<T>` internally either way (see `definite_assignment`'s doc comment), so this only
+    /// affects whether a *read* stays `Option`-shaped (this flag) or unwraps (that one).
+    pub optional: bool,
+    /// `field!: T` (definite-assignment assertion): unset at construction, but TS asserts every
+    /// read happens after it's been set from outside the constructor. The Rust translation still
+    /// stores `Option<T>` internally (nothing is set at construction time either way) but a
+    /// *read* unwraps rather than staying `Option`-shaped, trusting the same assertion the TS
+    /// source already makes.
+    pub definite_assignment: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClassMethod {
+    pub name: String,
+    pub is_private: bool,
+    pub func: FnDecl,
 }
 
 #[derive(Debug, Clone)]
@@ -215,12 +273,22 @@ pub enum Expr {
     /// re-emits the cast verbatim; dropping it there would under-type the expression at its use
     /// site and could turn a currently-type-checking call into a real `tsc` error.
     Cast { expr: Box<Expr>, target: TypeRef },
+    /// `EXPR!` — a TypeScript non-null assertion. Every occurrence in the surveyed source
+    /// asserts a `Map`/`WeakMap` `.get(...)` lookup (or a class method returning the equivalent
+    /// `T | undefined`, e.g. `array-buffer.ts`'s `record`) is non-`undefined` at this point;
+    /// `emit_rust.rs` trusts the same assertion the TS source already makes and lowers this to
+    /// `.unwrap()` unconditionally, rather than re-deriving whether it's provably safe.
+    /// `emit_ts.rs` re-emits the `!` verbatim.
+    NonNull(Box<Expr>),
 }
 
 #[derive(Debug, Clone)]
 pub enum MemberProp {
     Ident(String),
     Computed(Box<Expr>),
+    /// `obj.#field` — private field/method access, legal only lexically inside (or nested
+    /// within) the declaring class's own body. See `Item::ClassDef`.
+    Private(String),
 }
 
 #[derive(Debug, Clone)]

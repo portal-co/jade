@@ -52,13 +52,19 @@ pub const TABLE: &[IntrinsicSpec] = &[
         name: NUMBER_IS_INTEGER,
         rust_template: "portal_solutions_jade_tenant_rt::intrinsics::is_integer({0})",
     },
+    // `as f64` on each argument regardless of its own Rust type: `array-buffer.ts`'s
+    // `Math.min(toIndex(...), byteLength_result)` mixes a `usize` (`toIndex`, see
+    // `types_shim::to_index`) with what may itself be a `usize`-native quantity too (`BufferHooks
+    // ::byte_length`, translated to `f64` at its own call site specifically so it composes here
+    // without needing per-call-site type tracking) — the cast is a no-op when the value is
+    // already `f64` and a real (harmless, intended) narrowing/widening otherwise.
     IntrinsicSpec {
         name: MATH_MIN,
-        rust_template: "f64::min({0}, {1})",
+        rust_template: "f64::min(({0}) as f64, ({1}) as f64)",
     },
     IntrinsicSpec {
         name: MATH_MAX,
-        rust_template: "f64::max({0}, {1})",
+        rust_template: "f64::max(({0}) as f64, ({1}) as f64)",
     },
     IntrinsicSpec {
         name: MATH_ROUND,
@@ -68,9 +74,14 @@ pub const TABLE: &[IntrinsicSpec] = &[
         name: MAP_GET,
         rust_template: "({0}).get(&{1}).cloned()",
     },
+    // `.clone()` on the value: the TS source sometimes reuses the same local after `.set(...)`
+    // (`array-buffer.ts`'s `makeConstructor` does `this.#prototypes.set(kind, proto);` then
+    // still reads `proto` afterward for `defineData`) — moving it into `.insert(...)` would make
+    // that a use-after-move. A harmless extra clone when the value genuinely isn't reused
+    // afterward (a fresh literal, an already-final use).
     IntrinsicSpec {
         name: MAP_SET,
-        rust_template: "{ ({0}).insert({1}, {2}); }",
+        rust_template: "{ ({0}).insert({1}, ({2}).clone()); }",
     },
     IntrinsicSpec {
         name: MAP_HAS,

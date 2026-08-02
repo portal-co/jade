@@ -24,6 +24,13 @@ export interface BufferRecord { readonly kind: BufferKind; readonly handle: Buff
  * lookups are ambient host operations in TS but tenant-mediated operations in Rust), and this
  * interface's shape is shared verbatim by both ports rather than diverging — see
  * `docs/proxy-and-buffer-primordial-gap-plan.md`.
+ *
+ * `shell` also takes `objectPrototype` explicitly rather than fetching it itself via
+ * `objectPrimordial(tenant)`: `shell` recurses into itself from *inside* the `"slice"` builtin
+ * closure it installs, and a Rust closure can't capture a per-tenant cache reference across its
+ * own `'static` boundary any more than it can capture `tenant` itself (see this file's own
+ * `BufferPrimordialImpl` doc comment) — passing the already-resolved value sidesteps the problem
+ * entirely, since both of `shell`'s call sites already have it in scope.
  */
 export interface BufferPrimordial {
   ArrayBuffer: Function;
@@ -31,7 +38,7 @@ export interface BufferPrimordial {
   SharedArrayBuffer?: Function;
   SharedArrayBufferPrototype?: object;
   record(tenant: Tenant, value: unknown): BufferRecord | undefined;
-  shell(tenant: Tenant, kind: BufferKind, handle: BufferHandle): TenantGenerator<object>;
+  shell(tenant: Tenant, kind: BufferKind, handle: BufferHandle, objectPrototype: object): TenantGenerator<object>;
 }
 
 const caches = new WeakMap<Tenant, { identity: object; primordial: BufferPrimordial }>();
@@ -61,11 +68,12 @@ export const nativeBufferHooks: BufferHooks = {
  * Backs `BufferPrimordial`. A real `class` (not the closures-plus-shared-state idiom every other
  * primordial factory uses) specifically so a Rust port can translate it directly: `shell`
  * recurses into itself (the `"slice"` builtin it installs on a buffer shell calls `shell` again),
- * which a plain Rust closure can't do — a struct with `self`-calling inherent methods has none of
+ * which a plain Rust closure can't do — a struct with self-calling inherent methods has none of
  * that problem. `#hooks`/`#records`/`#prototypes` are private (only ever touched by this class's
  * own methods, including the nested exotic-handler/builtin closures lexically inside them, which
- * reach back in via the captured `self`); nothing outside this class needs them. See
- * `docs/proxy-and-buffer-primordial-gap-plan.md`.
+ * reach back in via the captured `that` — not `self`, which the Rust translation can't use as an
+ * ordinary field/binding name since it's a reserved keyword there); nothing outside this class
+ * needs them. See `docs/proxy-and-buffer-primordial-gap-plan.md`.
  *
  * Deliberately does **not** store `tenant` as a field, unlike `#hooks`: every other tenant-owned
  * value in this codebase treats `tenant` as a fresh per-call argument, never something held
@@ -74,8 +82,8 @@ export const nativeBufferHooks: BufferHooks = {
  */
 class BufferPrimordialImpl implements BufferPrimordial {
   #hooks: BufferHooks;
-  #records = new WeakMap<object, BufferRecord>();
-  #prototypes = new Map<BufferKind, object>();
+  #records: WeakMap<object, BufferRecord> = new WeakMap();
+  #prototypes: Map<BufferKind, object> = new Map();
   ArrayBuffer!: Function;
   ArrayBufferPrototype!: object;
   SharedArrayBuffer?: Function;
@@ -85,7 +93,7 @@ class BufferPrimordialImpl implements BufferPrimordial {
     this.#hooks = hooks;
   }
 
-  record(_tenant: Tenant, value: unknown): BufferRecord | undefined {
+  record(tenant: Tenant, value: unknown): BufferRecord | undefined {
     return value !== null && (typeof value === "object" || typeof value === "function")
       ? this.#records.get(value as object)
       : undefined;
@@ -97,21 +105,19 @@ class BufferPrimordialImpl implements BufferPrimordial {
     return this.#prototypes.get(kind)!;
   }
 
-  *shell(tenant: Tenant, kind: BufferKind, handle: BufferHandle): TenantGenerator<object> {
-    const hooks = this.#hooks;
-    const self = this;
-    const { ObjectPrototype } = yield tenant.yieldTenant(objectPrimordial(tenant));
+  *shell(tenant: Tenant, kind: BufferKind, handle: BufferHandle, objectPrototype: object): TenantGenerator<object> {
+    const that = this;
     const proto = this.#prototypes.get(kind)!;
     const value = yield tenant.yieldTenant(tenant.makeExotic(proto, {
       *get(receiver, key) {
-        const record = self.record(tenant, receiver)!;
-        if (key === "byteLength") return yield tenant.yieldTenant(hooks.byteLength(record.handle));
+        const record = that.record(tenant, receiver)!;
+        if (key === "byteLength") return yield tenant.yieldTenant(that.#hooks.byteLength(record.handle));
         if (key === "slice") return yield tenant.yieldTenant(makeBuiltin(tenant, "slice", function* (_this, args) {
-          const length = yield tenant.yieldTenant(hooks.byteLength(record.handle));
+          const length = yield tenant.yieldTenant(that.#hooks.byteLength(record.handle));
           const begin = Math.min(toIndex(args[0] ?? 0), length);
           const end = Math.min(toIndex(args[1] ?? length), length);
-          return yield tenant.yieldTenant(self.shell(tenant, record.kind, yield tenant.yieldTenant(hooks.slice(record.handle, begin, end))));
-        }, undefined, ObjectPrototype));
+          return yield tenant.yieldTenant(that.shell(tenant, record.kind, yield tenant.yieldTenant(that.#hooks.slice(record.handle, begin, end)), objectPrototype));
+        }, undefined, objectPrototype));
         return undefined;
       },
       *set() {}, *has(_receiver, key) { return key === "byteLength" || key === "slice"; }, *delete() {},
@@ -125,14 +131,13 @@ class BufferPrimordialImpl implements BufferPrimordial {
   }
 
   *makeConstructor(tenant: Tenant, kind: BufferKind, name: string): TenantGenerator<Function> {
-    const hooks = this.#hooks;
-    const self = this;
+    const that = this;
     const { ObjectPrototype } = yield tenant.yieldTenant(objectPrimordial(tenant));
     const proto = yield tenant.yieldTenant(tenant.make(ObjectPrototype));
     this.#prototypes.set(kind, proto);
     const ctor = yield tenant.yieldTenant(makeBuiltin(tenant, name,
       function* () { throw new TypeError(`Constructor ${name} requires 'new'`); },
-      function* (_target, args) { return yield tenant.yieldTenant(self.shell(tenant, kind, yield tenant.yieldTenant(hooks.allocate(kind, toIndex(args[0] ?? 0))))); },
+      function* (_target, args) { return yield tenant.yieldTenant(that.shell(tenant, kind, yield tenant.yieldTenant(that.#hooks.allocate(kind, toIndex(args[0] ?? 0))), ObjectPrototype)); },
       ObjectPrototype));
     yield tenant.yieldTenant(defineData(tenant, ctor, "prototype", proto, { writable: false, configurable: false }));
     return ctor;
@@ -145,10 +150,15 @@ export function* bufferPrimordial(tenant: Tenant, hooks: BufferHooks): TenantGen
     if (cached.identity !== hooks.identity) throw new TypeError("a tenant realm may have only one BufferHooks capability");
     return cached.primordial;
   }
+  // Read before `hooks` is handed to the class below: a Rust port stores `hooks` by value inside
+  // `BufferPrimordialImpl` (it has no lifetime of its own to borrow against, unlike `tenant` —
+  // see the class's own doc comment), so nothing can read back through the original `hooks`
+  // parameter afterward.
+  const supportsSharedArrayBuffer = hooks.supportsSharedArrayBuffer;
   const impl = new BufferPrimordialImpl(hooks);
   impl.ArrayBuffer = yield tenant.yieldTenant(impl.makeConstructor(tenant, "array-buffer", "ArrayBuffer"));
   impl.ArrayBufferPrototype = impl.prototypeOf("array-buffer");
-  if (hooks.supportsSharedArrayBuffer) {
+  if (supportsSharedArrayBuffer) {
     impl.SharedArrayBuffer = yield tenant.yieldTenant(impl.makeConstructor(tenant, "shared-array-buffer", "SharedArrayBuffer"));
     impl.SharedArrayBufferPrototype = impl.prototypeOf("shared-array-buffer");
   }

@@ -3,11 +3,11 @@
 ## Status
 
 `object.ts`/`function.ts`/`reflect.ts` are done: fully IR-lowered, generated, wired into
-`jade-primordial-rt`'s module tree, and behavior-tested. The shared capability below (item 1)
-is now **done and tested** too — see its own status note. The rest of this file's plan (items 2
-and 3: the `BufferHooks` shim, and `proxy.ts`'s harder problems) is still design-only; do not
-start extending `jade-tenant-rt::Tenant` or the closure-capture model for those until a follow-up
-session picks a scope and it's signed off, same discipline as before.
+`jade-primordial-rt`'s module tree, and behavior-tested. Items 1 (`TenantExoticHandler`-from-
+object-literal), 2 (`BufferHooks` shim), and `class` lowering (below, under "Recommended order"
+item 5) are now all **done and tested**, and `array-buffer.ts` generates real, compiling,
+tested Rust end to end. Remaining: `typed-arrays.ts` (item 6) and `proxy.ts` (item 7) — see
+"Recommended order for whoever picks this up" for exact status and next steps.
 
 ## One capability all three files need: `TenantExoticHandler` from an object literal — DONE
 
@@ -343,17 +343,38 @@ proves it.**
 5. ~~Refactor `array-buffer.ts` so `bufferPrimordial`'s return value is a class instance~~
    **Done and verified** (`BufferPrimordialImpl`, `#private` state, `record`/`shell` gained an
    explicit `tenant` parameter, `typed-arrays.ts`'s 6 call sites updated to match — see "The
-   TS-side class refactor itself" above; all 7 `*.e2e.ts` suites pass, `tsc` clean). `typed-arrays.ts`
-   itself hasn't been checked for the same self-reference pattern in its own `create` closure yet.
-   **Design and build `class` lowering** (fields incl. `#private`/readonly, constructor, methods;
-   Rust target: `Rc<RefCell<Inner>>` wrapper + inherent-method `impl` block, uniformly for every
-   class instance — see the `ProxyState` entry below) is now the single remaining piece needed to
-   fully generate `array-buffer.ts` and `typed-arrays.ts` — not started.
-6. `proxy.ts` last: reuses (5)'s class lowering for `ProxyState` (now the *primary* motivating
-   case, not a follow-on), needs a real Rust method-call-on-class-instance emission path (`emit_call`
-   has no such branch yet — every call target recognized today is `tenant.<method>`, a shim, a
-   local function, a cross-file factory, or an exotic-handler literal), plus tuple types/holey
-   array destructuring and discriminated-union-as-enum type aliases for `TrapResult`.
+   TS-side class refactor itself" above; all 7 `*.e2e.ts` suites pass, `tsc` clean).
+   ~~Design and build `class` lowering~~ **Done.** `ir.rs`: `Item::ClassDef`/`ClassField`/
+   `ClassMethod`, `MemberProp::Private`, `Expr::NonNull` (a real node now — see below). `lower.rs`:
+   `lower_class` (constructor as a flat `this.#field = expr;` sequence, fields incl. `#private`/
+   `!`/`?`, methods incl. generators; rejects `extends`/statics/accessors/decorators), plus a
+   general rule erasing *any* method-shaped interface at lowering (not just the hand-carved
+   `BufferHooks` case), trusting a same-module class to back it. `emit_rust.rs`: every class
+   becomes an `Rc<RefCell<Inner>>` wrapper + inherent `impl` (hand-written `Clone` doing
+   `Rc::clone`), every method takes `&self` (mutation goes through the shared `RefCell`, never
+   `&mut self`), and `const that = this;` — the `self`-capture idiom nested closures use to call
+   back into the instance — is just `let that = self.clone();`, a cheap `Rc::clone` that
+   `emit_closure`'s *existing* capture mechanism already handles once told (via
+   `class_instance_obj`) that a captured name is a class instance rather than a bare `T::Value`.
+   Two new `emit_call` branches: method calls on a known class instance (`that.shell(...)`), and
+   method calls on a `BufferHooks`-typed class field (`that.#hooks.byteLength(...)`, its own small
+   arg/return-convention table — `BUFFER_HOOKS_METHODS` — since `BufferHooks`' byte offsets are
+   `f64` in TS but `usize` on the hand-written trait's side, a conversion `shims::ArgKind` doesn't
+   express). `array-buffer.ts` now generates real, compiling Rust end to end (verified by copying
+   the output into `jade-primordial-rt/src/array_buffer.rs`, wiring it into `lib.rs`, and running
+   `cargo build`/`cargo test` — all 48 tests across the touched crates pass, zero regressions).
+   See `docs/primordial-ir-plan.md`'s own updated entry for the long list of pre-existing gaps this
+   surfaced (mostly things no prior IR-lowered file had ever exercised, not new problems this work
+   introduced) and the two small TS-source adjustments (`self` → `that`, `shell` takes
+   `objectPrototype` explicitly) that kept the translation clean rather than fighting the emitter.
+   `typed-arrays.ts` itself hasn't been checked yet for the same self-reference pattern in its own
+   `create` closure — do that before assuming it's a trivial follow-on.
+6. `typed-arrays.ts` next: apply the now-working class-lowering pipeline (checking `create` for
+   self-reference first), then generate/test/commit the same way `array-buffer.ts` was.
+7. `proxy.ts` last: reuses the same class lowering for `ProxyState` (now proven against a real
+   file, not just designed), needs `functionPrimordial` wired the same way `object.ts` was for
+   `function.ts`, plus tuple types/holey array destructuring and discriminated-union-as-enum type
+   aliases for `TrapResult`.
 
 ## Explicitly not proposed here
 

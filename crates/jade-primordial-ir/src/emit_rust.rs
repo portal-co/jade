@@ -115,6 +115,54 @@ thread_local! {
     /// "shared-array-buffer"` needs to become `kind == BufferKind::SharedArrayBuffer`, not a
     /// (non-existent) `PartialEq<str>` comparison.
     static BUFFER_KIND_TYPED_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// Local-variable-name (snake_case) -> "this is a bare host `f64`, not a guest `T::Value`"
+    /// set — populated for a `let` binding whose initializer is a `BufferHooks::byte_length`
+    /// call (see `is_buffer_hooks_usize_returning_call`; that call's own Rust translation is a
+    /// real `f64`, not yet a guest value — see `BUFFER_HOOKS_METHODS`'s `returns_usize` handling
+    /// in `emit_call`). Consulted by `emit_bin`'s `args[N] ?? LOCAL` handling: unlike a bare
+    /// numeric *literal* fallback (`coerce_literal_to_value`), an f64-typed *local* fallback
+    /// needs the same `Tenant::number_value` wrapping applied at read time, not at the `let`
+    /// site, since the local is also used directly as a host `f64` elsewhere (`Math.min`/`max`).
+    static F64_TYPED_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// This module's own `class` declarations (`Item::ClassDef`s), by name — populated once at
+    /// the top of `try_emit_module`, the same way `STRUCT_DEFS` is. Consulted by
+    /// `class_instance_obj` and by field/method lookups throughout class-body emission.
+    static CLASS_DEFS: RefCell<HashMap<String, ClassDef>> = RefCell::new(HashMap::new());
+    /// Local-variable-name (snake_case) -> class name, for locals known to hold an instance of
+    /// one of this module's own classes — either from `new ClassName(...)` (`emit_stmt`'s
+    /// `Stmt::Let` handling) or from `const X = this;` inside one of that class's own methods
+    /// (`emit_class_def`'s `Stmt::Let{init: ThisArg}` recognition). Reset per top-level
+    /// function/class-method (like `LOCAL_REFNESS`); *not* reset when entering a nested closure —
+    /// `emit_closure` already saves/restores the maps it needs to keep an outer scope visible to
+    /// a nested one the same way, and this one just rides along.
+    static CLASS_INSTANCE_LOCALS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// The class whose method body is currently being emitted, if any — lets `emit_member`/
+    /// `emit_assign` know what a bare `this`/`ThisArg` refers to. `None` outside class-method
+    /// emission, where a bare `ThisArg` is the ordinary `thisArg`/`_this` closure-parameter
+    /// sentinel it already was before classes existed.
+    static CURRENT_CLASS: RefCell<Option<String>> = RefCell::new(None);
+    /// (class name, method name) -> the extra trailing argument tokens a call to that method
+    /// needs beyond its own declared TS parameters — populated once, up front (like
+    /// `CLASS_DEFS`), by checking whether the method's *own* IR body mentions a cross-file
+    /// factory's name or this module's own per-tenant-cache variable (a coarse text search over
+    /// the IR's `Debug` output, in the same "conservative, false-positive-only-costs-an-unused-
+    /// param" spirit as `word_referenced`'s other uses — see `maybe_hoist_arg`'s doc comment).
+    /// `emit_call`'s class-instance-method-call branch consults this so a call site can thread
+    /// the matching extra argument without re-emitting (or duplicating the logic of) the
+    /// callee's own signature-building step in `emit_class_method`.
+    static CLASS_METHOD_EXTRA_ARGS: RefCell<HashMap<(String, String), Vec<TokenStream>>> = RefCell::new(HashMap::new());
+    /// Whether the function/method/closure body currently being emitted returns `Result<_,
+    /// TenantError>` — consulted by `emit_stmt`'s `Stmt::Return` handling to decide whether
+    /// `return EXPR;` needs `Ok(...)` wrapping. Always `true` for a closure (`emit_closure`
+    /// hardcodes a `Result`-returning signature) and for every `TenantExoticHandler` trap
+    /// (`RETURN_COERCION::Trap` always implies a `Result`-returning method) — every top-level
+    /// function has also always been throwing so far too (every one calls a fallible tenant
+    /// operation somewhere), so this has never mattered before class methods: a plain,
+    /// non-generator, non-throwing method (`array-buffer.ts`'s `prototypeOf`) is the first case
+    /// where it's actually `false`. Defaults to `true` (every emission context but a plain class
+    /// method sets it that way anyway) so a missed call site fails safe toward the historically
+    /// always-correct behavior rather than silently regressing it.
+    static CURRENT_FN_THROWS: RefCell<bool> = RefCell::new(true);
 }
 
 fn imported_source(name: &str) -> Option<String> {
@@ -139,6 +187,136 @@ fn is_property_key_typed(name: &str) -> bool {
 
 fn is_buffer_kind_typed(name: &str) -> bool {
     BUFFER_KIND_TYPED_LOCALS.with(|set| set.borrow().contains(name))
+}
+
+fn is_f64_typed(name: &str) -> bool {
+    F64_TYPED_LOCALS.with(|set| set.borrow().contains(name))
+}
+
+fn class_def(name: &str) -> Option<ClassDef> {
+    CLASS_DEFS.with(|m| m.borrow().get(name).cloned())
+}
+
+/// A same-module class's own name, if `interface_name` refers to a class directly (its own name)
+/// or to an interface that class `implements` — `rust_type`'s fallback for a type reference with
+/// no `StructDef` of its own (see `lower.rs`'s method-shaped-interface erasure, which leans on
+/// this to resolve what such a name should actually mean in Rust).
+fn class_backing_interface(interface_name: &str) -> Option<String> {
+    CLASS_DEFS.with(|m| {
+        let m = m.borrow();
+        if m.contains_key(interface_name) {
+            return Some(interface_name.to_string());
+        }
+        m.values().find(|def| def.implements.iter().any(|i| i == interface_name)).map(|def| def.name.clone())
+    })
+}
+
+fn class_field_lookup(class_name: &str, field_name: &str) -> Option<ClassField> {
+    class_def(class_name).and_then(|def| def.fields.into_iter().find(|f| f.name == field_name))
+}
+
+fn member_prop_field_name(prop: &MemberProp) -> Option<&str> {
+    match prop {
+        MemberProp::Ident(f) | MemberProp::Private(f) => Some(f.as_str()),
+        MemberProp::Computed(_) => None,
+    }
+}
+
+/// If `obj` is a known class-instance-typed expression — `this`/`ThisArg` while emitting a
+/// method of a known class (`CURRENT_CLASS`), or a local registered in `CLASS_INSTANCE_LOCALS`
+/// — returns the class name and the Rust tokens for a receiver expression reaching its wrapper
+/// value (`self`, Rust's own method receiver, for `ThisArg`; the identifier itself otherwise).
+fn class_instance_obj(obj: &Expr) -> Option<(String, TokenStream)> {
+    match obj {
+        Expr::ThisArg => CURRENT_CLASS.with(|c| c.borrow().clone()).map(|name| (name, quote! { self })),
+        Expr::Ident(name) => {
+            let snake = to_snake_case(name);
+            CLASS_INSTANCE_LOCALS.with(|m| m.borrow().get(&snake).cloned()).map(|class_name| {
+                let ident = format_ident!("{snake}");
+                (class_name, quote! { #ident })
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Whether `ty` (transitively, through `Optional`/`Array`/generic type arguments) involves a
+/// guest `Tenant::Value` — used to decide whether a generated struct's own `impl`/type
+/// parameter list needs `T: Tenant` at all (see `emit_struct_def`/`rust_type`'s struct-reference
+/// case). A reference to another locally-declared struct counts too, since every one of those is
+/// itself always at least `<T: Tenant>` today (see `emit_struct_def`).
+fn type_needs_tenant(ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Named(n) => {
+            matches!(n.as_str(), "object" | "Function" | "unknown") || STRUCT_DEFS.with(|d| d.borrow().contains_key(n))
+        }
+        TypeRef::Generic { args, .. } => args.iter().any(type_needs_tenant),
+        TypeRef::Optional(inner) | TypeRef::Array(inner) => type_needs_tenant(inner),
+    }
+}
+
+/// Whether `ty` involves `BufferHooks`'s associated `Handle` type (`array-buffer.ts`'s
+/// `BufferHandle` type alias) — the `H: BufferHooks` analogue of `type_needs_tenant`.
+fn type_needs_buffer_hooks(ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Named(n) => n == "BufferHandle" || n == "BufferHooks",
+        TypeRef::Generic { args, .. } => args.iter().any(type_needs_buffer_hooks),
+        TypeRef::Optional(inner) | TypeRef::Array(inner) => type_needs_buffer_hooks(inner),
+    }
+}
+
+/// Whether `ty` is a `Map`/`WeakMap` generic type keyed by a guest value (`object`/`Function`/
+/// `unknown`) — such a field is translated to `HashMap<T::ObjectId, V>` (see `rust_type`), so a
+/// `.get`/`.set`/`.has`/`.delete` call against it needs its key argument converted via
+/// `Tenant::object_id` rather than used bare (`T::Value` itself is not `Hash`/`Eq`).
+fn is_object_identity_map_type(ty: &TypeRef) -> bool {
+    matches!(ty, TypeRef::Generic { name, args } if (name == "Map" || name == "WeakMap") && args.len() == 2
+        && matches!(&args[0], TypeRef::Named(n) if n == "object" || n == "Function" || n == "unknown"))
+}
+
+/// A class's own generic parameter list (`<T: Tenant>`, `<T: Tenant, H: BufferHooks>`, or plain
+/// `<T: Tenant>` when nothing needs `H`) and the matching argument list (`<T>`/`<T, H>`) for
+/// naming the type — every class observed so far needs `T` (each holds at least one `T::Value`
+/// or references `tenant` in a method), so unlike `emit_struct_def` this doesn't bother making
+/// `T` itself conditional.
+/// The generated `{value_ty}Cache<...>` per-tenant-cache struct's own generic parameter list and
+/// matching argument list — `T: Tenant` always, plus `H: BufferHooks` too when `value_ty`
+/// resolves to a class that itself needs `H` (`BufferPrimordialCache`, backing
+/// `BufferPrimordialImpl`, is the first such cache). Consulted everywhere `{value_ty}Cache` is
+/// named: its own declaration (`emit_item`'s `PerTenantCache` arm) and every function/method
+/// that gains a `cache: &mut {value_ty}Cache<...>` parameter (`emit_fn_decl`/`emit_class_method`).
+fn per_tenant_cache_generics(value_ty: &str) -> (TokenStream, TokenStream) {
+    let needs_buffer_hooks = class_backing_interface(value_ty).and_then(|c| class_def(&c)).is_some_and(|def| class_needs_buffer_hooks(&def));
+    // `+ 'static` unconditionally on `T`, matching `class_generics`: a cache that can hold a
+    // class instance (`BufferPrimordialImpl<T, H>`, itself always `T: Tenant + 'static`) needs
+    // its own `T` to satisfy that bound too, and it's a harmless superset requirement otherwise
+    // (see `emit_fn_decl`'s matching note on why this is always fine for a real `Tenant` impl).
+    if needs_buffer_hooks {
+        (quote! { T: Tenant + 'static, H: BufferHooks + 'static }, quote! { T, H })
+    } else {
+        (quote! { T: Tenant + 'static }, quote! { T })
+    }
+}
+
+fn class_needs_buffer_hooks(def: &ClassDef) -> bool {
+    def.fields.iter().any(|f| type_needs_buffer_hooks(&f.ty))
+        || def
+            .constructor
+            .iter()
+            .flat_map(|c| c.params.iter())
+            .any(|p| p.ty.as_ref().is_some_and(type_needs_buffer_hooks))
+        || def.methods.iter().any(|m| {
+            m.func.params.iter().any(|p| p.ty.as_ref().is_some_and(type_needs_buffer_hooks))
+                || m.func.return_type.as_ref().is_some_and(type_needs_buffer_hooks)
+        })
+}
+
+fn class_generics(def: &ClassDef) -> (TokenStream, TokenStream) {
+    if class_needs_buffer_hooks(def) {
+        (quote! { T: Tenant + 'static, H: BufferHooks + 'static }, quote! { T, H })
+    } else {
+        (quote! { T: Tenant + 'static }, quote! { T })
+    }
 }
 
 /// Tenant trait methods this emitter knows how to call, and each positional argument's passing
@@ -166,6 +344,110 @@ fn tenant_method(name: &str) -> Option<(&'static str, &'static [shims::ArgKind])
         "invokeTrap" => ("invoke_trap", &[Ref, Ref, Owned]),
         _ => return None,
     })
+}
+
+/// `jade-tenant-rt::BufferHooks`'s own trait methods (hand-written, not IR-derived — see
+/// `crates/jade-tenant-rt/src/buffer.rs`), and each positional argument's passing convention.
+/// Distinct from `shims::ArgKind`/`tenant_method`: every byte offset/length argument is `f64` on
+/// the TS side (from `toIndex`) but `usize` on this trait's side, a conversion neither of those
+/// tables' kinds express.
+#[derive(Clone, Copy)]
+enum BufferHooksArgKind {
+    /// Borrowed as-is (`&Self::Handle`, or `write`'s `&[u8]` bytes).
+    Ref,
+    /// Passed by value with no conversion (`BufferKind`, `Option<BufferKind>`).
+    Owned,
+    /// Passed by value after an `as usize` conversion.
+    UsizeFromF64,
+}
+
+struct BufferHooksMethodSpec {
+    ts_name: &'static str,
+    rust_name: &'static str,
+    params: &'static [BufferHooksArgKind],
+    /// Whether the call's own result needs `.map(|v| v as f64)` before the surrounding
+    /// `TenantYield`'s `?` unwraps it — `byteLength` returns `usize` (matching `BufferHooks::
+    /// byte_length`), but the TS source treats the result as an ordinary JS number, feeding it
+    /// into `Math.min`/other already-`f64`-typed arithmetic on the Rust side.
+    returns_usize: bool,
+}
+
+const BUFFER_HOOKS_METHODS: &[BufferHooksMethodSpec] = &[
+    BufferHooksMethodSpec {
+        ts_name: "allocate",
+        rust_name: "allocate",
+        params: &[BufferHooksArgKind::Owned, BufferHooksArgKind::UsizeFromF64],
+        returns_usize: false,
+    },
+    BufferHooksMethodSpec {
+        ts_name: "isHandle",
+        rust_name: "is_handle",
+        params: &[BufferHooksArgKind::Ref, BufferHooksArgKind::Owned],
+        returns_usize: false,
+    },
+    BufferHooksMethodSpec {
+        ts_name: "byteLength",
+        rust_name: "byte_length",
+        params: &[BufferHooksArgKind::Ref],
+        returns_usize: true,
+    },
+    BufferHooksMethodSpec {
+        ts_name: "slice",
+        rust_name: "slice",
+        params: &[BufferHooksArgKind::Ref, BufferHooksArgKind::UsizeFromF64, BufferHooksArgKind::UsizeFromF64],
+        returns_usize: false,
+    },
+    BufferHooksMethodSpec {
+        ts_name: "read",
+        rust_name: "read",
+        params: &[BufferHooksArgKind::Ref, BufferHooksArgKind::UsizeFromF64, BufferHooksArgKind::UsizeFromF64],
+        returns_usize: false,
+    },
+    BufferHooksMethodSpec {
+        ts_name: "write",
+        rust_name: "write",
+        params: &[BufferHooksArgKind::Ref, BufferHooksArgKind::UsizeFromF64, BufferHooksArgKind::Ref],
+        returns_usize: false,
+    },
+];
+
+fn buffer_hooks_method(name: &str) -> Option<&'static BufferHooksMethodSpec> {
+    BUFFER_HOOKS_METHODS.iter().find(|m| m.ts_name == name)
+}
+
+fn emit_buffer_hooks_arg(expr: &Expr, kind: BufferHooksArgKind) -> Result<TokenStream, IrError> {
+    let tokens = emit_expr(expr)?;
+    Ok(match kind {
+        BufferHooksArgKind::Owned => tokens,
+        BufferHooksArgKind::UsizeFromF64 => quote! { (#tokens) as usize },
+        BufferHooksArgKind::Ref => {
+            let already_ref = matches!(expr, Expr::Ident(name) if is_known_ref(&to_snake_case(name)));
+            if already_ref {
+                tokens
+            } else {
+                quote! { &(#tokens) }
+            }
+        }
+    })
+}
+
+/// Whether `expr` is `yield tenant.yieldTenant(<class field>.#hooks.<method>(...))` for a
+/// `usize`-returning `BufferHooks` method (`byteLength` today) — see
+/// `coerce_trap_return_value`'s use of this: such a call's Rust translation is a real host
+/// number (`f64`, via `BUFFER_HOOKS_METHODS`'s `returns_usize` handling in `emit_call`), not yet
+/// a guest `T::Value`, when it flows directly into an exotic-trap `return`.
+fn is_buffer_hooks_usize_returning_call(expr: &Expr) -> bool {
+    let Expr::TenantYield(inner) = expr else { return false };
+    let Expr::Call { callee, .. } = inner.as_ref() else { return false };
+    let Expr::Member { obj: field_obj, prop: MemberProp::Ident(method) } = callee.as_ref() else { return false };
+    let Expr::Member { obj: recv_obj, prop: recv_prop } = field_obj.as_ref() else { return false };
+    let Some(field_name) = member_prop_field_name(recv_prop) else { return false };
+    let Some((class_name, _)) = class_instance_obj(recv_obj) else { return false };
+    let Some(field) = class_field_lookup(&class_name, field_name) else { return false };
+    if !matches!(&field.ty, TypeRef::Named(n) if n == "BufferHooks") {
+        return false;
+    }
+    buffer_hooks_method(method).is_some_and(|spec| spec.returns_usize)
 }
 
 /// Which [`shims::ArgKind`] a top-level function's own declared parameter type implies — shared
@@ -276,6 +558,15 @@ fn try_emit_module(module: &Module) -> TokenStream {
             }
         }
     });
+    CLASS_DEFS.with(|map| {
+        let mut map = map.borrow_mut();
+        map.clear();
+        for item in &module.items {
+            if let Item::ClassDef(def) = item {
+                map.insert(def.name.clone(), def.clone());
+            }
+        }
+    });
     PER_TENANT_CACHE.with(|cache| {
         *cache.borrow_mut() = module.items.iter().find_map(|item| match item {
             Item::PerTenantCache { name, value_ty, .. } => Some((name.clone(), value_ty.clone())),
@@ -290,6 +581,32 @@ fn try_emit_module(module: &Module) -> TokenStream {
                 && let Some(name) = &func.name
             {
                 map.insert(name.clone(), func.params.iter().map(|p| p.ty.clone()).collect());
+            }
+        }
+    });
+    CLASS_METHOD_EXTRA_ARGS.with(|map| {
+        let mut map = map.borrow_mut();
+        map.clear();
+        let cache = PER_TENANT_CACHE.with(|c| c.borrow().clone());
+        for item in &module.items {
+            let Item::ClassDef(def) = item else { continue };
+            for method in &def.methods {
+                let debug_text = format!("{:?}", method.func);
+                let mut extra = Vec::new();
+                if let Some((cache_var, _)) = &cache
+                    && word_referenced(&debug_text, cache_var)
+                {
+                    extra.push(quote! { cache });
+                }
+                for factory in cross_file::TABLE {
+                    if word_referenced(&debug_text, factory.name) {
+                        let cache_ident = format_ident!("{}", cross_file::cache_param_name(factory));
+                        extra.push(quote! { #cache_ident });
+                    }
+                }
+                if !extra.is_empty() {
+                    map.insert((def.name.clone(), method.name.clone()), extra);
+                }
             }
         }
     });
@@ -335,6 +652,7 @@ fn item_label(item: &Item) -> String {
         Item::PerTenantCache { name, .. } => format!("cache `{name}`"),
         Item::ModuleConst { name, .. } => format!("const `{name}`"),
         Item::TypeImport { .. } | Item::ValueImport { .. } => "import".to_string(),
+        Item::ClassDef(def) => format!("class `{}`", def.name),
     }
 }
 
@@ -344,10 +662,16 @@ fn emit_item(item: &Item) -> Result<Option<TokenStream>, IrError> {
         Item::StructDef(def) => Ok(Some(emit_struct_def(def)?)),
         Item::PerTenantCache { value_ty, .. } => {
             let cache_ident = format_ident!("{value_ty}Cache");
-            let value_ident = format_ident!("{value_ty}");
+            // Resolves through the same fallback `rust_type` uses everywhere else: a plain
+            // `StructDef`-backed interface becomes `Value<T>`, but `array-buffer.ts`'s
+            // `BufferPrimordial` (method-shaped, erased at lowering — see `lower.rs`) resolves to
+            // its backing class's own wrapper type (`BufferPrimordialImpl<T, H>`) instead, so
+            // this can't just hand-roll `#value_ident<T>` the way it used to.
+            let value_ty_tokens = rust_type(&TypeRef::Named(value_ty.clone()))?;
+            let (generic_params, generic_args) = per_tenant_cache_generics(value_ty);
             Ok(Some(quote! {
-                pub struct #cache_ident<T: Tenant> { entry: Option<#value_ident<T>> }
-                impl<T: Tenant> Default for #cache_ident<T> {
+                pub struct #cache_ident<#generic_params> { entry: Option<#value_ty_tokens> }
+                impl<#generic_params> Default for #cache_ident<#generic_args> {
                     fn default() -> Self { Self { entry: None } }
                 }
             }))
@@ -357,6 +681,7 @@ fn emit_item(item: &Item) -> Result<Option<TokenStream>, IrError> {
             construct: "module-level const emission".into(),
         }),
         Item::FnDecl(func) => Ok(Some(emit_fn_decl(func)?)),
+        Item::ClassDef(def) => Ok(Some(emit_class_def(def)?)),
     }
 }
 
@@ -366,6 +691,7 @@ fn emit_item(item: &Item) -> Result<Option<TokenStream>, IrError> {
 /// supertrait bound — is actually needed by any field).
 fn emit_struct_def(def: &StructDef) -> Result<TokenStream, IrError> {
     let struct_ident = format_ident!("{}", def.name);
+    let (generic_params, generic_args) = struct_generics(def);
     let mut field_decls = Vec::new();
     let mut field_idents = Vec::new();
     for (name, ty) in &def.fields {
@@ -375,13 +701,56 @@ fn emit_struct_def(def: &StructDef) -> Result<TokenStream, IrError> {
         field_idents.push(field_ident);
     }
     Ok(quote! {
-        pub struct #struct_ident<T: Tenant> { #(#field_decls),* }
-        impl<T: Tenant> Clone for #struct_ident<T> {
+        pub struct #struct_ident<#generic_params> { #(#field_decls),* }
+        impl<#generic_params> Clone for #struct_ident<#generic_args> {
             fn clone(&self) -> Self {
                 Self { #(#field_idents: self.#field_idents.clone()),* }
             }
         }
     })
+}
+
+/// A generated `interface` struct's own generic parameter list and matching argument list.
+/// `T: Tenant` is included whenever any field involves a guest `Tenant::Value` (the common
+/// case, and every struct observed before `array-buffer.ts` needed exactly this); `H:
+/// BufferHooks` is added too when a field involves `BufferHooks`'s associated `Handle` type
+/// (`BufferRecord`'s `handle: BufferHandle` is the first such struct — see
+/// `docs/proxy-and-buffer-primordial-gap-plan.md`). A struct needing neither gets no generic
+/// parameters at all, rather than an unconditional (and, for such a struct, meaningless) `<T>`.
+fn struct_generics(def: &StructDef) -> (TokenStream, TokenStream) {
+    let needs_tenant = def.fields.iter().any(|(_, ty)| type_needs_tenant(ty));
+    let needs_buffer_hooks = def.fields.iter().any(|(_, ty)| type_needs_buffer_hooks(ty));
+    let mut params = Vec::new();
+    let mut args = Vec::new();
+    if needs_tenant {
+        params.push(quote! { T: Tenant });
+        args.push(quote! { T });
+    }
+    if needs_buffer_hooks {
+        params.push(quote! { H: BufferHooks });
+        args.push(quote! { H });
+    }
+    (quote! { #(#params),* }, quote! { #(#args),* })
+}
+
+/// The generic argument list to name a locally-declared struct's own type (`Foo<T>`, `Foo<T,
+/// H>`, or plain `Foo` for one needing neither) — the type-reference-position counterpart to
+/// `struct_generics`'s declaration-position list.
+fn struct_type_args(def: &StructDef) -> TokenStream {
+    let needs_tenant = def.fields.iter().any(|(_, ty)| type_needs_tenant(ty));
+    let needs_buffer_hooks = def.fields.iter().any(|(_, ty)| type_needs_buffer_hooks(ty));
+    let mut args = Vec::new();
+    if needs_tenant {
+        args.push(quote! { T });
+    }
+    if needs_buffer_hooks {
+        args.push(quote! { H });
+    }
+    if args.is_empty() {
+        quote! {}
+    } else {
+        quote! { <#(#args),*> }
+    }
 }
 
 /// TS type alias name -> fully-qualified Rust path, for a type that (unlike every other
@@ -396,6 +765,17 @@ const TYPE_SHIMS: &[(&str, &str)] = &[("BufferKind", "portal_solutions_jade_tena
 /// -style comparisons against a known `BufferKind`-typed local (see `BUFFER_KIND_TYPED_LOCALS`).
 const BUFFER_KIND_VARIANTS: &[(&str, &str)] = &[("array-buffer", "ArrayBuffer"), ("shared-array-buffer", "SharedArrayBuffer")];
 
+/// If `expr` is a string literal matching one of `BUFFER_KIND_VARIANTS`, the matching
+/// `BufferKind::Variant` tokens — see `emit_call`'s class-instance-method-call branch, the one
+/// place a `BufferKind`-typed parameter is fed a literal directly (`that.shell(tenant,
+/// "array-buffer", ...)`).
+fn buffer_kind_literal(expr: &Expr) -> Option<TokenStream> {
+    let Expr::Lit(Lit::Str(s)) = expr else { return None };
+    let variant = BUFFER_KIND_VARIANTS.iter().find(|(lit, _)| lit == s)?.1;
+    let variant_ident = format_ident!("{variant}");
+    Some(quote! { portal_solutions_jade_tenant_rt::BufferKind::#variant_ident })
+}
+
 fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
     match ty {
         TypeRef::Named(name) => Ok(match name.as_str() {
@@ -406,6 +786,16 @@ fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
             "number" => quote! { f64 },
             "void" | "undefined" => quote! { () },
             "TenantPropertyDescriptor" => quote! { TenantPropertyDescriptor<T::Value> },
+            // `array-buffer.ts`'s `BufferHandle` type alias (`= object`, but a *host* handle,
+            // never a guest `Tenant::Value`) — depends on the local `H: BufferHooks` generic
+            // parameter's own name, so unlike `TYPE_SHIMS`'s fixed absolute paths this is
+            // special-cased directly rather than added to that table.
+            "BufferHandle" => quote! { H::Handle },
+            // A struct/class *field* typed `BufferHooks` (e.g. `BufferPrimordialImpl`'s
+            // `#hooks`) is the class's own `H: BufferHooks` generic parameter, owned outright —
+            // unlike a `BufferHooks`-typed *function parameter*, which `emit_param` types as
+            // `&mut H` instead (a fresh per-call borrow, not a value the callee keeps).
+            "BufferHooks" => quote! { H },
             other if TYPE_SHIMS.iter().any(|(n, _)| *n == other) => {
                 let path = TYPE_SHIMS.iter().find(|(n, _)| *n == other).unwrap().1;
                 path.parse().map_err(|e| IrError::Unsupported {
@@ -414,9 +804,15 @@ fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
                 })?
             }
             other => {
-                if STRUCT_DEFS.with(|d| d.borrow().contains_key(other)) {
+                if let Some(def) = STRUCT_DEFS.with(|d| d.borrow().get(other).cloned()) {
                     let ident = format_ident!("{other}");
-                    quote! { #ident<T> }
+                    let args = struct_type_args(&def);
+                    quote! { #ident #args }
+                } else if let Some(class_name) = class_backing_interface(other) {
+                    let ident = format_ident!("{class_name}");
+                    let def = class_def(&class_name).unwrap();
+                    let (_, generic_args) = class_generics(&def);
+                    quote! { #ident<#generic_args> }
                 } else {
                     return Err(IrError::Unsupported {
                         file: String::new(),
@@ -426,6 +822,20 @@ fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
             }
         }),
         TypeRef::Generic { name, args } if name == "Partial" && args.len() == 1 => rust_type(&args[0]),
+        // `Map`/`WeakMap` — see `ir.rs`'s `Item::PerTenantCache` doc comment and the primordial-
+        // IR plan's "Rust has no `WeakMap`, but doesn't need one" note. A key type of `object`/
+        // `Function`/`unknown` (a guest value, not `Hash`/`Eq`-able) maps to `T::ObjectId`
+        // instead — see `is_object_identity_map_type`, which callers touching the map's own
+        // `.get`/`.set`/`.has`/`.delete` calls consult to convert the key argument accordingly.
+        TypeRef::Generic { name, args } if (name == "Map" || name == "WeakMap") && args.len() == 2 => {
+            let key = if matches!(&args[0], TypeRef::Named(n) if n == "object" || n == "Function" || n == "unknown") {
+                quote! { T::ObjectId }
+            } else {
+                rust_type(&args[0])?
+            };
+            let val = rust_type(&args[1])?;
+            Ok(quote! { std::collections::HashMap<#key, #val> })
+        }
         TypeRef::Generic { name, .. } => Err(IrError::Unsupported {
             file: String::new(),
             construct: format!("generic type `{name}<...>`"),
@@ -500,6 +910,7 @@ fn expr_throws(expr: &Expr) -> bool {
         Expr::HostIntrinsic { args, .. } => args.iter().any(expr_throws),
         Expr::Sequence(exprs) => exprs.iter().any(expr_throws),
         Expr::Cast { expr, .. } => expr_throws(expr),
+        Expr::NonNull(expr) => expr_throws(expr),
         Expr::Ident(_) | Expr::Lit(_) | Expr::ThisArg | Expr::Closure(_) => false,
     }
 }
@@ -574,7 +985,11 @@ fn emit_fn_decl(func: &FnDecl) -> Result<TokenStream, IrError> {
         quote! { -> #declared_return }
     };
 
-    let mut body = emit_block(&func.body)?;
+    let saved_fn_throws = CURRENT_FN_THROWS.with(|c| *c.borrow());
+    CURRENT_FN_THROWS.with(|c| *c.borrow_mut() = throws);
+    let body_result = emit_block(&func.body);
+    CURRENT_FN_THROWS.with(|c| *c.borrow_mut() = saved_fn_throws);
+    let mut body = body_result?;
     if throws && is_void {
         body = quote! { #body Ok(()) };
     }
@@ -587,11 +1002,17 @@ fn emit_fn_decl(func: &FnDecl) -> Result<TokenStream, IrError> {
     body = quote! { let __undefined = tenant.undefined_value(); #body };
 
     let cache = PER_TENANT_CACHE.with(|c| c.borrow().clone());
-    if let Some((cache_var, value_ty)) = &cache
-        && word_referenced(&body.to_string(), cache_var)
+    // Checks for the literal word `cache`, not the TS source's own per-tenant-cache variable
+    // name (`cache` in most files, but `caches` in `array-buffer.ts`/`typed-arrays.ts`):
+    // `try_emit_cache_lookup_pair`/`try_emit_cache_set` always emit a `cache`-named Rust local
+    // regardless of what the TS source called it, so that's the name that can actually appear in
+    // `body`'s own rendered text.
+    if let Some((_, value_ty)) = &cache
+        && word_referenced(&body.to_string(), "cache")
     {
         let cache_ty_ident = format_ident!("{value_ty}Cache");
-        param_tokens.push(quote! { cache: &mut #cache_ty_ident<T> });
+        let (_, cache_generic_args) = per_tenant_cache_generics(value_ty);
+        param_tokens.push(quote! { cache: &mut #cache_ty_ident<#cache_generic_args> });
     }
     // Any registered cross-file factory this function's body calls needs its cache threaded in
     // too, one extra parameter per distinct factory referenced — see `cross_file.rs`.
@@ -613,7 +1034,11 @@ fn emit_fn_decl(func: &FnDecl) -> Result<TokenStream, IrError> {
     // in its own generic parameter list, alongside `T: Tenant`.
     let has_buffer_hooks_param = func.params.iter().any(|p| matches!(p.ty, Some(TypeRef::Named(ref n)) if n == "BufferHooks"));
     let generics = if has_buffer_hooks_param {
-        quote! { <T: Tenant + 'static, H: BufferHooks> }
+        // `+ 'static` on `H` too: a function taking `hooks: BufferHooks` always either stores it
+        // into (or returns/threads through) a class instance, and every such class's own
+        // definition requires `H: BufferHooks + 'static` (see `class_generics`) — so anything
+        // naming that class's type has to satisfy the same bound.
+        quote! { <T: Tenant + 'static, H: BufferHooks + 'static> }
     } else {
         quote! { <T: Tenant + 'static> }
     };
@@ -661,10 +1086,15 @@ fn emit_param(param: &Param) -> Result<TokenStream, IrError> {
         return Ok(quote! { #ident: &[T::Value] });
     }
     // `BufferHooks` is an added generic trait-bound parameter (`H: BufferHooks`, see
-    // `fn_has_buffer_hooks_param`/`emit_fn_decl`), not a struct — `&mut H` here, matching how
-    // `tenant: &mut T` is threaded.
+    // `fn_has_buffer_hooks_param`/`emit_fn_decl`), not a struct. Owned `H`, not `&mut H`: every
+    // top-level function taking a `hooks: BufferHooks` parameter today (`bufferPrimordial`) only
+    // ever *passes it through* — to a class constructor that stores it (`new
+    // BufferPrimordialImpl(hooks)`) or to another such function — never calls a method on it
+    // directly (that only ever happens through a *stored* `H` field, reached via
+    // `class_instance_obj`'s machinery in `emit_call`/`emit_host_intrinsic`, which borrows the
+    // field itself rather than needing the parameter borrowed).
     if matches!(ty, TypeRef::Named(n) if n == "BufferHooks") {
-        return Ok(quote! { #ident: &mut H });
+        return Ok(quote! { #ident: H });
     }
     // `&str`, not `rust_type`'s `String` (that mapping is correct for a return/field position,
     // not a borrowed parameter) — every real call site passes a string literal, which is
@@ -676,6 +1106,249 @@ fn emit_param(param: &Param) -> Result<TokenStream, IrError> {
     Ok(match arg_kind_for_type(ty) {
         shims::ArgKind::Ref | shims::ArgKind::RefKey => quote! { #ident: &#base },
         _ => quote! { #ident: #base },
+    })
+}
+
+/// Emits a `class` declaration as an `Rc<RefCell<Inner>>`-backed wrapper type — see `ir.rs`'s
+/// `Item::ClassDef` doc comment for the design: every JS class instance is reference-shared, so
+/// this needs no per-instance mutation/capture analysis. Every generated inherent method takes
+/// `&self` (never `&mut self` — mutation happens through the shared `RefCell`), which is also
+/// exactly what makes capturing an instance into a nested closure (`const that = this;`, see
+/// `emit_stmt`'s `Stmt::Let` handling) just an ordinary `.clone()` — a cheap `Rc::clone` — that
+/// `emit_closure`'s existing capture mechanism already does for free once the wrapper has a
+/// hand-written `Clone` impl (below).
+fn emit_class_def(def: &ClassDef) -> Result<TokenStream, IrError> {
+    let class_ident = format_ident!("{}", def.name);
+    let inner_ident = format_ident!("{}Inner", def.name);
+    let (generic_params, generic_args) = class_generics(def);
+
+    let mut inner_field_decls = Vec::new();
+    for field in &def.fields {
+        let field_ident = format_ident!("{}", to_snake_case(&field.name));
+        let base_ty = rust_type(&field.ty)?;
+        let field_ty = if field.optional || field.definite_assignment { quote! { Option<#base_ty> } } else { base_ty };
+        inner_field_decls.push(quote! { #field_ident: #field_ty });
+    }
+
+    let Some(ctor) = &def.constructor else {
+        return Err(IrError::Unsupported {
+            file: String::new(),
+            construct: format!("class `{}` has no constructor", def.name),
+        });
+    };
+    let mut ctor_param_tokens = Vec::new();
+    for param in &ctor.params {
+        // Unlike an ordinary method/function parameter, a constructor parameter is *stored*
+        // (into a field), not used transiently for one call — a `BufferHooks`-typed one needs
+        // owned `H`, not `emit_param`'s usual `&mut H` (a fresh per-call borrow would be the
+        // wrong shape to hold across the instance's whole lifetime, and wouldn't type-check
+        // against the field's own declared type either — see `rust_type`'s `"BufferHooks" => H`
+        // case).
+        if matches!(&param.ty, Some(TypeRef::Named(n)) if n == "BufferHooks")
+            && let Pattern::Ident(name) = &param.pattern
+        {
+            let ident = format_ident!("{}", to_snake_case(name));
+            ctor_param_tokens.push(quote! { #ident: H });
+            continue;
+        }
+        ctor_param_tokens.push(emit_param(param)?);
+    }
+    // A constructor body is expected to be a flat sequence of `this.#field = expr;`/`this.field =
+    // expr;` assignments (the only shape observed in the surveyed source) — extracted directly
+    // into a struct-literal field map rather than emitted as ordinary statements, since Rust
+    // struct construction happens all at once and a field with no inline initializer (`#hooks`,
+    // set only from the constructor) has no sensible placeholder value to construct incrementally
+    // toward. This also sidesteps a real name collision the "obvious" translation would hit: the
+    // constructor parameter and the field it initializes are conventionally the same name (`this
+    // .#hooks = hooks;`), so a pre-declared `hooks` field-local would shadow the parameter.
+    let mut assigned: HashMap<String, TokenStream> = HashMap::new();
+    for stmt in &ctor.body.0 {
+        let Stmt::Expr(Expr::Assign { target, value }) = stmt else {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!("class `{}` constructor has a statement other than `this.<field> = ...;`", def.name),
+            });
+        };
+        let Expr::Member { obj, prop } = target.as_ref() else {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!("class `{}` constructor assigns to a non-field target", def.name),
+            });
+        };
+        if !matches!(obj.as_ref(), Expr::ThisArg) {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!("class `{}` constructor assignment target is not `this.<field>`", def.name),
+            });
+        }
+        let Some(field_name) = member_prop_field_name(prop) else {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!("class `{}` constructor assigns to a computed member", def.name),
+            });
+        };
+        assigned.insert(field_name.to_string(), emit_expr(value)?);
+    }
+    let mut ctor_field_inits = Vec::new();
+    for field in &def.fields {
+        let field_ident = format_ident!("{}", to_snake_case(&field.name));
+        let value = if let Some(value_tokens) = assigned.get(&field.name) {
+            if field.optional || field.definite_assignment {
+                quote! { Some(#value_tokens) }
+            } else {
+                value_tokens.clone()
+            }
+        } else if field.optional || field.definite_assignment {
+            quote! { None }
+        } else if let Some(init) = &field.init {
+            emit_expr(init)?
+        } else {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!(
+                    "class `{}` field `{}` has no inline initializer, isn't `?`/`!`-declared, and isn't assigned in the constructor",
+                    def.name, field.name
+                ),
+            });
+        };
+        ctor_field_inits.push(quote! { #field_ident: #value });
+    }
+    let new_fn = quote! {
+        pub fn new(#(#ctor_param_tokens),*) -> Self {
+            Self { inner: ::std::rc::Rc::new(::std::cell::RefCell::new(#inner_ident { #(#ctor_field_inits),* })) }
+        }
+    };
+
+    let saved_class = CURRENT_CLASS.with(|c| c.borrow().clone());
+    CURRENT_CLASS.with(|c| *c.borrow_mut() = Some(def.name.clone()));
+    let mut method_tokens = Vec::new();
+    for method in &def.methods {
+        method_tokens.push(emit_class_method(method)?);
+    }
+    CURRENT_CLASS.with(|c| *c.borrow_mut() = saved_class);
+
+    Ok(quote! {
+        pub struct #inner_ident<#generic_params> { #(#inner_field_decls),* }
+
+        pub struct #class_ident<#generic_params> { inner: ::std::rc::Rc<::std::cell::RefCell<#inner_ident<#generic_args>>> }
+
+        impl<#generic_params> Clone for #class_ident<#generic_args> {
+            fn clone(&self) -> Self { Self { inner: ::std::rc::Rc::clone(&self.inner) } }
+        }
+
+        impl<#generic_params> #class_ident<#generic_args> {
+            #new_fn
+            #(#method_tokens)*
+        }
+    })
+}
+
+/// Emits one class method (regular or generator — like every top-level function, a generator
+/// method's TS `yield`-driving ceremony has already collapsed to a plain synchronous, fallible
+/// Rust function by the time it reaches this emitter; see `ir.rs`'s `Expr::TenantYield` doc
+/// comment) as an inherent `&self` method on the class's wrapper type.
+fn emit_class_method(method: &ClassMethod) -> Result<TokenStream, IrError> {
+    let method_ident = format_ident!("{}", to_snake_case(&method.name));
+    let func = &method.func;
+
+    LOCAL_REFNESS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        for param in &func.params {
+            if let Pattern::Ident(pname) = &param.pattern {
+                let is_string = matches!(param.ty, Some(TypeRef::Named(ref n)) if n == "string");
+                let is_ref = pname == "tenant"
+                    || is_string
+                    || param
+                        .ty
+                        .as_ref()
+                        .is_some_and(|ty| matches!(arg_kind_for_type(ty), shims::ArgKind::Ref | shims::ArgKind::RefKey));
+                m.insert(to_snake_case(pname), is_ref);
+            }
+        }
+    });
+    OPTION_LOCALS.with(|m| m.borrow_mut().clear());
+    STRING_TYPED_LOCALS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        for param in &func.params {
+            if let Pattern::Ident(pname) = &param.pattern
+                && matches!(param.ty, Some(TypeRef::Named(ref n)) if n == "string")
+            {
+                m.insert(to_snake_case(pname));
+            }
+        }
+    });
+    CLASS_INSTANCE_LOCALS.with(|m| m.borrow_mut().clear());
+
+    let mut param_tokens = Vec::new();
+    for param in &func.params {
+        param_tokens.push(emit_param(param)?);
+    }
+
+    let throws = block_throws(&func.body);
+    let (declared_return, is_void) = match &func.return_type {
+        Some(TypeRef::Generic { name, args }) if name == "TenantGenerator" && args.len() == 1 => {
+            (rust_type(&args[0])?, matches!(args[0], TypeRef::Named(ref n) if n == "void"))
+        }
+        Some(other) => (rust_type(other)?, matches!(other, TypeRef::Named(n) if n == "void")),
+        None => (quote! { () }, true),
+    };
+    let return_ty = if throws {
+        quote! { -> Result<#declared_return, TenantError> }
+    } else {
+        quote! { -> #declared_return }
+    };
+
+    let saved_coercion = RETURN_COERCION.with(|c| *c.borrow());
+    RETURN_COERCION.with(|c| *c.borrow_mut() = ReturnCoercion::Closure);
+    let saved_fn_throws = CURRENT_FN_THROWS.with(|c| *c.borrow());
+    CURRENT_FN_THROWS.with(|c| *c.borrow_mut() = throws);
+    let body_result = emit_block(&func.body);
+    CURRENT_FN_THROWS.with(|c| *c.borrow_mut() = saved_fn_throws);
+    RETURN_COERCION.with(|c| *c.borrow_mut() = saved_coercion);
+    let mut body = body_result?;
+    if throws && is_void {
+        body = quote! { #body Ok(()) };
+    }
+    // Unlike `emit_fn_decl` (every top-level factory function takes `tenant`), a class method may
+    // not (`prototypeOf` doesn't) — the `__undefined` prelude is only valid, and only needed, when
+    // `tenant` is actually one of this method's own parameters.
+    let has_tenant_param = func.params.iter().any(|p| matches!(&p.pattern, Pattern::Ident(n) if n == "tenant"));
+    if has_tenant_param {
+        body = quote! { let __undefined = tenant.undefined_value(); #body };
+    }
+
+    let cache = PER_TENANT_CACHE.with(|c| c.borrow().clone());
+    // Checks for the literal word `cache`, not the TS source's own per-tenant-cache variable
+    // name (`cache` in most files, but `caches` in `array-buffer.ts`/`typed-arrays.ts`):
+    // `try_emit_cache_lookup_pair`/`try_emit_cache_set` always emit a `cache`-named Rust local
+    // regardless of what the TS source called it, so that's the name that can actually appear in
+    // `body`'s own rendered text.
+    if let Some((_, value_ty)) = &cache
+        && word_referenced(&body.to_string(), "cache")
+    {
+        let cache_ty_ident = format_ident!("{value_ty}Cache");
+        let (_, cache_generic_args) = per_tenant_cache_generics(value_ty);
+        param_tokens.push(quote! { cache: &mut #cache_ty_ident<#cache_generic_args> });
+    }
+    let body_str = body.to_string();
+    for factory in cross_file::TABLE {
+        let cache_param = cross_file::cache_param_name(factory);
+        if word_referenced(&body_str, &cache_param) {
+            let cache_ident = format_ident!("{cache_param}");
+            let cache_ty: TokenStream = format!("{}Cache", factory.struct_path).parse().map_err(|e| IrError::Unsupported {
+                file: String::new(),
+                construct: format!("cross-file factory `{}` struct_path did not parse as Rust: {e}", factory.name),
+            })?;
+            param_tokens.push(quote! { #cache_ident: &mut #cache_ty<T> });
+        }
+    }
+
+    Ok(quote! {
+        pub fn #method_ident(&self, #(#param_tokens),*) #return_ty {
+            #body
+        }
     })
 }
 
@@ -941,6 +1614,19 @@ fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
             file: String::new(),
             construct: "uninitialized destructured let-binding".into(),
         }),
+        // `const that = this;` inside a class method — captures the current instance for nested
+        // closures to reach back into (see `ir.rs`'s `Item::ClassDef` doc comment). `self` (Rust's
+        // own method receiver) is a cheap `Rc`-backed `Clone`, so this is just an ordinary clone
+        // into a same-named local, exactly like any other captured value `emit_closure` handles —
+        // the *only* thing needed here beyond that is registering `that` in
+        // `CLASS_INSTANCE_LOCALS` so later `that.<method>(...)`/`that.#<field>` references resolve.
+        Stmt::Let { pattern: Pattern::Ident(name), init: Some(Expr::ThisArg) } if CURRENT_CLASS.with(|c| c.borrow().is_some()) => {
+            let class_name = CURRENT_CLASS.with(|c| c.borrow().clone()).unwrap();
+            let ident = format_ident!("{}", to_snake_case(name));
+            CLASS_INSTANCE_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(name), class_name));
+            LOCAL_REFNESS.with(|m| m.borrow_mut().insert(to_snake_case(name), false));
+            Ok(quote! { let #ident = self.clone(); })
+        }
         Stmt::Let { pattern, init } => {
             let Pattern::Ident(name) = pattern else {
                 return Err(IrError::Unsupported {
@@ -958,9 +1644,21 @@ fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
                     });
                 }
             };
+            // `const impl = new BufferPrimordialImpl(hooks);` — registers `impl` as a known
+            // class-instance local so later `impl.<method>(...)`/`impl.<field> = ...` references
+            // resolve through `class_instance_obj` the same way a method's own `that`/`this` does.
+            if let Some(Expr::New { callee, .. }) = init
+                && let Expr::Ident(class_name) = callee.as_ref()
+                && class_def(class_name).is_some()
+            {
+                CLASS_INSTANCE_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(name), class_name.clone()));
+            }
             LOCAL_REFNESS.with(|m| m.borrow_mut().insert(to_snake_case(name), false));
             if init.as_ref().is_some_and(returns_option) {
                 OPTION_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(name)));
+            }
+            if init.as_ref().is_some_and(is_buffer_hooks_usize_returning_call) {
+                F64_TYPED_LOCALS.with(|set| set.borrow_mut().insert(to_snake_case(name)));
             }
             // Always `mut`: whether a given binding is later reassigned (a struct field write
             // through it, e.g. `next.writable = false`) isn't tracked separately, and an unused
@@ -971,17 +1669,20 @@ fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
             let value = emit_expr(expr)?;
             Ok(quote! { #value; })
         }
-        Stmt::Return(value) => match value {
-            Some(expr) => {
-                let value = emit_expr(expr)?;
-                let value = match RETURN_COERCION.with(|c| *c.borrow()) {
-                    ReturnCoercion::Closure => coerce_return_value(expr, value)?,
-                    ReturnCoercion::Trap(kind) => coerce_trap_return_value(kind, expr, value),
-                };
-                Ok(quote! { return Ok(#value); })
+        Stmt::Return(value) => {
+            let throws = CURRENT_FN_THROWS.with(|c| *c.borrow());
+            match value {
+                Some(expr) => {
+                    let value = emit_expr(expr)?;
+                    let value = match RETURN_COERCION.with(|c| *c.borrow()) {
+                        ReturnCoercion::Closure => coerce_return_value(expr, value)?,
+                        ReturnCoercion::Trap(kind) => coerce_trap_return_value(kind, expr, value),
+                    };
+                    Ok(if throws { quote! { return Ok(#value); } } else { quote! { return #value; } })
+                }
+                None => Ok(if throws { quote! { return Ok(()); } } else { quote! { return; } }),
             }
-            None => Ok(quote! { return Ok(()); }),
-        },
+        }
         Stmt::If { cond, then_branch, else_branch: None } if option_narrow_continue(cond, then_branch).is_some() => {
             Ok(option_narrow_continue(cond, then_branch).unwrap())
         }
@@ -1061,6 +1762,52 @@ fn emit_throw(expr: &Expr) -> Result<TokenStream, IrError> {
     }
 }
 
+/// `new ClassName(...)` — constructs one of this module's own `Item::ClassDef`s via its
+/// generated `ClassName::new(...)` associated function (see `emit_class_def`), or `new
+/// Map()`/`new WeakMap()` with no type arguments passed at the construction site (a class field's
+/// own inline initializer, e.g. `#prototypes: Map<BufferKind, object> = new Map();` — the
+/// generic key/value types live on the *field's* declared type, per `rust_type`'s `Map`/
+/// `WeakMap` case, not on this expression). `new TypeError(...)`/`new RangeError(...)` never
+/// reach here: those only ever appear directly under `throw`, handled by `emit_throw` instead.
+fn emit_new(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
+    let Expr::Ident(name) = callee else {
+        return Err(IrError::Unsupported {
+            file: String::new(),
+            construct: "`new` of a non-identifier constructor".into(),
+        });
+    };
+    if (name == "Map" || name == "WeakMap") && args.is_empty() {
+        return Ok(quote! { ::std::collections::HashMap::new() });
+    }
+    let Some(def) = class_def(name) else {
+        return Err(IrError::Unsupported {
+            file: String::new(),
+            construct: format!("`new {name}(...)` does not refer to a class declared in this module"),
+        });
+    };
+    let param_tys: Vec<Option<TypeRef>> =
+        def.constructor.as_ref().map(|c| c.params.iter().map(|p| p.ty.clone()).collect()).unwrap_or_default();
+    if args.len() != param_tys.len() {
+        return Err(IrError::Unsupported {
+            file: String::new(),
+            construct: format!("`new {name}(...)` called with {} args, expected {}", args.len(), param_tys.len()),
+        });
+    }
+    let mut arg_tokens = Vec::new();
+    for (arg, ty) in args.iter().zip(param_tys.iter()) {
+        let CallArg::Normal(expr) = arg else {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: "spread argument to a class constructor".into(),
+            });
+        };
+        let kind = ty.as_ref().map(arg_kind_for_type).unwrap_or(shims::ArgKind::Owned);
+        arg_tokens.push(emit_call_arg(expr, kind)?);
+    }
+    let class_ident = format_ident!("{name}");
+    Ok(quote! { #class_ident::new(#(#arg_tokens),*) })
+}
+
 fn emit_expr(expr: &Expr) -> Result<TokenStream, IrError> {
     match expr {
         Expr::Ident(name) => {
@@ -1105,8 +1852,13 @@ fn emit_expr(expr: &Expr) -> Result<TokenStream, IrError> {
             Ok(quote! { { #(#parts)* } })
         }
         Expr::Cast { expr, target } => emit_cast(expr, target),
+        Expr::NonNull(inner) => {
+            let tokens = emit_expr(inner)?;
+            Ok(quote! { (#tokens).unwrap() })
+        }
         Expr::HostIntrinsic { name, args } => emit_host_intrinsic(name, args),
         Expr::Closure(func) => emit_closure(func),
+        Expr::New { callee, args } => emit_new(callee, args),
         other => Err(IrError::Unsupported {
             file: String::new(),
             construct: format!("expression kind {other:?} is not yet covered by the Rust emitter"),
@@ -1130,12 +1882,40 @@ fn emit_template(parts: &[TemplatePart]) -> Result<TokenStream, IrError> {
 }
 
 fn emit_member(obj: &Expr, prop: &MemberProp) -> Result<TokenStream, IrError> {
+    // A field access on a known class instance (`this.#hooks`, `that.#records`, ...) — see
+    // `class_instance_obj`'s doc comment. Deliberately produces a *borrow* through the wrapper's
+    // `Rc<RefCell<Inner>>` (`self.inner.borrow().<field>`, no `.clone()`), not an owned value:
+    // every occurrence in the surveyed source is itself the *receiver* of a further call
+    // (`this.#hooks.byteLength(...)`, `this.#records.get(...)`), which needs a borrow, not a
+    // clone of the whole field — see `emit_call`'s and `emit_host_intrinsic`'s class-field-aware
+    // branches, which are what actually consume this. A borrow is valid Rust here because the
+    // temporary `Ref`/`RefMut` `.borrow()` returns lives for the rest of the enclosing statement,
+    // which is always enough for these single-statement/single-expression uses.
+    if let Some(field_name) = member_prop_field_name(prop)
+        && let Some((_, obj_tokens)) = class_instance_obj(obj)
+    {
+        let field_ident = format_ident!("{}", to_snake_case(field_name));
+        return Ok(quote! { #obj_tokens.inner.borrow().#field_ident });
+    }
     match prop {
+        // `jade-tenant-rt::BufferHooks::supports_shared_array_buffer` is a *method*
+        // (`fn(&self) -> bool`), unlike the TS `BufferHooks` interface's `readonly
+        // supportsSharedArrayBuffer: boolean` field it mirrors — a fixed, narrow shape mismatch
+        // between the two (every other `BufferHooks` member is already a method on both sides),
+        // special-cased directly since it's the only one.
+        MemberProp::Ident(field) if field == "supportsSharedArrayBuffer" => {
+            let obj_tokens = emit_expr(obj)?;
+            Ok(quote! { #obj_tokens.supports_shared_array_buffer() })
+        }
         MemberProp::Ident(field) => {
             let obj_tokens = emit_expr(obj)?;
             let field_ident = format_ident!("{}", to_snake_case(field));
             Ok(quote! { #obj_tokens.#field_ident })
         }
+        MemberProp::Private(_) => Err(IrError::Unsupported {
+            file: String::new(),
+            construct: "private field access on a receiver that isn't a recognized class instance".into(),
+        }),
         // A numeric-literal computed index (`args[0]`) is the one recognized computed-member
         // shape — every occurrence in the surveyed source indexes an apply/construct closure's
         // `&[T::Value]` arguments slice, which (unlike a real JS array) panics on an
@@ -1318,10 +2098,16 @@ fn emit_exotic_handler_literal(proto_expr: &Expr, props: &[ObjectProp]) -> Resul
         methods.push((spec, func));
     }
 
+    // Only names that are *actually* bound in the enclosing scope count as captures — a name
+    // referenced inside a trap's own body that's really a local the trap (or a closure nested
+    // inside it) declares for itself must not be treated as an outer capture just because
+    // `free_idents_in_expr` saw it referenced somewhere in the whole handler literal. Mirrors
+    // `emit_closure`'s own `outer_names ∩ referenced` intersection, for the same reason.
+    let outer_names: std::collections::HashSet<String> = LOCAL_REFNESS.with(|m| m.borrow().keys().cloned().collect());
     let captured: Vec<String> = {
         let mut set = std::collections::HashSet::new();
         free_idents_in_expr(&Expr::Object(props.to_vec()), &mut set);
-        let mut names: Vec<String> = set.into_iter().filter(|n| n != "tenant").collect();
+        let mut names: Vec<String> = set.into_iter().filter(|n| n != "tenant" && outer_names.contains(n)).collect();
         names.sort();
         names
     };
@@ -1334,11 +2120,38 @@ fn emit_exotic_handler_literal(proto_expr: &Expr, props: &[ObjectProp]) -> Resul
     });
     let struct_ident = format_ident!("ExoticHandler{n}");
 
+    // A captured name that's a known class instance (`that`, from `const that = this;`) needs
+    // that class's own wrapper type, not the default `T::Value` — see `class_instance_obj`'s doc
+    // comment on why capturing one is just an ordinary `.clone()` like any other captured value.
+    let captured_classes: HashMap<String, ClassDef> = captured
+        .iter()
+        .filter_map(|name| CLASS_INSTANCE_LOCALS.with(|m| m.borrow().get(name).cloned()).and_then(|c| class_def(&c)).map(|def| (name.clone(), def)))
+        .collect();
+    let needs_buffer_hooks = captured_classes.values().any(class_needs_buffer_hooks);
+    // `+ 'static` unconditionally on `T`, matching `class_generics`/`per_tenant_cache_generics`:
+    // a captured class instance is itself always `T: Tenant + 'static`, so a handler struct that
+    // holds one needs the same bound on its own `T`.
+    // `H: BufferHooks + 'static`, not just `BufferHooks`: `Box<dyn TenantExoticHandler<T>>`
+    // requires the concrete struct (and everything reachable through its own fields, including
+    // `H::Handle` transitively via a captured class instance) to be `'static` too.
+    let handler_generics = if needs_buffer_hooks {
+        quote! { T: Tenant + 'static, H: BufferHooks + 'static }
+    } else {
+        quote! { T: Tenant + 'static }
+    };
+    let handler_generic_args = if needs_buffer_hooks { quote! { T, H } } else { quote! { T } };
+
     let field_decls: Vec<TokenStream> = captured
         .iter()
         .map(|name| {
             let ident = format_ident!("{name}");
-            quote! { #ident: T::Value }
+            if let Some(class_def) = captured_classes.get(name) {
+                let class_ident = format_ident!("{}", class_def.name);
+                let (_, generic_args) = class_generics(class_def);
+                quote! { #ident: #class_ident<#generic_args> }
+            } else {
+                quote! { #ident: T::Value }
+            }
         })
         .collect();
     let field_inits: Vec<TokenStream> = captured
@@ -1382,7 +2195,13 @@ fn emit_exotic_handler_literal(proto_expr: &Expr, props: &[ObjectProp]) -> Resul
 
         let saved_coercion = RETURN_COERCION.with(|c| *c.borrow());
         RETURN_COERCION.with(|c| *c.borrow_mut() = ReturnCoercion::Trap(spec.returns));
+        // Every `TenantExoticHandler` trap method always returns `Result<_, TenantError>`,
+        // regardless of `CURRENT_FN_THROWS`'s value for whatever *enclosing* function/method
+        // this handler literal is being constructed inside of — see its doc comment.
+        let saved_fn_throws = CURRENT_FN_THROWS.with(|c| *c.borrow());
+        CURRENT_FN_THROWS.with(|c| *c.borrow_mut() = true);
         let body_result = emit_block(&func.body);
+        CURRENT_FN_THROWS.with(|c| *c.borrow_mut() = saved_fn_throws);
         RETURN_COERCION.with(|c| *c.borrow_mut() = saved_coercion);
         let mut body = body_result?;
         if spec.returns == TrapReturn::Void {
@@ -1424,8 +2243,8 @@ fn emit_exotic_handler_literal(proto_expr: &Expr, props: &[ObjectProp]) -> Resul
 
     Ok(quote! {
         {
-            struct #struct_ident<T: Tenant> { #(#field_decls),* }
-            impl<T: Tenant> TenantExoticHandler<T> for #struct_ident<T> {
+            struct #struct_ident<#handler_generics> { #(#field_decls),* }
+            impl<#handler_generics> TenantExoticHandler<T> for #struct_ident<#handler_generic_args> {
                 #(#impl_methods)*
             }
             tenant.make_exotic(#proto_tokens, Box::new(#struct_ident { #(#field_inits),* }))
@@ -1445,12 +2264,15 @@ fn coerce_trap_return_value(kind: TrapReturn, expr: &Expr, tokens: TokenStream) 
         // here — `emit_expr` already renders those as `tenant.null_value()`/`undefined_value()`,
         // correct for this exact position. Anything else is assumed already `T::Value`-shaped
         // (the common case: a tenant/shim call result, or a captured `T::Value` local).
-        TrapReturn::Value => match expr {
-            Expr::Lit(Lit::Str(_)) => quote! { tenant.string_value(&(#tokens)) },
-            Expr::Lit(Lit::Num(_)) => quote! { tenant.number_value(#tokens) },
-            Expr::Lit(Lit::Bool(_)) => quote! { tenant.boolean_value(#tokens) },
-            _ => tokens,
-        },
+        // `emit_expr` has no way to know a bare literal needs a `Tenant` constructor without
+        // knowing the surrounding context is `T::Value`-typed — see `coerce_literal_to_value`.
+        // `Lit::Null`/`Lit::Undefined` need no fixup here — `emit_expr` already renders those as
+        // `tenant.null_value()`/`undefined_value()`, correct for this exact position. A
+        // `byteLength` call needs the same numeric wrapping a bare literal does (see its own
+        // case); anything else is assumed already `T::Value`-shaped (the common case: a tenant/
+        // shim call result, or a captured `T::Value` local).
+        TrapReturn::Value if is_buffer_hooks_usize_returning_call(expr) => quote! { tenant.number_value(#tokens) },
+        TrapReturn::Value => coerce_literal_to_value(expr, tokens),
         // `emit_expr`'s `Lit::Null`/`Lit::Undefined` mapping produces a real guest value
         // (`tenant.null_value()`/`undefined_value()`) now, not Rust's `None` — correct for a
         // `T::Value`-returning position (`TrapReturn::Value` above), but this position's real
@@ -1655,6 +2477,25 @@ fn emit_array_literal(elements: &[ArrayElement]) -> Result<TokenStream, IrError>
 }
 
 fn emit_assign(target: &Expr, value: &Expr) -> Result<TokenStream, IrError> {
+    // A write to a known class instance's own field (`this.#hooks = hooks;`, `impl.ArrayBuffer =
+    // ...;`) — mutates through the wrapper's `Rc<RefCell<Inner>>` (`borrow_mut()`), and wraps in
+    // `Some(...)` for a field whose Rust type is `Option<_>` (every `?`/`!`-declared field — see
+    // `ClassField`'s doc comment; both are unset at construction, so both need the same wrapping
+    // on write, even though only `?` keeps reading back as `Option` afterward).
+    if let Expr::Member { obj, prop } = target
+        && let Some(field_name) = member_prop_field_name(prop)
+        && let Some((class_name, obj_tokens)) = class_instance_obj(obj)
+    {
+        let field = class_field_lookup(&class_name, field_name);
+        let field_ident = format_ident!("{}", to_snake_case(field_name));
+        let value_tokens = emit_expr(value)?;
+        let wrapped = if field.is_some_and(|f| f.optional || f.definite_assignment) {
+            quote! { Some(#value_tokens) }
+        } else {
+            value_tokens
+        };
+        return Ok(quote! { #obj_tokens.inner.borrow_mut().#field_ident = #wrapped });
+    }
     match target {
         Expr::Member { obj, prop: MemberProp::Ident(field) } if DESCRIPTOR_FIELDS.contains(&field.as_str()) => {
             let obj_tokens = emit_expr(obj)?;
@@ -1698,10 +2539,42 @@ fn emit_cond(test: &Expr, cons: &Expr, alt: &Expr) -> Result<TokenStream, IrErro
             }
         });
     }
+    // A ternary where one branch is a literal `undefined`/`null` and the other is itself
+    // `Option`-shaped on the Rust side (a `Map`/`WeakMap` `.get(...)` lookup — see
+    // `intrinsics::MAP_GET`) needs the *whole* ternary treated as `Option`-shaped too: the
+    // `undefined`/`null` branch must become `None`, not the ordinary guest `undefined`/`null`
+    // value `emit_expr`'s default `Lit::Undefined`/`Lit::Null` mapping produces (correct
+    // everywhere else) — see e.g. `array-buffer.ts`'s `BufferPrimordialImpl::record`, whose whole
+    // body is exactly this ternary.
+    if let Some((option_branch, literal_is_cons)) = option_shaped_ternary(cons, alt) {
+        let option_tokens = emit_expr(option_branch)?;
+        let test_tokens = emit_expr(test)?;
+        return Ok(if literal_is_cons {
+            quote! { (if #test_tokens { None } else { #option_tokens }) }
+        } else {
+            quote! { (if #test_tokens { #option_tokens } else { None }) }
+        });
+    }
     let test_tokens = emit_expr(test)?;
     let cons_tokens = emit_expr(cons)?;
     let alt_tokens = emit_expr(alt)?;
     Ok(quote! { (if #test_tokens { #cons_tokens } else { #alt_tokens }) })
+}
+
+/// If exactly one of `cons`/`alt` is a literal `undefined`/`null` and the other is a `Map`/
+/// `WeakMap` `.get(...)` lookup (`Option`-shaped on the Rust side), returns the non-literal
+/// branch and whether the *literal* one was `cons` (the `? ... :` branch, not the `: ...` one) —
+/// see `emit_cond`'s doc comment.
+fn option_shaped_ternary<'a>(cons: &'a Expr, alt: &'a Expr) -> Option<(&'a Expr, bool)> {
+    let is_undef_ish = |e: &Expr| matches!(e, Expr::Lit(Lit::Undefined) | Expr::Lit(Lit::Null));
+    let is_option_shaped = |e: &Expr| matches!(e, Expr::HostIntrinsic { name, .. } if *name == intrinsics::MAP_GET);
+    if is_undef_ish(cons) && is_option_shaped(alt) {
+        return Some((alt, true));
+    }
+    if is_option_shaped(cons) && is_undef_ish(alt) {
+        return Some((cons, false));
+    }
+    None
 }
 
 /// If `test` is `IDENT === null|undefined` or `IDENT !== null|undefined` for a known
@@ -1720,8 +2593,49 @@ fn option_narrow_cond<'a>(test: &Expr, cons: &'a Expr, alt: &'a Expr) -> Option<
     Some(if *op == BinOp::Eq { (name.clone(), cons, alt) } else { (name.clone(), alt, cons) })
 }
 
+/// A string/number/bool literal needs an explicit `Tenant` constructor whenever it flows into a
+/// `T::Value`-typed position — `emit_expr` has no way to know a bare `"foo"`/`5`/`true` literal
+/// needs `Tenant::string_value`/etc. without knowing the surrounding context expects a guest
+/// value. Shared by `coerce_trap_return_value` (a trap's own `return`) and `emit_bin`'s
+/// `args[N] ?? DEFAULT` handling (the `DEFAULT` fallback).
+fn coerce_literal_to_value(expr: &Expr, tokens: TokenStream) -> TokenStream {
+    match expr {
+        Expr::Lit(Lit::Str(_)) => quote! { tenant.string_value(&(#tokens)) },
+        Expr::Lit(Lit::Num(_)) => quote! { tenant.number_value(#tokens) },
+        Expr::Lit(Lit::Bool(_)) => quote! { tenant.boolean_value(#tokens) },
+        _ => tokens,
+    }
+}
+
 fn emit_bin(op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<TokenStream, IrError> {
     match op {
+        // `args[N] ?? DEFAULT` — `args[N]`'s own Rust translation already yields a *guest*
+        // `T::Value` that defaults to `undefined` for an out-of-bounds index (see `emit_member`'s
+        // doc comment on its computed-member fallback), not Rust's `None` — so the nullish check
+        // has to happen at the guest-value level (`Tenant::typeof_tag`), not via `Option::
+        // unwrap_or` (there is no `Option` here for that generic case to apply to).
+        BinOp::Nullish if matches!(lhs, Expr::Member { prop: MemberProp::Computed(idx), .. } if matches!(idx.as_ref(), Expr::Lit(Lit::Num(_)))) =>
+        {
+            let lhs_t = emit_expr(lhs)?;
+            let rhs_t = emit_expr(rhs)?;
+            // The fallback needs to end up a guest `T::Value` either way: a literal needs the
+            // usual `Tenant` constructor (`coerce_literal_to_value`), and a bare identifier that
+            // is itself a bare host `f64` (`F64_TYPED_LOCALS` — a `BufferHooks::byte_length`
+            // result, e.g. `args[1] ?? length`) needs the same `number_value` wrapping, just
+            // applied here instead of at its own `let` site (which also needs it to stay a plain
+            // `f64` for direct `Math.min`/`max` use).
+            let rhs_t = if matches!(rhs, Expr::Ident(name) if is_f64_typed(&to_snake_case(name))) {
+                quote! { tenant.number_value(#rhs_t) }
+            } else {
+                coerce_literal_to_value(rhs, rhs_t)
+            };
+            Ok(quote! {
+                {
+                    let __arg = #lhs_t;
+                    if matches!(tenant.typeof_tag(&__arg), ValueTag::Undefined | ValueTag::Null) { #rhs_t } else { __arg }
+                }
+            })
+        }
         BinOp::Nullish => {
             let lhs_t = emit_expr(lhs)?;
             let rhs_t = emit_expr(rhs)?;
@@ -1861,6 +2775,108 @@ fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
         && let [CallArg::Normal(proto_expr), CallArg::Normal(Expr::Object(props))] = args
     {
         return emit_exotic_handler_literal(proto_expr, props);
+    }
+
+    // A method call on a known class instance (`that.shell(tenant, ...)`, `impl.makeConstructor
+    // (tenant, ...)`) — resolved against that class's own `ClassMethod` list (see
+    // `class_instance_obj`). Every argument is passed per the *method's own* declared parameter
+    // type, the same convention `LOCAL_FN_PARAMS`'s branch below uses for top-level functions
+    // (including the bare `tenant` argument itself: `arg_kind_for_type` has no special case for
+    // it and falls through to `Owned`, which just emits the bare identifier — Rust's implicit
+    // reborrowing of an already-`&mut T` value in argument position makes that work correctly, as
+    // proven by every existing local-function-call site already doing exactly this).
+    if let Expr::Member { obj, prop: MemberProp::Ident(method) } = callee
+        && let Some((class_name, obj_tokens)) = class_instance_obj(obj)
+        && let Some(def) = class_def(&class_name)
+        && let Some(class_method) = def.methods.iter().find(|m| &m.name == method)
+    {
+        let method_ident = format_ident!("{}", to_snake_case(method));
+        let param_tys: Vec<Option<TypeRef>> = class_method.func.params.iter().map(|p| p.ty.clone()).collect();
+        if args.len() != param_tys.len() {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!("`{class_name}.{method}(...)` called with {} args, expected {}", args.len(), param_tys.len()),
+            });
+        }
+        let mut lets = Vec::new();
+        let mut arg_tokens = Vec::new();
+        for (i, (arg, ty)) in args.iter().zip(param_tys.iter()).enumerate() {
+            let CallArg::Normal(expr) = arg else {
+                return Err(IrError::Unsupported {
+                    file: String::new(),
+                    construct: format!("spread argument to `{class_name}.{method}(...)`"),
+                });
+            };
+            // A `BufferKind`-typed parameter fed a string literal (`that.shell(tenant, "array-
+            // buffer", ...)`) needs the enum variant, not the bare string `arg_kind_for_type`/
+            // `emit_call_arg` would otherwise pass through unchanged (neither knows about
+            // `TYPE_SHIMS`-mapped types at all — this mirrors `emit_eq_cmp`'s own
+            // `BUFFER_KIND_VARIANTS` lookup for the comparison case).
+            if matches!(ty, Some(TypeRef::Named(n)) if n == "BufferKind")
+                && let Some(variant) = buffer_kind_literal(expr)
+            {
+                arg_tokens.push(variant);
+                continue;
+            }
+            let kind = ty.as_ref().map(arg_kind_for_type).unwrap_or(shims::ArgKind::Owned);
+            let tokens = emit_call_arg(expr, kind)?;
+            // Same borrow-conflict hazard `tenant.<method>(...)` calls already hit (see
+            // `maybe_hoist_arg`'s own doc comment): an argument expression that itself borrows
+            // `tenant` (e.g. `that.#hooks.allocate(kind, toIndex(args[0] ?? 0))`, computed while
+            // `tenant` is already borrowed as this call's own leading argument) needs hoisting
+            // into its own statement first.
+            arg_tokens.push(maybe_hoist_arg(expr, tokens, i, &mut lets));
+        }
+        // Thread through whatever extra trailing parameter(s) `emit_class_method` injected into
+        // this method's own signature (a per-tenant-cache or cross-file-factory-cache argument
+        // the TS call site never passes) — see `CLASS_METHOD_EXTRA_ARGS`'s doc comment.
+        if let Some(extra) = CLASS_METHOD_EXTRA_ARGS.with(|m| m.borrow().get(&(class_name.clone(), method.clone())).cloned()) {
+            arg_tokens.extend(extra);
+        }
+        // Never `?`-suffixed: mirrors the local-function-call branch below — every call to a
+        // generator method in the surveyed source is wrapped in `TenantYield`, which already
+        // appends the `?`; a non-generator, non-throwing method (the only other kind observed so
+        // far) needs no `?` in the first place.
+        let call = quote! { #obj_tokens.#method_ident(#(#arg_tokens),*) };
+        return Ok(if lets.is_empty() { call } else { quote! { { #(#lets)* #call } } });
+    }
+
+    // A method call on a class field typed `BufferHooks` (`this.#hooks.byteLength(...)`,
+    // `that.#hooks.allocate(...)`) — the `H: BufferHooks` generic parameter's own trait methods,
+    // reached by borrowing the field mutably (every `BufferHooks` method takes `&mut self`).
+    if let Expr::Member { obj: field_obj, prop: MemberProp::Ident(method) } = callee
+        && let Expr::Member { obj: recv_obj, prop: recv_prop } = field_obj.as_ref()
+        && let Some(field_name) = member_prop_field_name(recv_prop)
+        && let Some((class_name, recv_tokens)) = class_instance_obj(recv_obj)
+        && let Some(field) = class_field_lookup(&class_name, field_name)
+        && matches!(&field.ty, TypeRef::Named(n) if n == "BufferHooks")
+    {
+        let Some(spec) = buffer_hooks_method(method) else {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!("`BufferHooks` has no recognized method `{method}`"),
+            });
+        };
+        if args.len() != spec.params.len() {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!("`BufferHooks.{method}(...)` called with {} args, expected {}", args.len(), spec.params.len()),
+            });
+        }
+        let field_ident = format_ident!("{}", to_snake_case(field_name));
+        let method_ident = format_ident!("{}", spec.rust_name);
+        let mut arg_tokens = Vec::new();
+        for (arg, kind) in args.iter().zip(spec.params.iter()) {
+            let CallArg::Normal(expr) = arg else {
+                return Err(IrError::Unsupported {
+                    file: String::new(),
+                    construct: "spread argument to a `BufferHooks` method call".into(),
+                });
+            };
+            arg_tokens.push(emit_buffer_hooks_arg(expr, *kind)?);
+        }
+        let call = quote! { #recv_tokens.inner.borrow_mut().#field_ident.#method_ident(#(#arg_tokens),*) };
+        return Ok(if spec.returns_usize { quote! { (#call).map(|v| v as f64) } } else { call });
     }
 
     if let Expr::Member { obj, prop: MemberProp::Ident(method) } = callee
@@ -2085,9 +3101,36 @@ fn emit_host_intrinsic(name: &str, args: &[Expr]) -> Result<TokenStream, IrError
             construct: format!("host intrinsic `{name}` has no Rust lowering registered"),
         });
     };
+    // `Map`/`WeakMap` accessor methods (`get`/`set`/`has`/`delete`) need two adjustments when
+    // the receiver (`args[0]`) is a class field: the field access must be a `borrow`/`borrow_mut`
+    // *through* the class wrapper rather than going through `emit_member`'s ordinary handling
+    // (which, for anything else, is either not a class field at all or is deliberately borrow-
+    // only already — see its own doc comment), with mutability matching whether this specific
+    // method mutates; and if the field's own declared type is a guest-value-keyed `Map`/`WeakMap`
+    // (`is_object_identity_map_type` — stored as `HashMap<T::ObjectId, V>`, see `rust_type`), the
+    // key argument (`args[1]`) needs `Tenant::object_id` conversion rather than a bare `&key`.
+    let is_map_method = [intrinsics::MAP_GET, intrinsics::MAP_SET, intrinsics::MAP_HAS, intrinsics::MAP_DELETE].contains(&name);
+    let needs_mut_receiver = name == intrinsics::MAP_SET || name == intrinsics::MAP_DELETE;
+    let receiver_field = args.first().and_then(|a| {
+        let Expr::Member { obj, prop } = a else { return None };
+        let field_name = member_prop_field_name(prop)?;
+        let (class_name, obj_tokens) = class_instance_obj(obj)?;
+        let field = class_field_lookup(&class_name, field_name)?;
+        Some((obj_tokens, field_name.to_string(), field))
+    });
+    let object_identity_key = is_map_method && receiver_field.as_ref().is_some_and(|(_, _, f)| is_object_identity_map_type(&f.ty));
     let mut rendered = spec.rust_template.to_string();
     for (i, arg) in args.iter().enumerate() {
-        let tokens = emit_expr(arg)?;
+        let tokens = if is_map_method && i == 0 && let Some((obj_tokens, field_name, _)) = &receiver_field {
+            let field_ident = format_ident!("{}", to_snake_case(field_name));
+            let borrow = if needs_mut_receiver { quote! { borrow_mut } } else { quote! { borrow } };
+            quote! { #obj_tokens.inner.#borrow().#field_ident }
+        } else if object_identity_key && i == 1 {
+            let ref_tokens = emit_call_arg(arg, shims::ArgKind::Ref)?;
+            quote! { tenant.object_id(#ref_tokens) }
+        } else {
+            emit_expr(arg)?
+        };
         rendered = rendered.replace(&format!("{{{i}}}"), &tokens.to_string());
     }
     rendered
@@ -2158,7 +3201,14 @@ fn emit_closure(func: &FnDecl) -> Result<TokenStream, IrError> {
         }
     });
 
-    let body = emit_block(&func.body)?;
+    // A closure's own signature is always hard-coded `Result`-returning below, regardless of
+    // whatever `CURRENT_FN_THROWS` says about the *enclosing* function/method — see
+    // `CURRENT_FN_THROWS`'s doc comment.
+    let saved_fn_throws = CURRENT_FN_THROWS.with(|c| *c.borrow());
+    CURRENT_FN_THROWS.with(|c| *c.borrow_mut() = true);
+    let body_result = emit_block(&func.body);
+    CURRENT_FN_THROWS.with(|c| *c.borrow_mut() = saved_fn_throws);
+    let body = body_result?;
 
     // A precise IR walk, *not* a text search over the emitted body: this closure's own generated
     // code routinely spells out Rust struct-literal field labels (`TenantInvocation::Apply {
@@ -2182,7 +3232,16 @@ fn emit_closure(func: &FnDecl) -> Result<TokenStream, IrError> {
         .iter()
         .map(|name| {
             let ident = format_ident!("{name}");
-            quote! { let #ident = #ident.clone(); }
+            // A `&str`-typed capture (e.g. `makeConstructor`'s own `name` parameter, captured by
+            // its throw-closure) needs `.to_string()`, not `.clone()`: cloning a `&str` produces
+            // another `&str` with the *same* borrowed lifetime, still not `'static` — exactly the
+            // shape of problem `tenant`/a per-tenant cache reference can't cross a closure
+            // boundary either, just for a borrowed string instead of a borrowed struct.
+            if is_string_typed(name) {
+                quote! { let #ident = #ident.to_string(); }
+            } else {
+                quote! { let #ident = #ident.clone(); }
+            }
         })
         .collect();
 
@@ -2351,9 +3410,12 @@ fn free_idents_in_expr(expr: &Expr, out: &mut std::collections::HashSet<String>)
             }
         }
         Expr::Closure(func) => free_idents_in_fn(func, out),
-        Expr::TenantYield(e) | Expr::Un { arg: e, .. } | Expr::Spread(e) | Expr::Paren(e) | Expr::Cast { expr: e, .. } => {
-            free_idents_in_expr(e, out)
-        }
+        Expr::TenantYield(e)
+        | Expr::Un { arg: e, .. }
+        | Expr::Spread(e)
+        | Expr::Paren(e)
+        | Expr::Cast { expr: e, .. }
+        | Expr::NonNull(e) => free_idents_in_expr(e, out),
         Expr::Bin { lhs, rhs, .. } => {
             free_idents_in_expr(lhs, out);
             free_idents_in_expr(rhs, out);
@@ -2479,7 +3541,10 @@ export function* makeSmokeExotic(tenant: Tenant, proto: object): TenantGenerator
     #[test]
     fn generates_a_real_trait_impl() {
         let rust = emit();
-        assert!(rust.contains("impl < T : Tenant > TenantExoticHandler < T > for"), "{rust}");
+        // `+ 'static` on `T` here unconditionally now (not just when a captured class instance
+        // needs it) — `Box<dyn TenantExoticHandler<T>>` always requires the concrete handler
+        // struct to be `'static`; see `emit_exotic_handler_literal`'s `handler_generics`.
+        assert!(rust.contains("impl < T : Tenant + 'static > TenantExoticHandler < T > for"), "{rust}");
         assert!(rust.contains("fn get_own_property_descriptor"), "{rust}");
     }
 

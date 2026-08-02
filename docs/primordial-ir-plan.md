@@ -108,14 +108,76 @@
   7 `*.e2e.ts` suites (not just `tsc`, which turns out to be blind to this class of regression —
   see the gap note's new "TS-side class refactor" section for why: every `yield tenant.yieldTenant
   (...)` expression is typed `any` throughout this codebase, so a wrong-arity method call on a
-  `yield`-derived value silently type-checks). **Not yet done:** the `class`-lowering IR/Rust
-  capability itself (fields, constructor, methods, `Rc<RefCell<Inner>>` + inherent-`impl`
-  codegen, method-call-on-instance emission) — this is now the single remaining piece for both
-  `array-buffer.ts`/`typed-arrays.ts` and `proxy.ts`.
-- **Not started:** `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`, `realm.ts`.
-  Paused deliberately, same discipline: no closure-capture-model or `Tenant`/new-hand-authored-
-  trait changes until the gap note's remaining items are acted on. `proxy.ts` will need
-  `functionPrimordial` wired the same way `object.ts` was for `function.ts`.
+  `yield`-derived value silently type-checks).
+- **`class`-lowering itself (IR node, `swc`-AST lowering, and Rust codegen) is done, and
+  `array-buffer.ts` generates real, compiling Rust end to end** — the single largest remaining
+  piece of the whole plan. `ir.rs` gained `Item::ClassDef`/`ClassField`/`ClassMethod`,
+  `MemberProp::Private`, and `Expr::NonNull` (a real node now, not silently erased — see below).
+  `lower.rs` gained `lower_class` (constructor/field/method extraction from `swc`'s `ast::Class`,
+  rejecting `extends`/statics/accessors/decorators) and a general rule that any method-shaped
+  interface (not just the hand-carved `BufferHooks` case) is erased at lowering, trusting a
+  same-module class to back it. `emit_rust.rs` gained `emit_class_def`/`emit_class_method`: every
+  class becomes `#[derive(Clone)]`-free `Rc<RefCell<Inner>>` wrapper + inherent `impl` (a
+  hand-written `Clone` doing `Rc::clone`, matching the existing struct convention), every method
+  takes `&self` (never `&mut self` — mutation goes through the shared `RefCell`), a constructor
+  is parsed as a flat `this.#field = expr;` sequence and turned into one `Inner` struct literal
+  (no incremental-construction placeholder needed), and `const that = this;` (the `self`-capture
+  idiom nested closures use to call back into the instance) is just `let that = self.clone();` —
+  a cheap `Rc::clone` that `emit_closure`'s *existing* per-capture clone-prelude mechanism already
+  handles for free once `class_instance_obj` tells it a captured name is a class instance, not a
+  bare `T::Value`. New `emit_call` branches: method calls on a known class instance
+  (`that.shell(...)`), and method calls on a `BufferHooks`-typed class *field*
+  (`that.#hooks.byteLength(...)`, borrowed mutably through the field, per `BUFFER_HOOKS_METHODS`'
+  own arg/return conventions — distinct from `shims::ArgKind` since `BufferHooks`' byte offsets
+  are `f64` in TS but `usize` on the hand-written trait's own side).
+  Getting one real class (`BufferPrimordialImpl`) through the *whole* pipeline surfaced far more
+  pre-existing gaps than the class mechanism itself — every one newly exposed because no prior
+  IR-lowered file had exercised the shape, not introduced by this work: `Math.min`/`Math.max`
+  were never actually recognized by `lower_call` despite `intrinsics.rs` having table entries for
+  them; `TsNonNull` (`EXPR!`) was silently *erased* at lowering rather than represented, which
+  happened to be fine everywhere it was previously used but breaks the moment the asserted
+  expression is genuinely `Option`-shaped on the Rust side (a `Map`/`WeakMap` `.get(...)`) — now a
+  real `Expr::NonNull` node, `.unwrap()` in Rust, `!` in TS; a ternary with one `undefined`/`null`
+  literal branch and one `Map`/`WeakMap`-lookup branch needs the *whole* ternary treated as
+  `Option`-shaped (`None`/the lookup, not `tenant.undefined_value()`/the lookup — a real type
+  mismatch otherwise); `args[N] ?? DEFAULT` needs a guest-value-level nullish check
+  (`Tenant::typeof_tag`), not `Option::unwrap_or` — `args[N]`'s own Rust translation already
+  defaults out-of-bounds to a guest `undefined`, never a Rust `None`; `Stmt::Return` always
+  wrapped in `Ok(...)`, correct for every function/closure/trap emitted so far only because every
+  one of them happened to be fallible — a plain non-generator, non-throwing method
+  (`prototypeOf`) is the first counterexample, fixed via a new `CURRENT_FN_THROWS` context;
+  `Map`'s `.insert(...)` moved its value argument, breaking `makeConstructor`'s `this.#prototypes
+  .set(kind, proto);` followed by still reading `proto` afterward — `MAP_SET`'s template now
+  clones; a `&str` parameter (`makeConstructor`'s own `name`) captured into a nested `make_builtin`
+  closure needs `.to_string()`, not `.clone()` (cloning a reference produces another reference,
+  still not `'static`) — the exact same "can't capture a non-`'static` value across a `move`
+  closure boundary" problem `tenant` itself already has a solution for, just for a borrowed string
+  instead; and three more `Rc<RefCell<...>>`-specific gaps needing real design decisions, not just
+  bug fixes: a `Map`/`WeakMap` field keyed by a guest value needs `HashMap<T::ObjectId, V>` (`Tenant
+  ::object_id`-converted keys, via a new `is_object_identity_map_type` check — `BufferKind`-keyed
+  maps stay a plain `HashMap<BufferKind, V>`, no conversion, since `BufferKind: Hash` now); a
+  generated `interface`-struct's own generic parameters became conditional (`struct_generics`) —
+  `BufferRecord`'s `handle: BufferHandle` needs `H: BufferHooks`, not the `T: Tenant` every prior
+  struct needed, and some future struct needing neither is now representable as parameter-free
+  rather than forced into an unconditional (and, for it, meaningless) `<T>`; and `Box<dyn
+  TenantExoticHandler<T>>`/nested `'static` closures capturing a class instance need `H: BufferHooks
+  + 'static` (not just `BufferHooks`) wherever that class's own generics appear (the exotic-handler
+  struct, the per-tenant-cache struct, `emit_fn_decl`'s injected generics) — `T: Tenant + 'static`
+  was already unconditional for exactly this reason; the exotic-handler struct itself just hadn't
+  needed it before now that it can hold a class instance.
+  Two small TS-source adjustments made the translation clean rather than fighting the emitter
+  around edge cases: the `this`-capture idiom is spelled `const that = this;`, not `const self =
+  this;` (`self` cannot be used as an ordinary Rust field/binding name — it's a reserved keyword
+  that, unlike most others, has no raw-identifier escape); and `shell` takes `objectPrototype` as
+  an explicit parameter instead of calling `objectPrimordial(tenant)` itself, since `shell`
+  recurses into itself from *inside* a `make_builtin` closure and a per-tenant-cache reference
+  can't cross that `'static` boundary any more than `tenant` itself can (both of `shell`'s call
+  sites already had the value in scope, so this cost nothing semantically).
+- **`typed-arrays.ts`, `proxy.ts`, `promise.ts`, `realm.ts`: not started.** `typed-arrays.ts` is
+  next (check its own `create` closure for the same self-reference pattern `array-buffer.ts`'s
+  `shell` had, per the gap note), then `proxy.ts` (refactor `ProxyState` into a class the same
+  way, reusing everything landed here — `functionPrimordial` needs wiring the same way `object.ts`
+  was for `function.ts` first).
 
 ### Shimmed modules (a correction to the original plan)
 

@@ -60,7 +60,74 @@ fn emit_item(out: &mut String, item: &Item, level: usize) {
             emit_fn_decl(out, func, level);
             out.push('\n');
         }
+        Item::ClassDef(def) => {
+            emit_class_def(out, def, level);
+            out.push('\n');
+        }
     }
+}
+
+fn emit_class_def(out: &mut String, def: &ClassDef, level: usize) {
+    out.push_str(&format!("class {}", def.name));
+    if !def.implements.is_empty() {
+        out.push_str(" implements ");
+        out.push_str(&def.implements.join(", "));
+    }
+    out.push_str(" {\n");
+    for field in &def.fields {
+        indent(out, level + 1);
+        if field.is_private {
+            out.push('#');
+        }
+        out.push_str(&field.name);
+        if field.definite_assignment {
+            out.push('!');
+        }
+        if field.optional {
+            out.push('?');
+        }
+        out.push_str(": ");
+        out.push_str(&emit_type_ref(&field.ty));
+        if let Some(init) = &field.init {
+            out.push_str(" = ");
+            emit_expr(out, init, level + 1);
+        }
+        out.push_str(";\n");
+    }
+    if let Some(ctor) = &def.constructor {
+        out.push('\n');
+        indent(out, level + 1);
+        out.push_str("constructor(");
+        emit_params(out, &ctor.params);
+        out.push_str(") {\n");
+        emit_block(out, &ctor.body, level + 2);
+        indent(out, level + 1);
+        out.push_str("}\n");
+    }
+    for method in &def.methods {
+        out.push('\n');
+        indent(out, level + 1);
+        if method.is_private {
+            out.push('#');
+        }
+        if method.func.is_generator {
+            out.push('*');
+        }
+        out.push_str(&method.name);
+        out.push('(');
+        emit_params(out, &method.func.params);
+        out.push(')');
+        if let Some(ret) = &method.func.return_type {
+            out.push_str(": ");
+            out.push_str(&emit_type_ref(ret));
+        }
+        out.push_str(" {\n");
+        emit_block(out, &method.func.body, level + 2);
+        indent(out, level + 1);
+        out.push_str("}\n");
+    }
+    indent(out, level);
+    out.push('}');
 }
 
 fn emit_fn_decl(out: &mut String, func: &FnDecl, level: usize) {
@@ -309,6 +376,7 @@ fn emit_expr(out: &mut String, expr: &Expr, level: usize) {
             emit_expr(out, obj, level);
             match prop {
                 MemberProp::Ident(name) => out.push_str(&format!(".{name}")),
+                MemberProp::Private(name) => out.push_str(&format!(".#{name}")),
                 MemberProp::Computed(e) => {
                     out.push('[');
                     emit_expr(out, e, level);
@@ -381,6 +449,10 @@ fn emit_expr(out: &mut String, expr: &Expr, level: usize) {
             emit_expr(out, expr, level);
             out.push_str(" as ");
             out.push_str(&emit_type_ref(target));
+        }
+        Expr::NonNull(inner) => {
+            emit_expr(out, inner, level);
+            out.push('!');
         }
         Expr::Sequence(exprs) => {
             out.push('(');

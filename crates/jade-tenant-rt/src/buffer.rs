@@ -20,7 +20,7 @@
 use crate::TenantError;
 
 /// Mirrors `array-buffer.ts`'s `BufferKind` (`"array-buffer" | "shared-array-buffer"`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BufferKind {
     ArrayBuffer,
     SharedArrayBuffer,
