@@ -28,7 +28,7 @@ export interface PrimordialRealm {
   promiseRuntime: PromiseRuntime;
   ArrayBuffer?: Function;
   SharedArrayBuffer?: Function;
-  typedArrays: Readonly<Partial<Record<TypedArrayKind, Function>>>;
+  typedArrays: ReadonlyMap<TypedArrayKind, Function>;
 }
 
 /** Assemble a tenant-owned global explicitly; no host global is consulted. */
@@ -44,7 +44,7 @@ export function* createPrimordialRealm(
   const globalThis = yield tenant.yieldTenant(tenant.make(object.ObjectPrototype));
   const realm: PrimordialRealm = {
     globalThis, Object: object.Object, Function: functions.Function, Reflect: reflect.Reflect,
-    Proxy: proxy.Proxy, Promise: promises.Promise, promiseRuntime: promises.promiseRuntime, typedArrays: {},
+    Proxy: proxy.Proxy, Promise: promises.Promise, promiseRuntime: promises.promiseRuntime, typedArrays: new Map(),
   };
   for (const [key, value] of Object.entries({
     Object: realm.Object, Function: realm.Function, Reflect: realm.Reflect, Proxy: realm.Proxy,
@@ -60,7 +60,7 @@ export function* createPrimordialRealm(
     }
     const typed = yield tenant.yieldTenant(typedArraysPrimordial(tenant, options.buffers, options.typedArrays));
     realm.typedArrays = typed.constructors;
-    for (const [key, value] of Object.entries(typed.constructors)) {
+    for (const [key, value] of typed.constructors) {
       yield tenant.yieldTenant(defineData(tenant, globalThis, key, value));
     }
   }

@@ -248,7 +248,13 @@ fn class_instance_obj(obj: &Expr) -> Option<(String, TokenStream)> {
 fn type_needs_tenant(ty: &TypeRef) -> bool {
     match ty {
         TypeRef::Named(n) => {
-            matches!(n.as_str(), "object" | "Function" | "unknown") || STRUCT_DEFS.with(|d| d.borrow().contains_key(n))
+            matches!(n.as_str(), "object" | "Function" | "unknown")
+                || STRUCT_DEFS.with(|d| d.borrow().contains_key(n))
+                // A field typed as a method-shaped interface backed by a same-module class (e.g.
+                // `#buffers: BufferPrimordial`, backed by `BufferPrimordialImpl<T, H>`) needs `T`
+                // too, the same as a direct struct reference — `class_backing_interface` is
+                // `rust_type`'s own resolution path for exactly this case.
+                || class_backing_interface(n).is_some()
         }
         TypeRef::Generic { args, .. } => args.iter().any(type_needs_tenant),
         TypeRef::Optional(inner) | TypeRef::Array(inner) => type_needs_tenant(inner),
@@ -259,7 +265,14 @@ fn type_needs_tenant(ty: &TypeRef) -> bool {
 /// `BufferHandle` type alias) — the `H: BufferHooks` analogue of `type_needs_tenant`.
 fn type_needs_buffer_hooks(ty: &TypeRef) -> bool {
     match ty {
-        TypeRef::Named(n) => n == "BufferHandle" || n == "BufferHooks",
+        // Same reasoning as `type_needs_tenant`'s `class_backing_interface` case: a field typed
+        // as an interface backed by a class that itself needs `H` (e.g. `#buffers:
+        // BufferPrimordial`, backed by `BufferPrimordialImpl<T, H>`) needs `H` too.
+        TypeRef::Named(n) => {
+            n == "BufferHandle"
+                || n == "BufferHooks"
+                || class_backing_interface(n).and_then(|c| class_def(&c)).is_some_and(|def| class_needs_buffer_hooks(&def))
+        }
         TypeRef::Generic { args, .. } => args.iter().any(type_needs_buffer_hooks),
         TypeRef::Optional(inner) | TypeRef::Array(inner) => type_needs_buffer_hooks(inner),
     }

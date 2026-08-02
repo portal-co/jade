@@ -48,7 +48,7 @@ for (const tenant of [new MultiTenant(), single_tenant] as const) {
   })) as object;
   assert(drive(tenant, tenant.get(buffer, "byteLength")) === 8, "ArrayBuffer shell uses explicit native hook capability");
   const typed = drive(tenant, typedArraysPrimordial(tenant, nativeBufferHooks, ["Uint8Array"]));
-  const Uint8ArrayCtor = typed.constructors.Uint8Array;
+  const Uint8ArrayCtor = typed.constructors.get("Uint8Array")!;
   const array = drive(tenant, tenant.invoke(Uint8ArrayCtor, { kind: "construct", newTarget: Uint8ArrayCtor, args: [2] })) as object;
   drive(tenant, tenant.set(array, "0", 255));
   assert(drive(tenant, tenant.get(array, "0")) === 255, "typed array indexes go through BufferHooks");
