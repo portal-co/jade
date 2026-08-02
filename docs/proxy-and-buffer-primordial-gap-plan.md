@@ -2,17 +2,53 @@
 
 ## Status
 
-Design only — no code changes. Written after actually reading all three files in full and
-tracing exactly which new IR/emitter constructs each would need, the same way
-`docs/array-primordial-gap-plan.md` was written before that gap was closed (see
-`docs/primordial-ir-plan.md`'s "Progress" section for the object.ts→reflect.ts run that produced
-this note). `object.ts`/`function.ts`/`reflect.ts` are done: fully IR-lowered, generated, wired
-into `jade-primordial-rt`'s module tree, and behavior-tested. This note covers the next three
-files, which are qualitatively harder than anything covered so far — do not start extending
-`jade-tenant-rt::Tenant` or the closure-capture model until a follow-up session picks a scope
-from this note and it's signed off, same discipline as the previous gap note.
+`object.ts`/`function.ts`/`reflect.ts` are done: fully IR-lowered, generated, wired into
+`jade-primordial-rt`'s module tree, and behavior-tested. The shared capability below (item 1)
+is now **done and tested** too — see its own status note. The rest of this file's plan (items 2
+and 3: the `BufferHooks` shim, and `proxy.ts`'s harder problems) is still design-only; do not
+start extending `jade-tenant-rt::Tenant` or the closure-capture model for those until a follow-up
+session picks a scope and it's signed off, same discipline as before.
 
-## One capability all three files need: `TenantExoticHandler` from an object literal
+## One capability all three files need: `TenantExoticHandler` from an object literal — DONE
+
+**Implemented and tested** (`emit_exotic_handler_literal` in `crates/jade-primordial-ir/src/
+emit_rust.rs`, plus 6 regression tests in that file's own `#[cfg(test)]` module). Recognizes
+`tenant.makeExotic(proto, { *get(...) {...}, ... })` and generates a real struct + `impl
+TenantExoticHandler<T> for GeneratedStruct<T>`, exactly as proposed below — confirmed to compile
+as real Rust (verified by temporarily dropping generated output into `jade-primordial-rt` and
+running `cargo build`, then removed once confirmed; the permanent regression coverage is the
+text-assertion unit tests, since this crate has no downstream compilation target of its own).
+
+Three real bugs surfaced only by actually compiling the output, all now fixed:
+- **`emit_expr`'s `Lit::Undefined`/`Lit::Null` mapping had changed** (earlier in this same
+  session) from `None` to `tenant.undefined_value()`/`tenant.null_value()` — correct for a
+  `T::Value`-returning position, wrong for `getOwnPropertyDescriptor`'s real `Option<
+  TenantPropertyDescriptor<T::Value>>` return type. Fixed via a new `RETURN_COERCION` thread-local
+  context (`ReturnCoercion::Closure` vs `ReturnCoercion::Trap(TrapReturn)`) that `Stmt::Return`'s
+  emission consults, since `coerce_return_value` (built for `make_builtin`-style closures, always
+  `T::Value`) and each exotic trap's *own*, trap-specific return type are genuinely different
+  coercion rules sharing the same `emit_block`/`emit_stmt` code path.
+- **A captured free variable** (`proto` in the example below) **needs a `self.<field>`
+  shadow-clone prelude**, the same idiom `emit_closure` already uses for its own captures —
+  the original object-literal method body references it as a bare identifier (lexical capture,
+  free in TS), but in the generated struct it only exists as `self.proto`.
+- **`PropertyKey` has no `PartialEq<str>` impl** — `key === "byteLength"`-style comparisons
+  (extremely common in these traps) need the string literal converted via `PropertyKey::from
+  (...)` first. New `PROPERTY_KEY_TYPED_LOCALS` tracking (mirroring the existing
+  `STRING_TYPED_LOCALS`), populated for each trap's own `key`-named parameter.
+
+**Known simplification, unchanged from the original proposal below:** every captured field
+defaults to `T::Value`. Fine for a captured `T::Value` (proven — see the smoke-test example in
+`emit_rust.rs`'s test module); wrong for `array-buffer.ts`'s real `records`/`hooks` captures,
+which are a map and an embedder-capability parameter respectively — real type inference this
+emitter still doesn't have. A wrong field type is a loud, immediate compile error at the
+generated struct-literal construction site, never a silent miscompile.
+
+**Scoped to `tenant.makeExotic` only** (not `makeCallableExotic`) — no primordial's own object
+literal needs a callable exotic; every callable exotic in the surveyed source already goes
+through `make_builtin`'s hand-written `BuiltinHandler`.
+
+### Original proposal (implemented as described)
 
 `proxy.ts`'s `native`, `array-buffer.ts`'s buffer shell, and `typed-arrays.ts`'s typed-array
 records all follow the exact same TS idiom:
@@ -70,6 +106,21 @@ closures, but producing struct fields instead of a clone-prelude).
    in Rust (clone the `Rc` handle, not the data) — but this needs real analysis (which locals are
    captured-and-mutated vs. captured-and-read-only) that doesn't exist yet, and changes the
    closure-capture model for every future file, not just this one.
+   **Proposed direction (not yet built):** sidestep the analysis entirely by changing the *source*
+   instead of building mutation inference — rewrite `ProxyState` in `proxy.ts` itself from a plain
+   `type` alias into a real `class` with `#private` fields (`#target`, `#handler`, `#revoked`) and
+   methods (`requireLive()`, `revoke()`) implementing a small interface. This makes the Rust
+   translation mechanical rather than analytical: a class is always reference-shared in real JS
+   (unlike a plain object literal treated as a value-like record so far), so *every* class
+   instance becomes `Rc<RefCell<Inner>>` uniformly, with no per-field mutation analysis needed —
+   `readonly` vs. plain fields (already exposed by `swc_ecma_ast`'s `ClassProp::readonly`) is
+   enough to know which fields even need the `RefCell`, not whether the *instance itself* needs
+   `Rc` sharing (it always does, once it's a class). This requires adding `class` lowering to the
+   IR (fields, constructor, methods, `#private` — encoding the whole class as a unit is fine even
+   though `#private` field *references from outside the class* are a hard rejection elsewhere in
+   this codebase, per `tenant_inline.rs`'s precedent, because nothing here splices the class body
+   out to a different scope) — a real, scoped new capability, but one with a mechanical target
+   representation instead of an open-ended inference problem.
 2. **A discriminated union type alias.** `type TrapResult = { found: false } | { found: true;
    value: unknown };`, returned by the local generator closure `trap(name, args)` and consumed via
    `result.found ? result.value : ...`. The natural Rust translation is an enum
@@ -114,17 +165,47 @@ IR-lowered/generated targets — only the concrete native adapter is hand-writte
 hand-port the same way, or to fold into the same `BufferHooks`-adjacent shim module — a
 naming/placement detail to decide when this is picked up, not a design blocker.
 
+## Newly discovered: `array-buffer.ts`'s `shell`/`constructor` are self-referential local closures
+
+Found while actually designing (1)'s follow-on — not previously flagged. `bufferPrimordial`'s
+`shell`/`constructor` are `const`-bound local generator closures with **arbitrary signatures**
+(`shell(kind, handle)`, not the fixed apply/construct 2-param convention `emit_closure` currently
+hard-assumes), and — the real problem — `shell` references **itself** from within a nested
+closure it constructs (the `"slice"` builtin installed inside its own `get` trap calls `shell(...)`
+again). A plain Rust closure can't do this: `let shell = |...| { ...shell(...)... };` doesn't
+compile — the closure captures at construction time, before its own binding exists.
+
+The clean fix is **not** a self-referential-closure trick (`Rc<RefCell<Option<Box<dyn FnMut>>>>`
+and friends) but a representational change: `bufferPrimordial`'s whole body — its captured
+mutable state (`records`, `prototypes`, `result`) plus its two interacting local closures — is
+structurally a local **struct with inherent methods** (`struct BufferPrimordialBuilder<T, H> {
+hooks: H, records: HashMap<...>, prototypes: HashMap<BufferKind, T::Value> }`, with `shell`/
+`constructor` as `fn shell(&mut self, tenant: &mut T, kind, handle) -> ... { ...
+self.shell(tenant, ...) ... }`), since methods can call themselves/each other via `self.method
+(...)` with none of a closure's self-reference problem. This is a real, if scoped, generalization
+beyond arbitrary-signature closures alone: recognizing "this function has multiple co-referencing
+local generator closures sharing captured state" and restructuring the whole function into a
+struct+impl, not just widening `emit_closure`'s parameter handling.
+
+This affects the recommended order below: (2) (`BufferHooks` shim) is necessary but **not
+sufficient** to fully generate `array-buffer.ts` — the struct-ification above is a separate,
+comparably-sized piece of work, worth scoping on its own once (2) is landed and the *remaining*
+gap is visible in isolation. `typed-arrays.ts` should be checked against the same pattern before
+assuming it's simpler (not yet re-verified since this finding).
+
 ## Recommended order for whoever picks this up
 
-1. Build the shared `TenantExoticHandler`-from-object-literal codegen first (tractable, no open
-   design questions, unblocks real (partial) progress on all three files).
+1. ~~Build the shared `TenantExoticHandler`-from-object-literal codegen first~~ **Done** — see
+   above.
 2. Author `jade-tenant-rt::BufferHooks` + hand-port `nativeBufferHooks`/`codecs` as shims, the
-   same relationship `types_shim.rs` has to `types.ts`. This plus (1) should be enough to fully
-   generate `array-buffer.ts` and `typed-arrays.ts`.
-3. `proxy.ts` last: needs (1) plus generalized arbitrary-signature closure emission, tuple
-   types/holey array destructuring, discriminated-union-as-enum type aliases, and a real decision
-   on `Rc<RefCell<...>>`-style shared-mutable capture detection — likely worth its own follow-up
-   note once (1) and (2) have proven out the object-literal-handler codegen in practice.
+   same relationship `types_shim.rs` has to `types.ts`.
+3. Design and build the local-struct-ification described above for `bufferPrimordial`'s
+   `shell`/`constructor` (and check `typedArraysPrimordial` against the same pattern). (2) + (3)
+   together should be enough to fully generate `array-buffer.ts` and `typed-arrays.ts`.
+4. `proxy.ts` last: needs generalized arbitrary-signature closure emission (partially motivated by
+   (3) above too), tuple types/holey array destructuring, discriminated-union-as-enum type
+   aliases, and a real decision on `Rc<RefCell<...>>`-style shared-mutable capture detection —
+   likely worth its own follow-up note once (2) and (3) have proven out in practice.
 
 ## Explicitly not proposed here
 

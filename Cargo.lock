@@ -2460,132 +2460,116 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[patch.unused]]
-name = "ephemera"
+name = "portal-pc-asm-common"
+version = "0.1.1"
+
+[[patch.unused]]
+name = "px-wsdom-axum"
+version = "0.0.6"
+
+[[patch.unused]]
+name = "os-abi-codegen"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "vaffle"
+name = "os-abi-spec"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-c-backend"
+name = "os-abi-stubs"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-common"
+name = "os-async"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-compiler"
+name = "os-build"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-compiler-common"
+name = "os-codesign-macho"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-compiler-passes"
+name = "os-ctx"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-dyn"
+name = "os-daemon"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-ir"
+name = "os-daemon-hook"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-ir-common"
+name = "os-daemon-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-ir-lir-target"
+name = "os-host-api"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-ir-passes"
+name = "os-linux-wasi"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-lir"
+name = "os-page"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-lir-codegen"
+name = "os-page-codegen"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-primitives"
+name = "os-rewrite-elf"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-provenance"
+name = "os-rewrite-macho"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-spec"
+name = "os-syscall-emit"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-spec-dyn"
+name = "os-target-core"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-vaffle-target"
+name = "os-target-native"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "volar-weaver"
+name = "os-target-wax"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "ast-traits"
+name = "os-transform-core"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "register-machine-traits"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "sift-trait"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "siftify"
+name = "pit-gen"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "ssa-canon"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-cc"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-pliron-compat"
+name = "pit-lang-generic"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "ssa-rust"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "ssa-trace"
+name = "pit-rust-generic"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "ssa-translation"
-version = "0.2.3"
+name = "rv-asm"
+version = "0.2.1"
 
 [[patch.unused]]
-name = "tac-traits"
-version = "0.2.3"
-
-[[patch.unused]]
-name = "type-onion"
-version = "0.2.3"
+name = "portal-solutions-sdk"
+version = "0.0.2"
 
 [[patch.unused]]
 name = "dex-bytecode"
@@ -2668,8 +2652,52 @@ name = "yecta"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "portal-pc-asm-common"
-version = "0.1.1"
+name = "ast-traits"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "register-machine-traits"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "sift-trait"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "siftify"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ssa-canon"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "ssa-cc"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "ssa-pliron-compat"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ssa-rust"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "ssa-trace"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ssa-translation"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "tac-traits"
+version = "0.2.3"
+
+[[patch.unused]]
+name = "type-onion"
+version = "0.2.3"
 
 [[patch.unused]]
 name = "portal-solutions-asm-aarch64"
@@ -2760,19 +2788,111 @@ name = "dreamcompiler-minibc-interp"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "ephemera"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vaffle"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-c-backend"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-common"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-compiler"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-compiler-common"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-compiler-passes"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-dyn"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-common"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-lir-target"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-passes"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-lir"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-lir-codegen"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-primitives"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-provenance"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-spec"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-spec-dyn"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-vaffle-target"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-weaver"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "portal-jsc-generator"
+version = "0.8.0-pre.10"
+
+[[patch.unused]]
+name = "portal-jsc-simpl-js"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
+name = "portal-jsc-swc-opt-ssa"
+version = "0.8.0-pre.11"
+
+[[patch.unused]]
 name = "pit-core"
 version = "0.5.0-alpha.1"
 
 [[patch.unused]]
-name = "pit-gen"
+name = "wax-core"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-lang-generic"
+name = "wax-meta"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "pit-rust-generic"
+name = "wax-tags"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -2824,129 +2944,9 @@ name = "portal-pc-waffle-passes-shared"
 version = "0.6.0-alpha.1"
 
 [[patch.unused]]
-name = "os-abi-codegen"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-abi-spec"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-abi-stubs"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-async"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-build"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-codesign-macho"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-ctx"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-daemon"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-daemon-hook"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-daemon-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-host-api"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-linux-wasi"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-page"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-page-codegen"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-rewrite-elf"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-rewrite-macho"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-syscall-emit"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-target-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-target-native"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-target-wax"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "os-transform-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "rv-asm"
-version = "0.2.1"
-
-[[patch.unused]]
 name = "embedded-llm"
 version = "0.1.0"
 
 [[patch.unused]]
 name = "embedded-llm-tools"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "px-wsdom-axum"
-version = "0.0.6"
-
-[[patch.unused]]
-name = "wax-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "wax-meta"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "wax-tags"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "portal-jsc-generator"
-version = "0.8.0-pre.10"
-
-[[patch.unused]]
-name = "portal-jsc-simpl-js"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-jsc-swc-opt-ssa"
-version = "0.8.0-pre.11"
-
-[[patch.unused]]
-name = "portal-solutions-sdk"
-version = "0.0.2"

@@ -63,16 +63,29 @@
   its `Box<dyn FnMut>` unsizing coercion). Also extended `coerce_return_value` to wrap a bare
   `return true;`/`return false;` (`Reflect.set`/`deleteProperty`'s own literal boolean results,
   not derived from a `tenant.<method>()` call) the same way as a `bool`-returning tenant method.
-- **Not started:** `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`, `realm.ts`. The
-  first three are qualitatively harder than anything landed so far (a shared object-literal-of-
-  generator-methods-as-`TenantExoticHandler` pattern used by all three; `proxy.ts`'s own
-  shared-*mutable*-closure-capture, discriminated-union, and tuple/holey-destructuring needs;
-  `array-buffer.ts`/`typed-arrays.ts`'s reliance on real host `ArrayBuffer`/`DataView` builtins
-  with no `Self::Value` translation) — see `docs/proxy-and-buffer-primordial-gap-plan.md` for the
-  design note on what each actually needs and a recommended order, written the same way
-  `docs/array-primordial-gap-plan.md` was before that gap closed. Paused deliberately, same
-  discipline: no closure-capture-model or `Tenant`/new-hand-authored-trait changes until that
-  note is acted on.
+- **The shared `TenantExoticHandler`-from-object-literal capability all three of `proxy.ts`/
+  `array-buffer.ts`/`typed-arrays.ts` need is done.** `tenant.makeExotic(proto, { *get(...) {...},
+  ... })` now generates a real struct + `impl TenantExoticHandler<T> for GeneratedStruct<T>`
+  (`emit_exotic_handler_literal` in `emit_rust.rs`), confirmed to compile as real Rust and covered
+  by 6 regression tests. Building and actually compiling it surfaced three real bugs in one pass —
+  a stale assumption about `emit_expr`'s `Lit::Undefined`/`Null` mapping (needed a new
+  `RETURN_COERCION` context so a trap's own return-type-specific coercion doesn't collide with
+  `make_builtin`-closure coercion sharing the same `Stmt::Return` code path), a missing
+  `self.<field>` shadow-clone prelude for captured free variables, and `PropertyKey` needing
+  explicit `::from(...)` conversion against a string-literal comparison — see
+  `docs/proxy-and-buffer-primordial-gap-plan.md`'s now-updated first section for the full story.
+  Designing the follow-on work also surfaced a new, previously unflagged blocker: `array-buffer.ts`'s
+  `shell`/`constructor` are self-referential local closures (a plain Rust closure can't reference
+  itself), which needs restructuring the whole function into a local struct+impl, not just wider
+  closure-signature support — also written up in that note.
+- **Not started:** `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`, `realm.ts` —
+  see `docs/proxy-and-buffer-primordial-gap-plan.md`'s "Recommended order" for the remaining
+  pieces (a hand-authored `BufferHooks` trait/shim, the local-struct-ification above, and
+  `proxy.ts`'s own remaining problems — including a proposed direction for its shared-mutable-
+  state problem: rewriting `ProxyState` as a real `class` with `#private` fields, making the Rust
+  translation mechanical rather than requiring capture-mutation analysis). Paused deliberately,
+  same discipline: no closure-capture-model or `Tenant`/new-hand-authored-trait changes until that
+  note's remaining items are acted on.
   `proxy.ts` will need `functionPrimordial` wired the same way `object.ts` was for `function.ts`.
 
 ### Shimmed modules (a correction to the original plan)

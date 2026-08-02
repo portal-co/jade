@@ -78,6 +78,22 @@ thread_local! {
     /// Drives the `=== undefined`/`!== undefined` -> `.is_none()`/`.is_some()` lowering and the
     /// Option-narrowing `Cond`/`if (!X) continue;` peepholes.
     static OPTION_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// Unique-name counter for generated `TenantExoticHandler`-implementing structs (see
+    /// `emit_exotic_handler_literal`) — one file can construct more than one exotic in different
+    /// factory functions (`array-buffer.ts`'s buffer shell and, per kind, `typed-arrays.ts`'s
+    /// typed-array records), so a flat per-module counter (not reset per function) keeps every
+    /// generated struct name distinct.
+    static EXOTIC_HANDLER_COUNTER: RefCell<u32> = RefCell::new(0);
+    /// Which return-value coercion `Stmt::Return`'s emission applies — see `coerce_return_value`
+    /// (the `Closure` default, matching `emit_closure`'s hardcoded `Result<T::Value,
+    /// TenantError>` shape, used for every top-level function too since every one IR-lowered so
+    /// far happens to also return a `T::Value`-shaped thing) vs `coerce_trap_return_value` (each
+    /// `TenantExoticHandler` trap has its *own* real Rust return type — `bool`, `Vec<PropertyKey>`,
+    /// `Option<T::Value>`, ... — so the closure-oriented coercion is actively wrong there, not
+    /// just unnecessary: unwrapping an already-`Option<T::Value>` `getPrototypeOf` result to a
+    /// bare `T::Value` would be a real type/semantic error, not a no-op). Set for the duration of
+    /// each trap method's own body in `emit_exotic_handler_literal`, restored immediately after.
+    static RETURN_COERCION: RefCell<ReturnCoercion> = RefCell::new(ReturnCoercion::Closure);
     /// Local-variable-name (snake_case) -> "this is a `&str`-typed local" set, reset per function
     /// (not per closure, matching `LOCAL_REFNESS`'s simplification — see its own doc comment).
     /// `installMethod`'s `name: string` parameter is the one occurrence so far: it's a plain
@@ -87,6 +103,13 @@ thread_local! {
     /// bare `&`-borrow (correct for an argument that's already `PropertyKey`-typed, e.g. a `for`
     /// loop variable bound from `ownPropertyKeys`).
     static STRING_TYPED_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// Local-variable-name (snake_case) -> "this is a `PropertyKey`-typed local" set — currently
+    /// populated only by `emit_exotic_handler_literal` for each trap's own `key`-named parameter
+    /// (`&PropertyKey`, per `EXOTIC_TRAPS`). `emit_eq_cmp` consults this the same way it consults
+    /// `STRING_TYPED_LOCALS`: a bare identifier compared against a string literal
+    /// (`key === "byteLength"`, common in exotic-handler traps) needs the literal converted via
+    /// `PropertyKey::from(...)` before the two sides can be compared at all.
+    static PROPERTY_KEY_TYPED_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
 }
 
 fn imported_source(name: &str) -> Option<String> {
@@ -103,6 +126,10 @@ fn is_known_ref(name: &str) -> bool {
 
 fn is_string_typed(name: &str) -> bool {
     STRING_TYPED_LOCALS.with(|set| set.borrow().contains(name))
+}
+
+fn is_property_key_typed(name: &str) -> bool {
+    PROPERTY_KEY_TYPED_LOCALS.with(|set| set.borrow().contains(name))
 }
 
 /// Tenant trait methods this emitter knows how to call, and each positional argument's passing
@@ -257,11 +284,12 @@ fn try_emit_module(module: &Module) -> TokenStream {
             }
         }
     });
+    EXOTIC_HANDLER_COUNTER.with(|c| *c.borrow_mut() = 0);
 
     let mut items = Vec::new();
     items.push(quote! {
         #[allow(unused_imports)]
-        use portal_solutions_jade_tenant_rt::{Tenant, PropertyKey, TenantError, TenantPropertyDescriptor, TenantInvocation, DynFields, ValueTag};
+        use portal_solutions_jade_tenant_rt::{Tenant, PropertyKey, TenantError, TenantPropertyDescriptor, TenantInvocation, TenantExoticHandler, DynFields, ValueTag};
     });
     // Every registered cross-file factory's struct, unconditionally — small, fixed registry, so
     // this is simpler than scanning for which ones a given file actually destructures (see
@@ -862,7 +890,10 @@ fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
         Stmt::Return(value) => match value {
             Some(expr) => {
                 let value = emit_expr(expr)?;
-                let value = coerce_return_value(expr, value)?;
+                let value = match RETURN_COERCION.with(|c| *c.borrow()) {
+                    ReturnCoercion::Closure => coerce_return_value(expr, value)?,
+                    ReturnCoercion::Trap(kind) => coerce_trap_return_value(kind, expr, value),
+                };
                 Ok(quote! { return Ok(#value); })
             }
             None => Ok(quote! { return Ok(()); }),
@@ -1084,6 +1115,286 @@ fn emit_object_literal(props: &[ObjectProp]) -> Result<TokenStream, IrError> {
         file: String::new(),
         construct: "object literal doesn't match a known TenantPropertyDescriptor or locally-declared interface shape".into(),
     })
+}
+
+/// Which return-value coercion `Stmt::Return`'s emission should apply — see `RETURN_COERCION`'s
+/// doc comment.
+#[derive(Clone, Copy)]
+enum ReturnCoercion {
+    Closure,
+    Trap(TrapReturn),
+}
+
+/// What a `TenantExoticHandler` trap's Rust translation returns, and therefore how to coerce the
+/// trap body's own `return` values into it. `jade-tenant-rt::TenantExoticHandler`'s trait method
+/// signatures are the source of truth here — see [`EXOTIC_TRAPS`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrapReturn {
+    /// `Result<T::Value, TenantError>` (`get`) — the one shape needing a fixup: a bare `return
+    /// undefined;` must become `tenant.undefined_value()`, not the generic `Lit::Undefined ->
+    /// None` mapping every other context uses (see `coerce_trap_return_value`).
+    Value,
+    /// `Result<(), TenantError>` (`set`/`delete`/`define`/`assign`) — an empty or fall-off-the-
+    /// end body needs a trailing `Ok(())` appended, the same fixup `emit_fn_decl` already does
+    /// for a void generator.
+    Void,
+    Bool,
+    KeyList,
+    /// `Result<Option<T::Value>, TenantError>` (`getPrototypeOf`) — `Lit::Undefined`/`Lit::Null`
+    /// already map to `None` correctly with no fixup; a real value just needs `Some(...)`
+    /// wrapping, which `Stmt::Return`'s ordinary emission doesn't do on its own (see
+    /// `wrap_trap_return_value`).
+    OptionValue,
+    /// `Result<Option<TenantPropertyDescriptor<T::Value>>, TenantError>`
+    /// (`getOwnPropertyDescriptor`) — same shape as `OptionValue`, different payload type.
+    OptionDescriptor,
+}
+
+struct TrapSpec {
+    ts_name: &'static str,
+    rust_name: &'static str,
+    /// (default parameter name, type) for the trap's own parameters, in order — excludes the
+    /// implicit `&mut self`/`tenant: &mut T` every trap takes. The object literal's own method
+    /// may declare fewer parameter names than this (or none at all, e.g. `*ownKeys() {}`); unnamed
+    /// positions fall back to this default name (matching `emit_closure`'s `SYNTHETIC_PARAM_NAMES`
+    /// fallback for the same reason: the trait signature is fixed regardless of how many of its
+    /// parameters a given implementation's body actually names).
+    params: &'static [(&'static str, &'static str)],
+    returns: TrapReturn,
+}
+
+const EXOTIC_TRAPS: &[TrapSpec] = &[
+    TrapSpec { ts_name: "get", rust_name: "get", params: &[("receiver", "&T::Value"), ("key", "&PropertyKey")], returns: TrapReturn::Value },
+    TrapSpec {
+        ts_name: "set",
+        rust_name: "set",
+        params: &[("receiver", "&T::Value"), ("key", "&PropertyKey"), ("value", "T::Value")],
+        returns: TrapReturn::Void,
+    },
+    TrapSpec { ts_name: "has", rust_name: "has", params: &[("receiver", "&T::Value"), ("key", "&PropertyKey")], returns: TrapReturn::Bool },
+    TrapSpec { ts_name: "delete", rust_name: "delete", params: &[("receiver", "&T::Value"), ("key", "&PropertyKey")], returns: TrapReturn::Void },
+    TrapSpec { ts_name: "ownKeys", rust_name: "own_keys", params: &[("receiver", "&T::Value")], returns: TrapReturn::KeyList },
+    TrapSpec { ts_name: "ownPropertyKeys", rust_name: "own_property_keys", params: &[("receiver", "&T::Value")], returns: TrapReturn::KeyList },
+    TrapSpec {
+        ts_name: "getOwnPropertyDescriptor",
+        rust_name: "get_own_property_descriptor",
+        params: &[("receiver", "&T::Value"), ("key", "&PropertyKey")],
+        returns: TrapReturn::OptionDescriptor,
+    },
+    TrapSpec {
+        ts_name: "defineProperty",
+        rust_name: "define_property",
+        params: &[("receiver", "&T::Value"), ("key", "&PropertyKey"), ("descriptor", "TenantPropertyDescriptor<T::Value>")],
+        returns: TrapReturn::Bool,
+    },
+    TrapSpec { ts_name: "getPrototypeOf", rust_name: "get_prototype_of", params: &[("receiver", "&T::Value")], returns: TrapReturn::OptionValue },
+    TrapSpec {
+        ts_name: "setPrototypeOf",
+        rust_name: "set_prototype_of",
+        params: &[("receiver", "&T::Value"), ("prototype", "Option<T::Value>")],
+        returns: TrapReturn::Bool,
+    },
+    TrapSpec { ts_name: "isExtensible", rust_name: "is_extensible", params: &[("receiver", "&T::Value")], returns: TrapReturn::Bool },
+    TrapSpec { ts_name: "preventExtensions", rust_name: "prevent_extensions", params: &[("receiver", "&T::Value")], returns: TrapReturn::Bool },
+    TrapSpec { ts_name: "define", rust_name: "define", params: &[("receiver", "&T::Value"), ("descriptors", "&T::Value")], returns: TrapReturn::Void },
+    TrapSpec { ts_name: "assign", rust_name: "assign", params: &[("receiver", "&T::Value"), ("source", "&T::Value")], returns: TrapReturn::Void },
+];
+
+/// Translates `tenant.makeExotic(proto, { *get(receiver, key) { ... }, *set(...) { ... }, ... })`
+/// — an object literal whose values are all generator methods named after
+/// `TenantExoticHandler`'s traps (`array-buffer.ts`'s buffer shell, `typed-arrays.ts`'s
+/// typed-array records, `proxy.ts`'s `native` handler) — into a freshly generated struct (one
+/// field per free variable the handler's methods capture) implementing
+/// `jade-tenant-rt::TenantExoticHandler<T>` directly, the generated counterpart to
+/// `types_shim.rs`'s hand-written `BuiltinHandler`. `makeCallableExotic`-from-object-literal
+/// (`apply`/`construct` traps) is deliberately not handled here — no primordial's own object
+/// literal needs it; every callable exotic in the surveyed source goes through `make_builtin`
+/// instead, whose hand-written `BuiltinHandler` already covers that shape.
+///
+/// **Known simplification:** every captured field defaults to `T::Value` — correct for the
+/// common case (`array-buffer.ts`'s `proto`), but wrong for a captured `Map`/`WeakMap` or an
+/// embedder-capability parameter (`records`, `hooks`) — those need real type inference this
+/// emitter doesn't have yet. A wrong field type is a loud, immediate compile error at the
+/// generated struct-literal construction site, never a silent miscompile.
+fn emit_exotic_handler_literal(proto_expr: &Expr, props: &[ObjectProp]) -> Result<TokenStream, IrError> {
+    let mut methods = Vec::new();
+    for prop in props {
+        let ObjectProp::Method { key: PropKey::Ident(key), func } = prop else {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: "tenant.makeExotic(...) handler literal member outside the recognized {*trap(...) {...}, ...} shape".into(),
+            });
+        };
+        let Some(spec) = EXOTIC_TRAPS.iter().find(|t| t.ts_name == key.as_str()) else {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!("tenant.makeExotic(...) handler literal has an unrecognized trap `{key}`"),
+            });
+        };
+        methods.push((spec, func));
+    }
+
+    let captured: Vec<String> = {
+        let mut set = std::collections::HashSet::new();
+        free_idents_in_expr(&Expr::Object(props.to_vec()), &mut set);
+        let mut names: Vec<String> = set.into_iter().filter(|n| n != "tenant").collect();
+        names.sort();
+        names
+    };
+
+    let n = EXOTIC_HANDLER_COUNTER.with(|c| {
+        let mut c = c.borrow_mut();
+        let n = *c;
+        *c += 1;
+        n
+    });
+    let struct_ident = format_ident!("ExoticHandler{n}");
+
+    let field_decls: Vec<TokenStream> = captured
+        .iter()
+        .map(|name| {
+            let ident = format_ident!("{name}");
+            quote! { #ident: T::Value }
+        })
+        .collect();
+    let field_inits: Vec<TokenStream> = captured
+        .iter()
+        .map(|name| {
+            let ident = format_ident!("{name}");
+            quote! { #ident: (#ident).clone() }
+        })
+        .collect();
+
+    let saved_refness = LOCAL_REFNESS.with(|m| m.borrow().clone());
+    let mut impl_methods = Vec::new();
+    for (spec, func) in &methods {
+        LOCAL_REFNESS.with(|m| {
+            let mut m = m.borrow_mut();
+            for name in &captured {
+                m.insert(name.clone(), false);
+            }
+        });
+        let mut param_tokens = Vec::new();
+        for (i, (default_name, ty_str)) in spec.params.iter().enumerate() {
+            let name = match func.params.get(i) {
+                Some(Param { pattern: Pattern::Ident(name), .. }) => to_snake_case(name),
+                Some(Param { pattern: Pattern::ObjectShallow(_), .. }) => {
+                    return Err(IrError::Unsupported {
+                        file: String::new(),
+                        construct: format!("destructured parameter in `{}` trap", spec.ts_name),
+                    });
+                }
+                None => (*default_name).to_string(),
+            };
+            let is_ref = ty_str.starts_with('&');
+            LOCAL_REFNESS.with(|m| m.borrow_mut().insert(name.clone(), is_ref));
+            if *ty_str == "&PropertyKey" {
+                PROPERTY_KEY_TYPED_LOCALS.with(|set| set.borrow_mut().insert(name.clone()));
+            }
+            let ident = format_ident!("{name}");
+            let ty: TokenStream = ty_str.parse().unwrap();
+            param_tokens.push(quote! { #ident: #ty });
+        }
+
+        let saved_coercion = RETURN_COERCION.with(|c| *c.borrow());
+        RETURN_COERCION.with(|c| *c.borrow_mut() = ReturnCoercion::Trap(spec.returns));
+        let body_result = emit_block(&func.body);
+        RETURN_COERCION.with(|c| *c.borrow_mut() = saved_coercion);
+        let mut body = body_result?;
+        if spec.returns == TrapReturn::Void {
+            body = quote! { #body Ok(()) };
+        }
+        // A captured free variable lives in `self.<field>`, but the body (lowered straight from
+        // the original JS closure, which captured it lexically) references it as a bare
+        // identifier — shadow it with a local clone first, the same "clone into a same-named
+        // binding" idiom `emit_closure` uses for its own captures, and for the same reason (a
+        // struct field access can't be substituted in after the fact without walking the whole
+        // body; shadowing needs no rewriting at all).
+        let field_prelude: Vec<TokenStream> = captured
+            .iter()
+            .map(|name| {
+                let ident = format_ident!("{name}");
+                quote! { let #ident = self.#ident.clone(); }
+            })
+            .collect();
+        body = quote! { #(#field_prelude)* #body };
+        let return_ty: TokenStream = match spec.returns {
+            TrapReturn::Value => quote! { T::Value },
+            TrapReturn::Void => quote! { () },
+            TrapReturn::Bool => quote! { bool },
+            TrapReturn::KeyList => quote! { Vec<PropertyKey> },
+            TrapReturn::OptionValue => quote! { Option<T::Value> },
+            TrapReturn::OptionDescriptor => quote! { Option<TenantPropertyDescriptor<T::Value>> },
+        };
+        let method_ident = format_ident!("{}", spec.rust_name);
+        impl_methods.push(quote! {
+            fn #method_ident(&mut self, tenant: &mut T, #(#param_tokens),*) -> Result<#return_ty, TenantError> {
+                let __undefined = tenant.undefined_value();
+                #body
+            }
+        });
+    }
+    LOCAL_REFNESS.with(|m| *m.borrow_mut() = saved_refness);
+
+    let proto_tokens = emit_proto_option(proto_expr)?;
+
+    Ok(quote! {
+        {
+            struct #struct_ident<T: Tenant> { #(#field_decls),* }
+            impl<T: Tenant> TenantExoticHandler<T> for #struct_ident<T> {
+                #(#impl_methods)*
+            }
+            tenant.make_exotic(#proto_tokens, Box::new(#struct_ident { #(#field_inits),* }))
+        }
+    })
+}
+
+/// Mirrors `coerce_return_value`'s role but for a `TenantExoticHandler` trap method body, whose
+/// Rust return type is whatever `TrapReturn` says (not always `T::Value` — see
+/// `RETURN_COERCION`'s doc comment for why the two can't share one coercion function).
+fn coerce_trap_return_value(kind: TrapReturn, expr: &Expr, tokens: TokenStream) -> TokenStream {
+    match kind {
+        // A string/number/bool literal needs an explicit `Tenant` constructor the same way
+        // `coerce_return_value` handles a bare closure return (`emit_expr` has no way to know a
+        // bare `"foo"`/`5`/`true` literal needs `Tenant::string_value`/etc. without knowing the
+        // surrounding context is `T::Value`-typed). `Lit::Null`/`Lit::Undefined` need no fixup
+        // here — `emit_expr` already renders those as `tenant.null_value()`/`undefined_value()`,
+        // correct for this exact position. Anything else is assumed already `T::Value`-shaped
+        // (the common case: a tenant/shim call result, or a captured `T::Value` local).
+        TrapReturn::Value => match expr {
+            Expr::Lit(Lit::Str(_)) => quote! { tenant.string_value(&(#tokens)) },
+            Expr::Lit(Lit::Num(_)) => quote! { tenant.number_value(#tokens) },
+            Expr::Lit(Lit::Bool(_)) => quote! { tenant.boolean_value(#tokens) },
+            _ => tokens,
+        },
+        // `emit_expr`'s `Lit::Null`/`Lit::Undefined` mapping produces a real guest value
+        // (`tenant.null_value()`/`undefined_value()`) now, not Rust's `None` — correct for a
+        // `T::Value`-returning position (`TrapReturn::Value` above), but this position's real
+        // Rust return type is `Option<_>`, so a literal `null`/`undefined` return needs `None`
+        // explicitly here instead, ignoring `tokens`. Anything else is a real value needing
+        // `Some(...)` wrapping, which ordinary `Stmt::Return` emission doesn't do on its own. A
+        // value that's *already* `Option`-shaped (e.g. a `Cast` to `object | null`, `Tenant
+        // ::nullable`'s own return shape) must not be wrapped again — recognized structurally
+        // rather than re-deriving full type inference.
+        TrapReturn::OptionValue | TrapReturn::OptionDescriptor => match expr {
+            Expr::Lit(Lit::Undefined) | Expr::Lit(Lit::Null) => quote! { None },
+            Expr::Cast { target: TypeRef::Optional(_), .. } => tokens,
+            _ => quote! { Some((#tokens).clone()) },
+        },
+        TrapReturn::Bool | TrapReturn::KeyList | TrapReturn::Void => tokens,
+    }
+}
+
+/// `proto: object | null` (or `object | null | undefined`) — `tenant.makeExotic`'s first
+/// argument. `null` is the only literal ever passed directly (`proxy.ts`'s `tenant.makeExotic
+/// (null, native)`); anything else is an existing `T::Value` local needing `Some((...).clone())`
+/// wrapping, the same convention `emit_call_arg`'s `OptionRef`/`OptionOwned` kinds use elsewhere.
+fn emit_proto_option(proto_expr: &Expr) -> Result<TokenStream, IrError> {
+    if matches!(proto_expr, Expr::Lit(Lit::Null)) {
+        return Ok(quote! { None });
+    }
+    let tokens = emit_expr(proto_expr)?;
+    Ok(quote! { Some((#tokens).clone()) })
 }
 
 /// Recognizes `{ kind: "apply", thisArg, args }` / `{ kind: "construct", args, newTarget }` —
@@ -1411,6 +1722,18 @@ fn emit_eq_cmp(op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<TokenStream, IrError
     if is_nullish_lit(lhs) {
         return emit_eq_cmp(op, rhs, lhs);
     }
+    // `key === "byteLength"`-style comparisons (an exotic-handler trap's own `key: &PropertyKey`
+    // parameter against a string literal) — `PropertyKey` has no `PartialEq<str>` impl, so the
+    // literal needs `PropertyKey::from(...)` conversion before the two sides can compare at all.
+    if let Expr::Ident(name) = lhs
+        && is_property_key_typed(&to_snake_case(name))
+        && let Expr::Lit(Lit::Str(_)) = rhs
+    {
+        let lhs_t = emit_expr(lhs)?;
+        let rhs_t = emit_expr(rhs)?;
+        let op_t = bin_op_tokens(op)?;
+        return Ok(quote! { (#lhs_t #op_t &PropertyKey::from(#rhs_t)) });
+    }
     let lhs_t = emit_expr(lhs)?;
     let rhs_t = emit_expr(rhs)?;
     let op_t = bin_op_tokens(op)?;
@@ -1435,6 +1758,15 @@ fn emit_cast(expr: &Expr, target: &TypeRef) -> Result<TokenStream, IrError> {
 }
 
 fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
+    if let Expr::Member { obj, prop: MemberProp::Ident(method) } = callee
+        && let Expr::Ident(recv) = obj.as_ref()
+        && recv == "tenant"
+        && method == "makeExotic"
+        && let [CallArg::Normal(proto_expr), CallArg::Normal(Expr::Object(props))] = args
+    {
+        return emit_exotic_handler_literal(proto_expr, props);
+    }
+
     if let Expr::Member { obj, prop: MemberProp::Ident(method) } = callee
         && let Expr::Ident(recv) = obj.as_ref()
         && recv == "tenant"
@@ -2002,4 +2334,106 @@ fn to_snake_case(name: &str) -> String {
         out.push('_');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression coverage for `emit_exotic_handler_literal`'s trap-return coercion — built after
+    //! actually compiling its output as real Rust caught three real bugs in one pass (a
+    //! `Lit::Undefined`/`Lit::Null` mapping change elsewhere in this file that made the original
+    //! "already `None`" assumption wrong, a missing `self.<field>` shadow-clone prelude for
+    //! captured free variables, and a `PropertyKey`-vs-`&str` comparison with no `PartialEq`
+    //! impl) — see the primordial-IR plan's "Progress" section for the full story. Asserts on
+    //! the emitted *text* rather than compiling it (no downstream crate available from this
+    //! crate's own test suite); `crates/jade-primordial-rt`'s own tests are what prove a real
+    //! generated primordial file compiles and behaves correctly end to end.
+
+    const SMOKE_SOURCE: &str = r#"
+import type { Tenant, TenantGenerator } from "../tenants/types.ts";
+
+export function* makeSmokeExotic(tenant: Tenant, proto: object): TenantGenerator<object> {
+  const value = yield tenant.yieldTenant(tenant.makeExotic(proto, {
+    *get(receiver, key) {
+      if (key === "tag") return "smoke";
+      return undefined;
+    },
+    *set() {},
+    *has(_receiver, key) { return key === "tag"; },
+    *delete() {},
+    *ownKeys() { return []; },
+    *ownPropertyKeys() { return []; },
+    *getOwnPropertyDescriptor() { return undefined; },
+    *defineProperty() { return false; },
+    *getPrototypeOf() { return proto; },
+    *setPrototypeOf() { return false; },
+    *isExtensible() { return true; },
+    *preventExtensions() { return true; },
+    *define() {},
+    *assign() {},
+  }));
+  return value;
+}
+"#;
+
+    fn emit() -> String {
+        let module = crate::lower::lower_module("exotic-smoke", SMOKE_SOURCE).expect("lowering should succeed");
+        super::emit_module(&module, "exotic-smoke")
+    }
+
+    #[test]
+    fn generates_a_real_trait_impl() {
+        let rust = emit();
+        assert!(rust.contains("impl < T : Tenant > TenantExoticHandler < T > for"), "{rust}");
+        assert!(rust.contains("fn get_own_property_descriptor"), "{rust}");
+    }
+
+    #[test]
+    fn a_captured_free_variable_is_shadow_cloned_from_self() {
+        // The bug: `proto` (captured from the enclosing function) was emitted as a bare
+        // identifier inside a trait method, which doesn't compile — a struct field is only
+        // reachable via `self.proto`. Fixed by prepending a `let proto = self.proto.clone();`
+        // shadow-clone, the same idiom `emit_closure` already uses for its own captures.
+        let rust = emit();
+        assert!(rust.contains("let proto = self . proto . clone () ;"), "{rust}");
+    }
+
+    #[test]
+    fn get_own_property_descriptor_undefined_return_is_none_not_undefined_value() {
+        // The bug: `emit_expr`'s `Lit::Undefined` mapping produces `tenant.undefined_value()`
+        // (correct for a `T::Value`-returning trap like `get`), but `getOwnPropertyDescriptor`'s
+        // real Rust return type is `Option<TenantPropertyDescriptor<T::Value>>` — a bare
+        // `return undefined;` there must become `None`, not a `T::Value`.
+        let rust = emit();
+        assert!(rust.contains("fn get_own_property_descriptor"), "{rust}");
+        let start = rust.find("fn get_own_property_descriptor").unwrap();
+        let body = &rust[start..start + 400];
+        assert!(body.contains("return Ok (None) ;"), "{body}");
+    }
+
+    #[test]
+    fn get_prototype_of_wraps_a_real_value_in_some() {
+        let rust = emit();
+        let start = rust.find("fn get_prototype_of").unwrap();
+        let body = &rust[start..start + 400];
+        assert!(body.contains("return Ok (Some ((proto) . clone ())) ;"), "{body}");
+    }
+
+    #[test]
+    fn get_wraps_a_bare_string_literal_via_tenant_string_value() {
+        // The bug: a bare `return "smoke";` inside a `T::Value`-returning trap needs an explicit
+        // `Tenant::string_value` constructor — `emit_expr` has no way to know a plain string
+        // literal is being returned in a `T::Value`-typed position on its own.
+        let rust = emit();
+        let start = rust.find("fn get (").unwrap();
+        let body = &rust[start..start + 400];
+        assert!(body.contains("tenant . string_value"), "{body}");
+    }
+
+    #[test]
+    fn key_compared_against_a_string_literal_converts_the_literal_to_a_property_key() {
+        // The bug: `PropertyKey` has no `PartialEq<str>` impl, so `key == "tag"` (`key: &
+        // PropertyKey`) doesn't compile without converting the literal first.
+        let rust = emit();
+        assert!(rust.contains("PropertyKey :: from (\"tag\")"), "{rust}");
+    }
 }
