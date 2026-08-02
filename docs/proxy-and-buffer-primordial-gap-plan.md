@@ -270,6 +270,46 @@ class-lowering work is a separate, comparably-sized piece, worth scoping and bui
 applied to both files. `typed-arrays.ts` should be checked against the same self-reference
 pattern before assuming it's simpler (not yet re-verified since this finding).
 
+### The TS-side class refactor itself: DONE and verified
+
+`array-buffer.ts`'s `bufferPrimordial` now returns a `BufferPrimordialImpl` class instance
+(`implements BufferPrimordial`) instead of a plain object with closure-valued fields — decided
+per the discussion above: the *whole* return value becomes the class instance (data fields +
+`record`/`shell` as real methods), not just an internal helper wrapping `shell`/`constructor`'s
+state, since `BufferPrimordial`'s own interface has function-typed members (`record`/`shell`)
+that need the same treatment regardless. `#hooks`/`#records`/`#prototypes` are `#private`;
+`ArrayBuffer`/`ArrayBufferPrototype`/`SharedArrayBuffer?`/`SharedArrayBufferPrototype?` are
+public data fields (the two optional ones use `?`, the two required ones use `!` — definite
+assignment, populated by `bufferPrimordial` right after construction, not in the constructor
+itself, since construction can't `yield`).
+
+**Real signature change, not just an internal refactor:** `BufferPrimordial.record`/`.shell`
+both gained an explicit leading `tenant: Tenant` parameter. Neither needed it in the original
+closure-based design (both closed over `tenant` lexically), but a Rust port's `record`/`shell`
+need it explicitly — `typeof`/identity-keyed `WeakMap` lookups are ambient host operations in TS,
+tenant-mediated ones in Rust (`Tenant::typeof_tag`/`object_id`) — and this interface's shape is
+meant to be shared verbatim by both ports rather than diverging per-language. This cascaded into
+6 call-site updates in `typed-arrays.ts` (`buffers.record(...)`/`buffers.shell(...)`, all of
+which already had `tenant` in scope as a captured free variable).
+
+**Verification, and a real gap found in the process:** `npx tsc --noEmit -p tsconfig.json`
+reports zero errors both before and after the `typed-arrays.ts` call-site fix — turns out this
+tells you nothing here. `buffers` (`bufferPrimordial`'s result) is typed via `yield tenant
+.yieldTenant(...)`, and `TenantGenerator<R> = Generator<any, R, any>` has `any` for both its
+yield and next-value type parameters, so *every* `yield tenant.yieldTenant(X)` expression's own
+value is typed `any` throughout this codebase — meaning `tsc` silently accepts a wrong-arity
+method call on `buffers` instead of flagging it. Real verification came from actually *running*
+the code: `packages/jade-js/primordials.e2e.ts` (and the other 6 `*.e2e.ts` suites, run via `node
+--experimental-strip-types`, matching `docs/primordials-plan.md`'s own regression-testing
+prescription) exercises exactly the changed paths — `ArrayBuffer` construction + `.byteLength`
+read (`shell`'s `get` trap), and a `Uint8Array` constructed from a bare length (exercises
+`buffers.shell(tenant, ...)`) with an indexed `set`/`get` (exercises `buffers.record(tenant,
+...)` from *inside* `typedArraysPrimordial`'s own exotic-handler traps) — and all pass. Worth
+remembering for the rest of this note's remaining work too: **`tsc` cannot be trusted alone to
+catch a signature-change regression on anything that flows through a `yield tenant.yieldTenant
+(...)` expression; only running the real `*.e2e.ts` suites (or new dedicated tests) actually
+proves it.**
+
 ## Recommended order for whoever picks this up
 
 1. ~~Build the shared `TenantExoticHandler`-from-object-literal codegen first~~ **Done.**
@@ -300,12 +340,15 @@ pattern before assuming it's simpler (not yet re-verified since this finding).
    This is the same underlying capability (class lowering), just applied at the function's public
    boundary instead of only internally; TS callers (`typed-arrays.ts` calls `.shell(...)` on the
    result) are unaffected either way since method-call syntax on the result is identical.
-5. Design and build `class` lowering (fields incl. `#private`/readonly, constructor, methods;
+5. ~~Refactor `array-buffer.ts` so `bufferPrimordial`'s return value is a class instance~~
+   **Done and verified** (`BufferPrimordialImpl`, `#private` state, `record`/`shell` gained an
+   explicit `tenant` parameter, `typed-arrays.ts`'s 6 call sites updated to match — see "The
+   TS-side class refactor itself" above; all 7 `*.e2e.ts` suites pass, `tsc` clean). `typed-arrays.ts`
+   itself hasn't been checked for the same self-reference pattern in its own `create` closure yet.
+   **Design and build `class` lowering** (fields incl. `#private`/readonly, constructor, methods;
    Rust target: `Rc<RefCell<Inner>>` wrapper + inherent-method `impl` block, uniformly for every
-   class instance — see the `ProxyState` entry below). Refactor `array-buffer.ts` so
-   `bufferPrimordial`'s return value is a class instance per (4) above (and check
-   `typedArraysPrimordial` for the same self-reference/function-typed-member pattern). This is
-   now the single remaining piece needed to fully generate `array-buffer.ts` and `typed-arrays.ts`.
+   class instance — see the `ProxyState` entry below) is now the single remaining piece needed to
+   fully generate `array-buffer.ts` and `typed-arrays.ts` — not started.
 6. `proxy.ts` last: reuses (5)'s class lowering for `ProxyState` (now the *primary* motivating
    case, not a follow-on), needs a real Rust method-call-on-class-instance emission path (`emit_call`
    has no such branch yet — every call target recognized today is `tenant.<method>`, a shim, a

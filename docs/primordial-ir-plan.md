@@ -100,13 +100,18 @@
   helper class, `bufferPrimordial`'s entire return value should become a class instance (data
   fields + `record`/`shell` as real methods) — same underlying capability, applied at the
   function's public boundary too.
-- **Decided:** `array-buffer.ts`'s self-referential-closure problem and `proxy.ts`'s
-  shared-mutable-`ProxyState` problem should be solved by the *same* mechanism, not two bespoke
-  ones — refactor both into real TS `class`es and build one `class`-lowering IR capability (Rust
-  target: `Rc<RefCell<Inner>>` + inherent-method `impl`, uniformly for every class instance)
-  rather than a bespoke "detect co-referencing local closures" heuristic just for
-  `array-buffer.ts`. This is now the single remaining piece needed for both `array-buffer.ts`/
-  `typed-arrays.ts` and `proxy.ts` — see the gap note's updated "Recommended order".
+- **`array-buffer.ts`'s TS-side class refactor is done and verified.** `bufferPrimordial` now
+  returns a `BufferPrimordialImpl` class instance (`#private` state; `record`/`shell` gained an
+  explicit `tenant` parameter, since a Rust port needs it even though the original closures
+  didn't) — the whole return value, not just an internal `shell`/`constructor` helper, per the
+  decision above. Cascaded into 6 call-site updates in `typed-arrays.ts`. Verified by running all
+  7 `*.e2e.ts` suites (not just `tsc`, which turns out to be blind to this class of regression —
+  see the gap note's new "TS-side class refactor" section for why: every `yield tenant.yieldTenant
+  (...)` expression is typed `any` throughout this codebase, so a wrong-arity method call on a
+  `yield`-derived value silently type-checks). **Not yet done:** the `class`-lowering IR/Rust
+  capability itself (fields, constructor, methods, `Rc<RefCell<Inner>>` + inherent-`impl`
+  codegen, method-call-on-instance emission) — this is now the single remaining piece for both
+  `array-buffer.ts`/`typed-arrays.ts` and `proxy.ts`.
 - **Not started:** `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`, `realm.ts`.
   Paused deliberately, same discipline: no closure-capture-model or `Tenant`/new-hand-authored-
   trait changes until the gap note's remaining items are acted on. `proxy.ts` will need

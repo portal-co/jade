@@ -49,7 +49,7 @@ export function* typedArraysPrimordial(
           if (key === "buffer") return record.buffer;
           if (typeof key === "string" && /^(0|[1-9][0-9]*)$/.test(key)) {
             const index = Number(key); if (index >= record.length) return undefined;
-            const handle = buffers.record(record.buffer)!.handle;
+            const handle = buffers.record(tenant, record.buffer)!.handle;
             const bytes = yield tenant.yieldTenant(hooks.read(handle, record.offset + index * codec.bytes, codec.bytes));
             return codec.get(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), 0);
           }
@@ -62,11 +62,11 @@ export function* typedArraysPrimordial(
             const source = records.get(args[0] as object); if (!source) throw new TypeError("TypedArray.set requires a Jade typed array");
             const start = toIndex(args[1] ?? 0); if (start + source.length > record.length) throw new RangeError("source is too large");
             for (let i = 0; i < source.length; i++) {
-              const sourceHandle = buffers.record(source.buffer)!.handle;
+              const sourceHandle = buffers.record(tenant, source.buffer)!.handle;
               const bytes = yield tenant.yieldTenant(hooks.read(sourceHandle, source.offset + i * codecs[source.kind].bytes, codecs[source.kind].bytes));
               const number = codecs[source.kind].get(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), 0);
               const target = new Uint8Array(codec.bytes); codec.set(new DataView(target.buffer), 0, number);
-              yield tenant.yieldTenant(hooks.write(buffers.record(record.buffer)!.handle, record.offset + (start + i) * codec.bytes, target));
+              yield tenant.yieldTenant(hooks.write(buffers.record(tenant, record.buffer)!.handle, record.offset + (start + i) * codec.bytes, target));
             }
           }, undefined, ObjectPrototype));
           return undefined;
@@ -75,7 +75,7 @@ export function* typedArraysPrimordial(
           if (typeof key !== "string" || !/^(0|[1-9][0-9]*)$/.test(key)) return;
           const record = records.get(receiver)!; const index = Number(key); if (index >= record.length) return;
           const bytes = new Uint8Array(codec.bytes); codec.set(new DataView(bytes.buffer), 0, Number(value));
-          yield tenant.yieldTenant(hooks.write(buffers.record(record.buffer)!.handle, record.offset + index * codec.bytes, bytes));
+          yield tenant.yieldTenant(hooks.write(buffers.record(tenant, record.buffer)!.handle, record.offset + index * codec.bytes, bytes));
         },
         *has(receiver, key) { const record = records.get(receiver)!; return typeof key === "string" && /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < record.length; },
         *delete() {}, *ownKeys() { const record = records.get(value)!; return Array.from({ length: record.length }, (_, i) => String(i)); },
@@ -89,7 +89,7 @@ export function* typedArraysPrimordial(
       function* () { throw new TypeError(`Constructor ${kind} requires 'new'`); },
       function* (_target, args) {
         const first = args[0];
-        const bufferRecord = buffers.record(first);
+        const bufferRecord = buffers.record(tenant, first);
         if (bufferRecord) {
           const offset = toIndex(args[1] ?? 0); if (offset % codec.bytes) throw new RangeError("unaligned byteOffset");
           const total = yield tenant.yieldTenant(hooks.byteLength(bufferRecord.handle));
@@ -98,7 +98,7 @@ export function* typedArraysPrimordial(
           return yield tenant.yieldTenant(create(first as object, offset, length));
         }
         const length = toIndex(first ?? 0); const handle = yield tenant.yieldTenant(hooks.allocate("array-buffer", length * codec.bytes));
-        return yield tenant.yieldTenant(create(yield tenant.yieldTenant(buffers.shell("array-buffer", handle)), 0, length));
+        return yield tenant.yieldTenant(create(yield tenant.yieldTenant(buffers.shell(tenant, "array-buffer", handle)), 0, length));
       }, ObjectPrototype));
     constructors[kind] = ctor;
     yield tenant.yieldTenant(defineData(tenant, ctor, "prototype", prototype, { writable: false, configurable: false }));
