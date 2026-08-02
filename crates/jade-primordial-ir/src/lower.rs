@@ -142,6 +142,13 @@ fn lower_decl(file: &str, decl: &ast::Decl) -> Result<Option<Item>, IrError> {
         // `emit_ts.rs`). An interface is different: it's erased from *TS* emission the same way,
         // but it drives the generated Rust struct's field layout, so it becomes a real
         // `Item::StructDef` here rather than being discarded.
+        // `BufferHooks` is erased the same way a type alias is (`Ok(None)`, not a `StructDef`):
+        // it's method-shaped (`TsMethodSignature`, which the generic branch below doesn't parse
+        // — a real gap, but not worth closing for an interface that would be discarded anyway),
+        // and it already has a hand-written Rust counterpart (`jade-tenant-rt::BufferHooks`) — a
+        // function parameter typed `BufferHooks` becomes an added generic trait-bound parameter
+        // instead of a generated struct; see `docs/proxy-and-buffer-primordial-gap-plan.md`.
+        ast::Decl::TsInterface(iface) if iface.id.sym.as_ref() == "BufferHooks" => Ok(None),
         ast::Decl::TsInterface(iface) => {
             if !iface.extends.is_empty() {
                 return Err(unsupported(file, "interface with `extends`"));
@@ -179,6 +186,18 @@ fn lower_decl(file: &str, decl: &ast::Decl) -> Result<Option<Item>, IrError> {
 /// Recognizes the `const cache = new WeakMap<Tenant, X>();` per-tenant-cache idiom specially
 /// (see `ir.rs`'s `Item::PerTenantCache` doc comment); any other module-level const/let becomes
 /// a plain `Item::ModuleConst`.
+/// The plain name a `TsType` refers to, if it's a bare type reference (`Foo`, or `ns.Foo`) — used
+/// by the per-tenant-cache recognition above for both of its recognized value-type shapes.
+fn named_type_ref_name(ty: &ast::TsType) -> Option<String> {
+    match ty {
+        ast::TsType::TsTypeRef(r) => match &r.type_name {
+            ast::TsEntityName::Ident(id) => Some(id.sym.to_string()),
+            ast::TsEntityName::TsQualifiedName(q) => Some(q.right.sym.to_string()),
+        },
+        _ => None,
+    }
+}
+
 fn lower_module_var_decl(file: &str, var_decl: &ast::VarDecl) -> Result<Option<Item>, IrError> {
     if var_decl.decls.len() != 1 {
         return Err(unsupported(file, "module-level var decl with != 1 declarator"));
@@ -200,20 +219,31 @@ fn lower_module_var_decl(file: &str, var_decl: &ast::VarDecl) -> Result<Option<I
         // deferring to the enclosing factory function's return type: the two must agree in the
         // source anyway, and reading it here means both `emit_ts.rs` (re-declaring the WeakMap
         // itself) and `emit_rust.rs` (naming the generated `<ValueType>Cache` struct) share one
-        // resolved name instead of re-deriving it independently.
-        let value_ty = new_expr
-            .type_args
-            .as_ref()
-            .and_then(|args| args.params.get(1))
-            .and_then(|ty| match ty.as_ref() {
-                ast::TsType::TsTypeRef(r) => match &r.type_name {
-                    ast::TsEntityName::Ident(id) => Some(id.sym.to_string()),
-                    ast::TsEntityName::TsQualifiedName(q) => Some(q.right.sym.to_string()),
-                },
+        // resolved name instead of re-deriving it independently. Two shapes are recognized: a
+        // bare named type, or `array-buffer.ts`/`typed-arrays.ts`'s `{ identity: object;
+        // primordial: ValueType }` wrapper (see `Item::PerTenantCache::identity_wrapped`'s doc
+        // comment).
+        let value_ty_arg = new_expr.type_args.as_ref().and_then(|args| args.params.get(1));
+        if let Some(named) = value_ty_arg.and_then(|ty| named_type_ref_name(ty)) {
+            return Ok(Some(Item::PerTenantCache { name, value_ty: named, identity_wrapped: false }));
+        }
+        if let Some(ast::TsType::TsTypeLit(lit)) = value_ty_arg.map(|ty| ty.as_ref())
+            && lit.members.len() == 2
+            && lit.members.iter().any(|m| matches!(m, ast::TsTypeElement::TsPropertySignature(p) if matches!(p.key.as_ref(), ast::Expr::Ident(id) if id.sym.as_ref() == "identity")))
+        {
+            let primordial_ty = lit.members.iter().find_map(|m| match m {
+                ast::TsTypeElement::TsPropertySignature(p)
+                    if matches!(p.key.as_ref(), ast::Expr::Ident(id) if id.sym.as_ref() == "primordial") =>
+                {
+                    p.type_ann.as_ref().and_then(|ann| named_type_ref_name(&ann.type_ann))
+                }
                 _ => None,
-            })
-            .ok_or_else(|| unsupported(file, "WeakMap per-tenant cache without a resolvable value type argument"))?;
-        return Ok(Some(Item::PerTenantCache { name, value_ty }));
+            });
+            if let Some(value_ty) = primordial_ty {
+                return Ok(Some(Item::PerTenantCache { name, value_ty, identity_wrapped: true }));
+            }
+        }
+        return Err(unsupported(file, "WeakMap per-tenant cache without a resolvable value type argument"));
     }
     let mutable = matches!(var_decl.kind, ast::VarDeclKind::Let | ast::VarDeclKind::Var);
     let value = lower_expr(file, init)?;

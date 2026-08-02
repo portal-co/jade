@@ -277,18 +277,36 @@ pattern before assuming it's simpler (not yet re-verified since this finding).
    **Done** for `BufferHooks` (`codecs` not ported yet — not needed until `typed-arrays.ts`).
    Also landed: `lower_module`'s per-item resilience fix (was blocking `bufferPrimordial` from
    lowering at all because of `nativeBufferHooks` alone, unrelated to anything below).
-3. Close the type-system gaps found by actually running `array-buffer.ts` through the pipeline
-   (see "More granular blockers" above): `BufferKind` type-name shimming to the hand-written enum,
-   `BufferHooks` as an added generic trait-bound parameter (not a struct), `TsMethodSignature`
-   interface members, and the inline-object-type per-tenant-cache value. None of these need class
-   lowering — purely type-resolution work, tractable on its own.
-4. Design and build `class` lowering (fields incl. `#private`/readonly, constructor, methods;
+3. ~~Close the type-system gaps found by actually running `array-buffer.ts` through the
+   pipeline~~ **Done**: `BufferKind` type-name shimming to the hand-written enum (`TYPE_SHIMS` +
+   `BUFFER_KIND_VARIANTS`/`BUFFER_KIND_TYPED_LOCALS` in `emit_rust.rs`), `BufferHooks` as an added
+   generic trait-bound parameter (`emit_fn_decl` now conditionally emits `<T: Tenant, H:
+   BufferHooks>`), `BufferHooks`'s own interface erased entirely (method-shaped, and already a
+   type shim — no need to parse `TsMethodSignature` for it), and the inline-`{ identity,
+   primordial }`-wrapped per-tenant-cache value (`Item::PerTenantCache` gained an
+   `identity_wrapped` flag; both the lookup and `.set(...)` peepholes in `emit_rust.rs` now
+   recognize the wrapped shape and drop the identity check, which has no Rust-side meaning once
+   the cache's own generic parameter already ties it to one hooks type). No regressions —
+   `object.ts`/`function.ts`/`reflect.ts` still generate, compile, pass all 33 tests, and
+   round-trip clean through `tsc`.
+4. **New finding, found by re-running `array-buffer.ts` after (3):** `BufferPrimordial` (the
+   interface `bufferPrimordial` itself returns) has *function-typed* members — `record(value):
+   BufferRecord | undefined` and `shell(kind, handle): TenantGenerator<object>` are real methods
+   on the returned object, not data fields. No interface-as-struct translation built so far
+   handles a function-typed field. This argues for a **broader** class refactor than originally
+   scoped: rather than only extracting `shell`/`constructor`'s *internal* shared state into a
+   helper class, `bufferPrimordial`'s entire return value should become a class instance —
+   `ArrayBuffer`/`ArrayBufferPrototype`/etc. as data fields, `record`/`shell` as real methods.
+   This is the same underlying capability (class lowering), just applied at the function's public
+   boundary instead of only internally; TS callers (`typed-arrays.ts` calls `.shell(...)` on the
+   result) are unaffected either way since method-call syntax on the result is identical.
+5. Design and build `class` lowering (fields incl. `#private`/readonly, constructor, methods;
    Rust target: `Rc<RefCell<Inner>>` wrapper + inherent-method `impl` block, uniformly for every
-   class instance — see the `ProxyState` entry below). Refactor `array-buffer.ts`'s `shell`/
-   `constructor` state into a class using it (and check `typedArraysPrimordial` for the same
-   self-reference pattern). (3) + (4) together should be enough to fully generate
-   `array-buffer.ts` and `typed-arrays.ts`.
-5. `proxy.ts` last: reuses (4)'s class lowering for `ProxyState` (now the *primary* motivating
+   class instance — see the `ProxyState` entry below). Refactor `array-buffer.ts` so
+   `bufferPrimordial`'s return value is a class instance per (4) above (and check
+   `typedArraysPrimordial` for the same self-reference/function-typed-member pattern). This is
+   now the single remaining piece needed to fully generate `array-buffer.ts` and `typed-arrays.ts`.
+6. `proxy.ts` last: reuses (5)'s class lowering for `ProxyState` (now the *primary* motivating
    case, not a follow-on), needs a real Rust method-call-on-class-instance emission path (`emit_call`
    has no such branch yet — every call target recognized today is `tenant.<method>`, a shim, a
    local function, a cross-file factory, or an exotic-handler literal), plus tuple types/holey

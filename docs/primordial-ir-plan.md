@@ -85,18 +85,28 @@
   item — `nativeBufferHooks` itself, which uses `instanceof`, unmodeled — aborted lowering the
   *whole file*, silently blocking `bufferPrimordial` too); now per-item resilient at lowering,
   matching emission's already-established policy.
-- Actually running `array-buffer.ts` through the pipeline after that surfaced four more
-  granular, independent type-resolution gaps before `bufferPrimordial` itself even lowers
-  (`BufferKind` needs type-name shimming to the hand-written enum, `BufferHooks` needs to become
-  an added generic trait-bound parameter rather than a struct, interface members can be
-  method-shaped, and a per-tenant cache's value type can be an inline anonymous object type) —
-  see `docs/proxy-and-buffer-primordial-gap-plan.md`'s "More granular blockers" section.
-- **Decided:** `array-buffer.ts`'s self-referential-closure problem (previous entry) and
-  `proxy.ts`'s shared-mutable-`ProxyState` problem should be solved by the *same* mechanism, not
-  two bespoke ones — refactor both into real TS `class`es and build one `class`-lowering IR
-  capability (Rust target: `Rc<RefCell<Inner>>` + inherent-method `impl`, uniformly for every
-  class instance) rather than a bespoke "detect co-referencing local closures" heuristic just for
-  `array-buffer.ts`. See the gap note's updated "Recommended order".
+- **The four type-resolution gaps found by running `array-buffer.ts` through the pipeline are
+  now closed**, all confirmed with no regressions (`object.ts`/`function.ts`/`reflect.ts` still
+  generate, compile, pass all 33 tests, round-trip clean through `tsc`): `BufferKind` type-name
+  shimming to the hand-written enum, `BufferHooks` as an added generic trait-bound parameter
+  (`emit_fn_decl` conditionally emits `<T: Tenant, H: BufferHooks>`), its own method-shaped
+  interface erased entirely rather than parsed, and the inline-`{ identity, primordial }`-wrapped
+  per-tenant-cache value (`Item::PerTenantCache` gained an `identity_wrapped` flag; both its
+  lookup and `.set(...)` peepholes now recognize the wrapped shape).
+- **New finding from re-running after that:** `BufferPrimordial` (the interface `bufferPrimordial`
+  returns) has function-typed members (`record`/`shell` are real methods, not data) — no
+  interface-as-struct translation handles that yet. This broadens the class-refactor scope
+  decided above: rather than only extracting `shell`/`constructor`'s *internal* state into a
+  helper class, `bufferPrimordial`'s entire return value should become a class instance (data
+  fields + `record`/`shell` as real methods) — same underlying capability, applied at the
+  function's public boundary too.
+- **Decided:** `array-buffer.ts`'s self-referential-closure problem and `proxy.ts`'s
+  shared-mutable-`ProxyState` problem should be solved by the *same* mechanism, not two bespoke
+  ones — refactor both into real TS `class`es and build one `class`-lowering IR capability (Rust
+  target: `Rc<RefCell<Inner>>` + inherent-method `impl`, uniformly for every class instance)
+  rather than a bespoke "detect co-referencing local closures" heuristic just for
+  `array-buffer.ts`. This is now the single remaining piece needed for both `array-buffer.ts`/
+  `typed-arrays.ts` and `proxy.ts` — see the gap note's updated "Recommended order".
 - **Not started:** `proxy.ts`, `array-buffer.ts`, `typed-arrays.ts`, `promise.ts`, `realm.ts`.
   Paused deliberately, same discipline: no closure-capture-model or `Tenant`/new-hand-authored-
   trait changes until the gap note's remaining items are acted on. `proxy.ts` will need

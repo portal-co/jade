@@ -25,7 +25,17 @@ pub enum Item {
     /// The repeated `const cache = new WeakMap<Tenant, X>()` per-tenant-cache idiom, recognized
     /// specially rather than as a generic `WeakMap` intrinsic — see the plan's "Rust has no
     /// `WeakMap`, but doesn't need one" note. `value_ty` is the cached record's struct name.
-    PerTenantCache { name: String, value_ty: String },
+    PerTenantCache {
+        name: String,
+        value_ty: String,
+        /// Whether the `WeakMap`'s own value type argument was the `{ identity: object;
+        /// primordial: <value_ty> }` wrapper shape (`array-buffer.ts`/`typed-arrays.ts`) rather
+        /// than a bare named type. `emit_ts.rs` needs this to re-declare the wrapper faithfully;
+        /// `emit_rust.rs` ignores it (the identity check has no Rust-side meaning — see
+        /// `docs/proxy-and-buffer-primordial-gap-plan.md`) but the *body*'s own matching
+        /// get/set statements still need their extended shape recognized regardless.
+        identity_wrapped: bool,
+    },
     /// Any other module-level `const`/`let` whose initializer isn't a `PerTenantCache` (e.g.
     /// `typed-arrays.ts`'s `codecs` table).
     ModuleConst { name: String, mutable: bool, init: Expr },

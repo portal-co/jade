@@ -3,8 +3,8 @@
 use crate::object::ObjectPrimordial;
 #[allow(unused_imports)]
 use portal_solutions_jade_tenant_rt::{
-    DynFields, PropertyKey, Tenant, TenantError, TenantInvocation, TenantPropertyDescriptor,
-    ValueTag,
+    BufferHooks, BufferKind, DynFields, PropertyKey, Tenant, TenantError, TenantExoticHandler,
+    TenantInvocation, TenantPropertyDescriptor, ValueTag,
 };
 pub struct FunctionPrimordial<T: Tenant> {
     pub function: T::Value,
@@ -192,9 +192,9 @@ pub fn function_primordial<T: Tenant + 'static>(
                     tenant,
                     "bound",
                     {
+                        let bound_this = bound_this.clone();
                         let prefix = prefix.clone();
                         let target = target.clone();
-                        let bound_this = bound_this.clone();
                         move |tenant: &mut T,
                               _ignored: T::Value,
                               call_args: &[T::Value]|

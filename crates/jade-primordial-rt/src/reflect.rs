@@ -3,8 +3,8 @@
 use crate::object::ObjectPrimordial;
 #[allow(unused_imports)]
 use portal_solutions_jade_tenant_rt::{
-    DynFields, PropertyKey, Tenant, TenantError, TenantInvocation, TenantPropertyDescriptor,
-    ValueTag,
+    BufferHooks, BufferKind, DynFields, PropertyKey, Tenant, TenantError, TenantExoticHandler,
+    TenantInvocation, TenantPropertyDescriptor, ValueTag,
 };
 pub struct ReflectPrimordial<T: Tenant> {
     pub reflect: T::Value,

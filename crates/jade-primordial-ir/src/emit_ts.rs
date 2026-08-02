@@ -42,8 +42,13 @@ fn emit_item(out: &mut String, item: &Item, level: usize) {
             }
             out.push_str("}\n");
         }
-        Item::PerTenantCache { name, value_ty } => {
+        Item::PerTenantCache { name, value_ty, identity_wrapped: false } => {
             out.push_str(&format!("const {name} = new WeakMap<Tenant, {value_ty}>();\n"));
+        }
+        Item::PerTenantCache { name, value_ty, identity_wrapped: true } => {
+            out.push_str(&format!(
+                "const {name} = new WeakMap<Tenant, {{ identity: object; primordial: {value_ty} }}>();\n"
+            ));
         }
         Item::ModuleConst { name, mutable, init } => {
             let kw = if *mutable { "let" } else { "const" };

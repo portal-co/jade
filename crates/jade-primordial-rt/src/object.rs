@@ -1,8 +1,8 @@
 /* This is GENERATED code by gen-primordials, from packages/jade-js/primordials/object.ts. */
 #[allow(unused_imports)]
 use portal_solutions_jade_tenant_rt::{
-    DynFields, PropertyKey, Tenant, TenantError, TenantInvocation, TenantPropertyDescriptor,
-    ValueTag,
+    BufferHooks, BufferKind, DynFields, PropertyKey, Tenant, TenantError, TenantExoticHandler,
+    TenantInvocation, TenantPropertyDescriptor, ValueTag,
 };
 pub struct ObjectPrimordial<T: Tenant> {
     pub object: T::Value,

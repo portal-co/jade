@@ -110,6 +110,11 @@ thread_local! {
     /// (`key === "byteLength"`, common in exotic-handler traps) needs the literal converted via
     /// `PropertyKey::from(...)` before the two sides can be compared at all.
     static PROPERTY_KEY_TYPED_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// Local-variable-name (snake_case) -> "this is a `BufferKind`-typed local" set, the same
+    /// role as `PROPERTY_KEY_TYPED_LOCALS` but for `TYPE_SHIMS`'s `BufferKind` entry: `kind ===
+    /// "shared-array-buffer"` needs to become `kind == BufferKind::SharedArrayBuffer`, not a
+    /// (non-existent) `PartialEq<str>` comparison.
+    static BUFFER_KIND_TYPED_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
 }
 
 fn imported_source(name: &str) -> Option<String> {
@@ -130,6 +135,10 @@ fn is_string_typed(name: &str) -> bool {
 
 fn is_property_key_typed(name: &str) -> bool {
     PROPERTY_KEY_TYPED_LOCALS.with(|set| set.borrow().contains(name))
+}
+
+fn is_buffer_kind_typed(name: &str) -> bool {
+    BUFFER_KIND_TYPED_LOCALS.with(|set| set.borrow().contains(name))
 }
 
 /// Tenant trait methods this emitter knows how to call, and each positional argument's passing
@@ -269,7 +278,7 @@ fn try_emit_module(module: &Module) -> TokenStream {
     });
     PER_TENANT_CACHE.with(|cache| {
         *cache.borrow_mut() = module.items.iter().find_map(|item| match item {
-            Item::PerTenantCache { name, value_ty } => Some((name.clone(), value_ty.clone())),
+            Item::PerTenantCache { name, value_ty, .. } => Some((name.clone(), value_ty.clone())),
             _ => None,
         });
     });
@@ -289,7 +298,7 @@ fn try_emit_module(module: &Module) -> TokenStream {
     let mut items = Vec::new();
     items.push(quote! {
         #[allow(unused_imports)]
-        use portal_solutions_jade_tenant_rt::{Tenant, PropertyKey, TenantError, TenantPropertyDescriptor, TenantInvocation, TenantExoticHandler, DynFields, ValueTag};
+        use portal_solutions_jade_tenant_rt::{Tenant, PropertyKey, TenantError, TenantPropertyDescriptor, TenantInvocation, TenantExoticHandler, DynFields, ValueTag, BufferKind, BufferHooks};
     });
     // Every registered cross-file factory's struct, unconditionally — small, fixed registry, so
     // this is simpler than scanning for which ones a given file actually destructures (see
@@ -375,6 +384,18 @@ fn emit_struct_def(def: &StructDef) -> Result<TokenStream, IrError> {
     })
 }
 
+/// TS type alias name -> fully-qualified Rust path, for a type that (unlike every other
+/// interface handled so far) already has a hand-written Rust counterpart rather than becoming a
+/// generated struct — `array-buffer.ts`'s `BufferKind` string-literal union and the
+/// `jade-tenant-rt::buffer::BufferKind` enum built for exactly this purpose are the first entry.
+/// See `docs/proxy-and-buffer-primordial-gap-plan.md`'s "type-name shimming" note.
+const TYPE_SHIMS: &[(&str, &str)] = &[("BufferKind", "portal_solutions_jade_tenant_rt::BufferKind")];
+
+/// `BufferKind`'s two string-literal values, in `EXOTIC_TRAPS`-table style: the TS literal and
+/// the matching Rust enum variant, consulted by `emit_eq_cmp` for `kind === "shared-array-buffer"`
+/// -style comparisons against a known `BufferKind`-typed local (see `BUFFER_KIND_TYPED_LOCALS`).
+const BUFFER_KIND_VARIANTS: &[(&str, &str)] = &[("array-buffer", "ArrayBuffer"), ("shared-array-buffer", "SharedArrayBuffer")];
+
 fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
     match ty {
         TypeRef::Named(name) => Ok(match name.as_str() {
@@ -385,6 +406,13 @@ fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
             "number" => quote! { f64 },
             "void" | "undefined" => quote! { () },
             "TenantPropertyDescriptor" => quote! { TenantPropertyDescriptor<T::Value> },
+            other if TYPE_SHIMS.iter().any(|(n, _)| *n == other) => {
+                let path = TYPE_SHIMS.iter().find(|(n, _)| *n == other).unwrap().1;
+                path.parse().map_err(|e| IrError::Unsupported {
+                    file: String::new(),
+                    construct: format!("type shim `{other}` path did not parse as Rust: {e}"),
+                })?
+            }
             other => {
                 if STRUCT_DEFS.with(|d| d.borrow().contains_key(other)) {
                     let ident = format_ident!("{other}");
@@ -519,6 +547,13 @@ fn emit_fn_decl(func: &FnDecl) -> Result<TokenStream, IrError> {
             }
         }
     });
+    for param in &func.params {
+        if let Pattern::Ident(pname) = &param.pattern
+            && matches!(param.ty, Some(TypeRef::Named(ref n)) if n == "BufferKind")
+        {
+            BUFFER_KIND_TYPED_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(pname)));
+        }
+    }
 
     let mut param_tokens = Vec::new();
     for param in &func.params {
@@ -573,13 +608,23 @@ fn emit_fn_decl(func: &FnDecl) -> Result<TokenStream, IrError> {
         }
     }
 
+    // `BufferHooks` is an added generic trait-bound parameter, not a struct (see `emit_param`'s
+    // matching case) — a function with a `hooks: BufferHooks` parameter needs `H: BufferHooks`
+    // in its own generic parameter list, alongside `T: Tenant`.
+    let has_buffer_hooks_param = func.params.iter().any(|p| matches!(p.ty, Some(TypeRef::Named(ref n)) if n == "BufferHooks"));
+    let generics = if has_buffer_hooks_param {
+        quote! { <T: Tenant + 'static, H: BufferHooks> }
+    } else {
+        quote! { <T: Tenant + 'static> }
+    };
+
     // `+ 'static` unconditionally: any factory that (transitively) reaches `make_builtin` needs
     // it (`ConstructFn<T>`/`impl FnMut(...) + 'static` both require it), and it's a harmless
     // superset requirement for the rest — every real `Tenant` impl in an actual embedding
     // satisfies it anyway, so this sidesteps tracking "does this specific function's call graph
     // reach a closure-taking shim" as its own analysis.
     Ok(quote! {
-        pub fn #fn_ident<T: Tenant + 'static>(#(#param_tokens),*) #return_ty {
+        pub fn #fn_ident #generics (#(#param_tokens),*) #return_ty {
             #body
         }
     })
@@ -614,6 +659,12 @@ fn emit_param(param: &Param) -> Result<TokenStream, IrError> {
         && matches!(inner.as_ref(), TypeRef::Named(n) if n == "unknown")
     {
         return Ok(quote! { #ident: &[T::Value] });
+    }
+    // `BufferHooks` is an added generic trait-bound parameter (`H: BufferHooks`, see
+    // `fn_has_buffer_hooks_param`/`emit_fn_decl`), not a struct — `&mut H` here, matching how
+    // `tenant: &mut T` is threaded.
+    if matches!(ty, TypeRef::Named(n) if n == "BufferHooks") {
+        return Ok(quote! { #ident: &mut H });
     }
     // `&str`, not `rust_type`'s `String` (that mapping is correct for a return/field position,
     // not a borrowed parameter) — every real call site passes a string literal, which is
@@ -748,14 +799,34 @@ fn try_emit_cache_lookup_pair(stmts: &[Stmt]) -> Result<Option<TokenStream>, IrE
     if tenant_arg != "tenant" {
         return Ok(None);
     }
-    let [Stmt::Return(Some(Expr::Ident(ret_name)))] = then_branch.0.as_slice() else { return Ok(None) };
-    if ret_name != existing_name {
-        return Ok(None);
+    // The plain shape: `if (existing) return existing;`.
+    if let [Stmt::Return(Some(Expr::Ident(ret_name)))] = then_branch.0.as_slice()
+        && ret_name == existing_name
+    {
+        let ident = format_ident!("{}", to_snake_case(existing_name));
+        return Ok(Some(quote! {
+            if let Some(#ident) = cache.entry.clone() { return Ok(#ident); }
+        }));
     }
-    let ident = format_ident!("{}", to_snake_case(existing_name));
-    Ok(Some(quote! {
-        if let Some(#ident) = cache.entry.clone() { return Ok(#ident); }
-    }))
+    // The `{ identity, primordial }`-wrapped shape (`array-buffer.ts`/`typed-arrays.ts`): `if
+    // (cached) { if (cached.identity !== hooks.identity) throw ...; return cached.primordial; }`.
+    // The identity check is moot on the Rust side (the cache's own generic type parameter
+    // already ties it to one hooks type at compile time — see `docs/proxy-and-buffer-primordial
+    // -gap-plan.md`), so it's simply dropped, not translated.
+    if let [
+        Stmt::If { cond: Expr::Bin { op: BinOp::NotEq, .. }, then_branch: throw_branch, else_branch: None },
+        Stmt::Return(Some(Expr::Member { obj: ret_obj, prop: MemberProp::Ident(field) })),
+    ] = then_branch.0.as_slice()
+        && field == "primordial"
+        && matches!(ret_obj.as_ref(), Expr::Ident(n) if n == existing_name)
+        && matches!(throw_branch.0.as_slice(), [Stmt::Throw(_)])
+    {
+        let ident = format_ident!("{}", to_snake_case(existing_name));
+        return Ok(Some(quote! {
+            if let Some(#ident) = cache.entry.clone() { return Ok(#ident); }
+        }));
+    }
+    Ok(None)
 }
 
 /// Recognizes `cache.set(tenant, result);` (the one-statement half of the cache idiom — see
@@ -771,7 +842,20 @@ fn try_emit_cache_set(stmt: &Stmt) -> Result<Option<TokenStream>, IrError> {
     let [CallArg::Normal(Expr::Ident(_tenant_arg)), CallArg::Normal(result_expr)] = args.as_slice() else {
         return Ok(None);
     };
-    let result_tokens = emit_expr(result_expr)?;
+    // `caches.set(tenant, { identity: hooks.identity, primordial: result })` — the same wrapped
+    // shape `try_emit_cache_lookup_pair` recognizes on the read side; extract just the
+    // `primordial` field's value (the `identity` field has no Rust-side meaning to preserve).
+    let value_expr = match result_expr {
+        Expr::Object(props) => props
+            .iter()
+            .find_map(|p| match p {
+                ObjectProp::KeyValue { key: PropKey::Ident(k), value } if k == "primordial" => Some(value),
+                _ => None,
+            })
+            .unwrap_or(result_expr),
+        _ => result_expr,
+    };
+    let result_tokens = emit_expr(value_expr)?;
     Ok(Some(quote! { cache.entry = Some((#result_tokens).clone()); }))
 }
 
@@ -1688,6 +1772,18 @@ fn value_tag_variant(tag: &str) -> Option<TokenStream> {
 /// generic opaque `T::Value` against `null`/`undefined` (-> `Tenant::typeof_tag` again, since
 /// there's no other way to ask an opaque value "are you null").
 fn emit_eq_cmp(op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<TokenStream, IrError> {
+    // `kind === "shared-array-buffer"`-style comparisons against a known `BufferKind`-typed
+    // local — see `TYPE_SHIMS`/`BUFFER_KIND_VARIANTS`.
+    if let Expr::Ident(name) = lhs
+        && is_buffer_kind_typed(&to_snake_case(name))
+        && let Expr::Lit(Lit::Str(s)) = rhs
+        && let Some((_, variant)) = BUFFER_KIND_VARIANTS.iter().find(|(lit, _)| lit == s)
+    {
+        let lhs_t = emit_expr(lhs)?;
+        let variant_ident = format_ident!("{variant}");
+        let op_t = bin_op_tokens(op)?;
+        return Ok(quote! { (#lhs_t #op_t BufferKind::#variant_ident) });
+    }
     if let Expr::Un { op: UnOp::TypeOf, arg } = lhs
         && let Expr::Lit(Lit::Str(tag)) = rhs
         && let Some(variant) = value_tag_variant(tag)
