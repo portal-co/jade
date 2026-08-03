@@ -1109,6 +1109,7 @@ fn lower_bin(file: &str, bin: &ast::BinExpr) -> Result<Expr, IrError> {
         ast::BinaryOp::Add => BinOp::Add,
         ast::BinaryOp::Sub => BinOp::Sub,
         ast::BinaryOp::Mul => BinOp::Mul,
+        ast::BinaryOp::Div => BinOp::Div,
         ast::BinaryOp::Mod => BinOp::Mod,
         ast::BinaryOp::EqEqEq | ast::BinaryOp::EqEq => BinOp::Eq,
         ast::BinaryOp::NotEqEq | ast::BinaryOp::NotEq => BinOp::NotEq,

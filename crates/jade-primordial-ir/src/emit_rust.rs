@@ -3460,6 +3460,7 @@ fn bin_op_tokens(op: BinOp) -> Result<TokenStream, IrError> {
         BinOp::Add => quote! { + },
         BinOp::Sub => quote! { - },
         BinOp::Mul => quote! { * },
+        BinOp::Div => quote! { / },
         BinOp::Mod => quote! { % },
         BinOp::Eq => quote! { == },
         BinOp::NotEq => quote! { != },

@@ -508,6 +508,7 @@ fn bin_op_str(op: BinOp) -> &'static str {
         BinOp::Add => "+",
         BinOp::Sub => "-",
         BinOp::Mul => "*",
+        BinOp::Div => "/",
         BinOp::Mod => "%",
         BinOp::Eq => "===",
         BinOp::NotEq => "!==",

@@ -6,8 +6,13 @@
 `jade-primordial-rt`'s module tree, and behavior-tested. Items 1 (`TenantExoticHandler`-from-
 object-literal), 2 (`BufferHooks` shim), and `class` lowering (below, under "Recommended order"
 item 5) are now all **done and tested**, and `array-buffer.ts` generates real, compiling,
-tested Rust end to end. Remaining: `typed-arrays.ts` (item 6) and `proxy.ts` (item 7) — see
-"Recommended order for whoever picks this up" for exact status and next steps.
+tested Rust end to end. `typed-arrays.ts`'s TS-side class refactor is also **done and verified**
+(item 6) — its Rust generation surfaced a materially larger set of gaps than `array-buffer.ts`
+needed (a general string-literal-union-to-enum IR item, and cross-file class/factory resolution
+with transitive cache-parameter threading — `cross_file.rs`'s current model only handles a
+zero-extra-argument factory call). That's flagged as a deliberate checkpoint, not yet attempted.
+Remaining: `typed-arrays.ts`'s Rust generation and `proxy.ts` (item 7) — see "Recommended order
+for whoever picks this up" for exact status and next steps.
 
 ## One capability all three files need: `TenantExoticHandler` from an object literal — DONE
 
@@ -369,8 +374,60 @@ proves it.**
    `objectPrototype` explicitly) that kept the translation clean rather than fighting the emitter.
    `typed-arrays.ts` itself hasn't been checked yet for the same self-reference pattern in its own
    `create` closure — do that before assuming it's a trivial follow-on.
-6. `typed-arrays.ts` next: apply the now-working class-lowering pipeline (checking `create` for
-   self-reference first), then generate/test/commit the same way `array-buffer.ts` was.
+6. `typed-arrays.ts`'s TS-side class refactor: **done**. `create` had the exact same
+   self-referential-closure problem `shell` did (the `"subarray"` builtin it installs calls
+   `create` again) — `TypedArrayPrimordialImpl` backs `TypedArrayPrimordial` the same way
+   `BufferPrimordialImpl` backs `BufferPrimordial`, `#buffers`/`#hooks`/`#records`/`#prototypes`
+   private, `create`/`makeConstructor` real methods calling each other and `array-buffer.ts`'s own
+   `record`/`shell` through the captured `that`. `TypedArrayPrimordial.constructors` changed from a
+   plain `Record<TypedArrayKind, Function>` to `Map<TypedArrayKind, Function>` (the IR has full
+   `Map`/`WeakMap` support, none for a plain-object lookup table) — updated the two consumers
+   (`primordials.e2e.ts`, `realm.ts`). Verified via `tsc --noEmit` and all 7 `*.e2e.ts` suites.
+   Committed separately from Rust generation, same discipline as `array-buffer.ts`.
+
+   Attempting Rust generation (`gen-primordials --file typed-arrays.ts --rust`) surfaced a
+   **materially larger** set of gaps than `array-buffer.ts` needed, beyond the two trivial ones
+   already fixed (`BinOp::Div` was missing from the IR entirely — added in all three backends;
+   `ReadonlyMap<K, V>` needs to resolve exactly like `Map`/`WeakMap` in `rust_type` — not yet done):
+   - **`TypedArrayKind` has no Rust type at all.** Unlike `BufferKind` (two variants, hand-shimmed
+     in `jade-tenant-rt` because a hand-written trait — `BufferHooks` — already needed it),
+     `TypedArrayKind` is a 9-variant string-literal union used *only* internally to this file, and
+     nothing hand-written needs it. The right fix is almost certainly a **general new IR item**
+     (`Item::StringEnumDef`-shaped: a string-literal-union type alias lowers to a real Rust `enum`
+     with an `AsRef<str>` impl for the `makeBuiltin(tenant, kind, ...)` call site, which needs the
+     enum back as a `&str`) rather than a one-off hand-shim — this is a reusable capability, not
+     specific to this file.
+   - **Cross-file class resolution doesn't exist yet.** `TypedArrayPrimordialImpl` holds a
+     `#buffers: BufferPrimordial` field — backed by `BufferPrimordialImpl`, a *different file's*
+     class. `gen-primordials` lowers/emits one file at a time (`CLASS_DEFS` is rebuilt from scratch
+     per invocation — see `emit_rust.rs`'s `try_emit_module`), so `class_backing_interface`,
+     `type_needs_tenant`/`type_needs_buffer_hooks`, and the class-instance-method-call branch in
+     `emit_call` all only see *this module's own* classes. `cross_file.rs` already solves the
+     analogous problem for plain factory *functions* (`objectPrimordial`) via a small hand-maintained
+     table, but that table's call-emission branch is hardcoded to the exact `factory(tenant)` shape
+     (see `emit_rust.rs` ~line 2930) — `bufferPrimordial(tenant, hooks)` has an extra argument, which
+     that branch rejects outright today.
+   - **Transitive cache-parameter threading.** `buffer_primordial`'s actual generated signature
+     (`crates/jade-primordial-rt/src/array_buffer.rs`) is `fn buffer_primordial<T, H>(tenant, hooks,
+     cache: &mut BufferPrimordialCache<T, H>, object_primordial_cache: &mut
+     ObjectPrimordialCache<T>)` — it *itself* depends on `objectPrimordial`'s cache. A cross-file
+     call to `bufferPrimordial` from `typed-arrays.ts` would need to thread *two* cache parameters
+     through, not the one `cross_file.rs`'s current model assumes per callee. `objectPrimordial`
+     never surfaced this because it has no further cross-file dependencies of its own.
+   - `codecs` (the `DataView` byte-codec table) still needs everything the plan's host-intrinsic
+     mapping table always flagged as separate, substantial work: `Item::ModuleConst` Rust emission
+     is unimplemented for *any* module-level const (not just this one), plus real `DataView`
+     get/set-family intrinsics and `new DataView(...)`/`new Uint8Array(...)` construction. Per-item
+     lowering resilience means this can stay a documented, skipped gap (like `nativeBufferHooks`
+     was) without blocking the rest of the file from generating.
+
+   None of this is a dead end — `StringEnumDef` and the cross-file generalization are both
+   legitimate, reusable capabilities the plan always implied it would eventually need (Phase 8's
+   "real multi-file sweep" is exactly where cross-file resolution stops being a hand-maintained
+   table) — but together they're comparable in size to a new phase, not a quick follow-on, and the
+   cross-file changes touch shared machinery every already-generated file
+   (`object`/`function`/`reflect`/`proxy`/`array_buffer`) depends on. Worth a deliberate go/no-go
+   before investing further, rather than pushing through unreviewed.
 7. `proxy.ts` last: reuses the same class lowering for `ProxyState` (now proven against a real
    file, not just designed), needs `functionPrimordial` wired the same way `object.ts` was for
    `function.ts`, plus tuple types/holey array destructuring and discriminated-union-as-enum type
