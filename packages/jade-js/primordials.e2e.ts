@@ -42,6 +42,18 @@ for (const tenant of [new MultiTenant(), single_tenant] as const) {
   const proxyValue = drive(tenant, tenant.invoke(proxy.Proxy, { kind: "construct", newTarget: proxy.Proxy, args: [value, handler] })) as object;
   assert(drive(tenant, tenant.get(proxyValue, "x")) === 1, "Proxy must fall back to target when guest trap is absent");
 
+  const revocable = drive(tenant, tenant.get(proxy.Proxy, "revocable")) as Function;
+  const revocableHandler = drive(tenant, tenant.make(null));
+  const record = drive(tenant, tenant.invoke(revocable, { kind: "apply", thisArg: undefined, args: [value, revocableHandler] })) as object;
+  const revocableProxy = drive(tenant, tenant.get(record, "proxy")) as object;
+  const revoke = drive(tenant, tenant.get(record, "revoke")) as Function;
+  assert(drive(tenant, tenant.get(revocableProxy, "x")) === 1, "revocable Proxy reads through to target before revoke()");
+  drive(tenant, tenant.invoke(revoke, { kind: "apply", thisArg: undefined, args: [] }));
+  let revokedRejected = false;
+  try { drive(tenant, tenant.get(revocableProxy, "x")); }
+  catch (error) { revokedRejected = error instanceof TypeError; }
+  assert(revokedRejected, "revoked Proxy must reject further operations");
+
   const buffers = drive(tenant, bufferPrimordial(tenant, nativeBufferHooks));
   const buffer = drive(tenant, tenant.invoke(buffers.ArrayBuffer, {
     kind: "construct", newTarget: buffers.ArrayBuffer, args: [8],
