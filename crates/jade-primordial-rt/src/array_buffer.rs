@@ -117,9 +117,9 @@ impl<T: Tenant + 'static, H: BufferHooks + 'static> BufferPrimordialImpl<T, H> {
                             "slice",
                             {
                                 let record = record.clone();
-                                let that = that.clone();
                                 let object_prototype = object_prototype.clone();
-                                move | tenant : & mut T , _this : T :: Value , args : & [T :: Value] | -> Result < T :: Value , TenantError > { let __undefined = tenant . undefined_value () ; let mut length = ((that . inner . borrow_mut () . hooks . byte_length (& (record . handle))) . map (| v | v as f64)) ? ; let mut begin = f64 :: min (({ let __hoisted_arg0 = & { let __arg = (args) . get (0usize) . cloned () . unwrap_or_else (|| __undefined . clone ()) ; if matches ! (tenant . typeof_tag (& __arg) , ValueTag :: Undefined | ValueTag :: Null) { tenant . number_value (0f64) } else { __arg } } ; (crate :: types_shim :: to_index (tenant , __hoisted_arg0)) ? }) as f64 , (length) as f64) ; let mut end = f64 :: min (({ let __hoisted_arg0 = & { let __arg = (args) . get (1usize) . cloned () . unwrap_or_else (|| __undefined . clone ()) ; if matches ! (tenant . typeof_tag (& __arg) , ValueTag :: Undefined | ValueTag :: Null) { tenant . number_value (length) } else { __arg } } ; (crate :: types_shim :: to_index (tenant , __hoisted_arg0)) ? }) as f64 , (length) as f64) ; return Ok (({ let __hoisted_arg2 = (that . inner . borrow_mut () . hooks . slice (& (record . handle) , (begin) as usize , (end) as usize)) ? ; that . shell (tenant , record . kind , __hoisted_arg2 , & object_prototype) }) ?) ; }
+                                let that = that.clone();
+                                move | tenant : & mut T , _this : T :: Value , args : & [T :: Value] | -> Result < T :: Value , TenantError > { let __undefined = tenant . undefined_value () ; let mut length = ((that . inner . borrow_mut () . hooks . byte_length (& (record . handle))) . map (| v | v as f64)) ? ; let mut begin = f64 :: min (({ let __hoisted_arg0 = & { let __arg = (args) . get (0usize) . cloned () . unwrap_or_else (|| __undefined . clone ()) ; if matches ! (tenant . typeof_tag (& __arg) , ValueTag :: Undefined | ValueTag :: Null) { tenant . number_value (0f64) } else { __arg } } ; ((crate :: types_shim :: to_index (tenant , __hoisted_arg0)) ? as f64) }) as f64 , (length) as f64) ; let mut end = f64 :: min (({ let __hoisted_arg0 = & { let __arg = (args) . get (1usize) . cloned () . unwrap_or_else (|| __undefined . clone ()) ; if matches ! (tenant . typeof_tag (& __arg) , ValueTag :: Undefined | ValueTag :: Null) { tenant . number_value (length) } else { __arg } } ; ((crate :: types_shim :: to_index (tenant , __hoisted_arg0)) ? as f64) }) as f64 , (length) as f64) ; return Ok (({ let __hoisted_arg2 = (that . inner . borrow_mut () . hooks . slice (& (record . handle) , (begin) as usize , (end) as usize)) ? ; that . shell (tenant , record . kind , __hoisted_arg2 , & object_prototype) }) ?) ; }
                             },
                             None,
                             Some((object_prototype).clone()),
@@ -337,8 +337,8 @@ impl<T: Tenant + 'static, H: BufferHooks + 'static> BufferPrimordialImpl<T, H> {
                 }
             },
             Some(Box::new({
-                let kind = kind.clone();
                 let object_prototype = object_prototype.clone();
+                let kind = kind.clone();
                 let that = that.clone();
                 move |tenant: &mut T,
                       _target: T::Value,
@@ -363,7 +363,7 @@ impl<T: Tenant + 'static, H: BufferHooks + 'static> BufferPrimordialImpl<T, H> {
                                         __arg
                                     }
                                 };
-                                (crate::types_shim::to_index(tenant, __hoisted_arg0))?
+                                ((crate::types_shim::to_index(tenant, __hoisted_arg0))? as f64)
                             }) as usize,
                         ))?;
                         that.shell(tenant, kind, __hoisted_arg2, &object_prototype)
@@ -389,7 +389,7 @@ impl<T: Tenant + 'static, H: BufferHooks + 'static> BufferPrimordialImpl<T, H> {
         return Ok(ctor);
     }
 }
-pub fn buffer_primordial<T: Tenant + 'static, H: BufferHooks + 'static>(
+pub fn buffer_primordial<T: Tenant + 'static, H: BufferHooks + Clone + 'static>(
     tenant: &mut T,
     hooks: H,
     cache: &mut BufferPrimordialCache<T, H>,

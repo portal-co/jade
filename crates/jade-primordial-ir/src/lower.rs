@@ -756,6 +756,22 @@ fn lower_expr(file: &str, expr: &ast::Expr) -> Result<Expr, IrError> {
         ast::Expr::Object(obj) => lower_object_lit(file, obj),
         ast::Expr::Member(member) => lower_member(file, member),
         ast::Expr::Call(call) => lower_call(file, call),
+        // `new DataView(X.buffer, X.byteOffset, X.byteLength)` (or the single-argument `new
+        // DataView(X.buffer)`) — `X` is always a full byte buffer already at every call site in
+        // the surveyed source (`typed-arrays.ts`'s `codecs` table), never a subarray, so the
+        // "view" is exactly `X` itself: erased entirely rather than modeled as a real wrapper
+        // type, since Rust's byte-conversion functions (`f64::from_le_bytes` etc.) operate
+        // directly on byte slices with no separate "view" object needed.
+        ast::Expr::New(new_expr)
+            if matches!(new_expr.callee.as_ref(), ast::Expr::Ident(id) if id.sym.as_ref() == "DataView")
+                && let Some(args) = &new_expr.args
+                && let Some(first) = args.first()
+                && first.spread.is_none()
+                && let ast::Expr::Member(m) = first.expr.as_ref()
+                && matches!(&m.prop, ast::MemberProp::Ident(p) if p.sym.as_ref() == "buffer") =>
+        {
+            lower_expr(file, &m.obj)
+        }
         ast::Expr::New(new_expr) => {
             let callee = Box::new(lower_expr(file, &new_expr.callee)?);
             let args = new_expr
@@ -1003,8 +1019,20 @@ fn lower_call(file: &str, call: &ast::CallExpr) -> Result<Expr, IrError> {
         // here, the same as the per-tenant-cache variable's `.get`/`.set`.
         let receiver_is_tenant_or_cache = matches!(member.obj.as_ref(), ast::Expr::Ident(id)
             if id.sym.as_ref() == "tenant" || is_cache_var(id.sym.as_ref()));
+        // `.get`/`.set` also collide by name with `typed-arrays.ts`'s `codecs` table entries
+        // (`codec.get(view, offset)`, `codec.set(view, offset, value)`), recognized later in
+        // `emit_rust.rs` as calls on a `CODEC_TYPED_LOCALS` local — excluded here by *argument
+        // count* rather than receiver shape (no type information exists yet at lowering time): a
+        // real `Map`/`WeakMap` `.get`/`.has`/`.delete` always takes exactly one key argument and
+        // `.set` always takes exactly two, so a `.get`/`.set` call with a different arity can't be
+        // a map access and is left as an ordinary call for `emit_rust.rs` to recognize instead.
         let map_methods = ["get", "set", "has", "delete"];
-        if !receiver_is_tenant_or_cache && map_methods.contains(&method_name) {
+        let map_method_arity_matches = match method_name {
+            "get" | "has" | "delete" => args.len() == 1,
+            "set" => args.len() == 2,
+            _ => false,
+        };
+        if !receiver_is_tenant_or_cache && map_methods.contains(&method_name) && map_method_arity_matches {
             let recv = lower_expr(file, &member.obj)?;
             let mapped = match method_name {
                 "get" => intrinsics::MAP_GET,

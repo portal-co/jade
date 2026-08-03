@@ -30,6 +30,19 @@ pub struct CrossFileFactory {
     /// cache type itself is referenced fully-qualified at its one use site (the extra parameter
     /// this factory's caller gains), so it doesn't need its own prelude `use`.
     pub module_path: &'static str,
+    /// Fully-qualified path to the cache type itself (`"crate::object::ObjectPrimordialCache"`).
+    /// *Not* always `struct_path` + `"Cache"`: `Item::PerTenantCache`'s own naming convention
+    /// (`{value_ty}Cache`, see `emit_rust.rs`'s `emit_item`) names the cache after the *interface*
+    /// a factory returns, which is the same as `struct_name` when there's no backing class
+    /// (`objectPrimordial` -> `ObjectPrimordial`/`ObjectPrimordialCache`) but different when there
+    /// is one (`bufferPrimordial` returns `BufferPrimordial`, backed by the *class*
+    /// `BufferPrimordialImpl` — `struct_name`/`struct_path` name the class for the self-import
+    /// and prelude-`use` machinery, but the cache type stays `BufferPrimordialCache`, never
+    /// `BufferPrimordialImplCache`).
+    pub cache_type_path: &'static str,
+    /// Whether the cache type's own generic parameter list includes `H: BufferHooks` alongside
+    /// `T: Tenant` (`BufferPrimordialCache<T, H>`) — `false` for `ObjectPrimordialCache<T>`.
+    pub cache_needs_buffer_hooks: bool,
     /// Positional parameters this factory takes beyond the leading bare `tenant` — each a
     /// (TS-side param name, param type name) pair, in call order, resolved through the ordinary
     /// `arg_kind_for_type`/`emit_call_arg` machinery the same way a class method's own parameters
@@ -52,6 +65,8 @@ pub const TABLE: &[CrossFileFactory] = &[
         struct_name: "ObjectPrimordial",
         struct_path: "crate::object::ObjectPrimordial",
         module_path: "crate::object",
+        cache_type_path: "crate::object::ObjectPrimordialCache",
+        cache_needs_buffer_hooks: false,
         extra_params: &[],
         transitive_caches: &[],
     },
@@ -62,6 +77,8 @@ pub const TABLE: &[CrossFileFactory] = &[
         struct_name: "BufferPrimordialImpl",
         struct_path: "crate::array_buffer::BufferPrimordialImpl",
         module_path: "crate::array_buffer",
+        cache_type_path: "crate::array_buffer::BufferPrimordialCache",
+        cache_needs_buffer_hooks: true,
         extra_params: &[("hooks", "BufferHooks")],
         transitive_caches: &["ObjectPrimordial"],
     },
@@ -84,6 +101,12 @@ pub struct CrossFileClassMethod {
     /// Parameter type names in declared order, exactly as they'd appear in `TypeRef::Named` —
     /// resolved through the same `arg_kind_for_type` table any other typed parameter list is.
     pub param_types: &'static [&'static str],
+    /// Whether this method's Rust return type is `Option<_>` (`record`'s `BufferRecord | undefined`)
+    /// rather than a plain/`Result`-wrapped value (`shell`'s `TenantGenerator<object>`) — consulted
+    /// by `emit_rust.rs`'s `returns_option` so a local bound from a call to this method (`const
+    /// bufferRecord = that.#buffers.record(...);`) gets truthy/`!`/narrowing checks translated
+    /// correctly, the same as any other `Option`-typed local.
+    pub returns_option: bool,
 }
 
 pub struct CrossFileClass {
@@ -112,11 +135,17 @@ pub const CLASS_TABLE: &[CrossFileClass] = &[CrossFileClass {
     needs_tenant: true,
     needs_buffer_hooks: true,
     methods: &[
-        CrossFileClassMethod { ts_name: "record", rust_name: "record", param_types: &["Tenant", "unknown"] },
+        CrossFileClassMethod {
+            ts_name: "record",
+            rust_name: "record",
+            param_types: &["Tenant", "unknown"],
+            returns_option: true,
+        },
         CrossFileClassMethod {
             ts_name: "shell",
             rust_name: "shell",
             param_types: &["Tenant", "BufferKind", "BufferHandle", "object"],
+            returns_option: false,
         },
     ],
 }];

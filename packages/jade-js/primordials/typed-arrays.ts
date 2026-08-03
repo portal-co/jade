@@ -40,7 +40,7 @@ const caches = new WeakMap<Tenant, { identity: object; primordial: TypedArrayPri
  * them, which reach back in via the captured `that` (not `self` — see `BufferPrimordialImpl`'s own
  * doc comment for why).
  */
-class TypedArrayPrimordialImpl {
+class TypedArrayPrimordialImpl implements TypedArrayPrimordial {
   #buffers: BufferPrimordial;
   #hooks: BufferHooks;
   #objectPrototype: object;
@@ -97,8 +97,8 @@ class TypedArrayPrimordialImpl {
         yield tenant.yieldTenant(that.#hooks.write(that.#buffers.record(tenant, record.buffer)!.handle, record.offset + index * codec.bytes, bytes));
       },
       *has(receiver, key) { const record = that.#records.get(receiver)!; return typeof key === "string" && /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < record.length; },
-      *delete() {}, *ownKeys() { const record = that.#records.get(value)!; return Array.from({ length: record.length }, (_, i) => String(i)); },
-      *ownPropertyKeys() { const record = that.#records.get(value)!; return Array.from({ length: record.length }, (_, i) => String(i)); },
+      *delete() {}, *ownKeys(receiver) { const record = that.#records.get(receiver)!; return Array.from({ length: record.length }, (_, i) => String(i)); },
+      *ownPropertyKeys(receiver) { const record = that.#records.get(receiver)!; return Array.from({ length: record.length }, (_, i) => String(i)); },
       *getOwnPropertyDescriptor() { return undefined; }, *defineProperty() { return false; }, *getPrototypeOf() { return prototype; },
       *setPrototypeOf() { return false; }, *isExtensible() { return true; }, *preventExtensions() { return true; }, *define() {}, *assign() {},
     }));

@@ -6,19 +6,22 @@
 `jade-primordial-rt`'s module tree, and behavior-tested. Items 1 (`TenantExoticHandler`-from-
 object-literal), 2 (`BufferHooks` shim), and `class` lowering (below, under "Recommended order"
 item 5) are now all **done and tested**, and `array-buffer.ts` generates real, compiling,
-tested Rust end to end. `typed-arrays.ts`'s TS-side class refactor is also **done and verified**
-(item 6), and the general infrastructure its Rust generation needed — `Item::StringEnumDef`
-(string-literal-union type alias -> real Rust `enum`), a plain-object-shaped type *alias* also
-becoming a `StructDef` (not just `interface`, needed for `Record_`), and cross-file class/factory
-resolution with transitive cache-parameter threading (`cross_file.rs`'s `CrossFileFactory` gained
-`extra_params`/`transitive_caches`, plus a new `CrossFileClass`/`CLASS_TABLE` for
-`BufferPrimordial`/`BufferPrimordialImpl`) — is now **done and tested** too (48 tests across
-`jade-primordial-ir`/`jade-primordial-rt`/`jade-tenant-rt` still pass; `array-buffer.rs`
-regenerates identically, confirmed via diff). The *sole* remaining blocker for `typed-arrays.ts`
-is `codecs` (the `DataView` byte-codec table) — everything else in the file (the class itself
-apart from its two `codecs[kind]` references, the top-level factory function, `TypedArrayKind`,
-`Record_`) now generates cleanly. Remaining: `codecs`'s `DataView` intrinsics and `proxy.ts`
-(item 7) — see "Recommended order for whoever picks this up" for exact status and next steps.
+tested Rust end to end. **`typed-arrays.ts` is now also done: it fully IR-lowers, generates, and
+compiles**, including `codecs` (item 6, closed — see its own subsection below for the full list of
+gaps this closed, both the ones already known and several new ones the `codecs`/byte-arithmetic
+work surfaced). `jade-primordial-rt` builds clean with `typed_arrays.rs` wired into `lib.rs`, and
+all 48 existing tests across `jade-primordial-ir`/`jade-primordial-rt`/`jade-tenant-rt` still pass
+(`array-buffer.rs` regenerates identically modulo nondeterministic clone-prelude ordering,
+confirmed via diff throughout). **Not yet done**: a dedicated behavioral test for
+`typed_arrays.rs` (byte-level read/write round-trips) — blocked on a real but separate gap, not
+specific to typed arrays: class-lowering never generates a public accessor for a TS class's own
+*public* (non-`#`) fields, only the private `Inner` storage, so nothing outside the generating
+module can reach a specific typed-array constructor to drive a test through. `array-buffer.ts` has
+the identical gap (`ArrayBuffer`/`ArrayBufferPrototype` are public in TS but Rust-inaccessible
+externally) and was never held to this bar either — worth fixing generally (one new
+accessor-per-public-field case in class emission) before either file's Rust output gets a real
+behavior-level test, but out of scope for this pass. Remaining: `proxy.ts` (item 7) — see
+"Recommended order for whoever picks this up" for exact status and next steps.
 
 ## One capability all three files need: `TenantExoticHandler` from an object literal — DONE
 
@@ -429,18 +432,79 @@ proves it.**
      — needed since `BufferPrimordialImpl` is a class, not a struct, and `array-buffer.ts` would
      otherwise self-import its own type when regenerated now that it's in the table.
 
-   **What's left, confirmed by the latest `gen-primordials` run**: only `codecs` (the `DataView`
-   byte-codec table) still fails — everything else in the file (the class itself apart from its
-   two `codecs[kind]` references, the top-level factory function, `TypedArrayKind`, `Record_`) now
-   generates cleanly. `codecs` still needs everything the plan's host-intrinsic mapping table
-   always flagged as separate, substantial work: `Item::ModuleConst` Rust emission is unimplemented
-   for *any* module-level const (not just this one — `codecs` is the first file to have one at
-   all), plus real `DataView` get/set-family intrinsics and `new DataView(...)`/`new
-   Uint8Array(...)` construction. `Codec` (the type alias backing each table entry) has method
-   signatures, not just properties, so it doesn't qualify for the same "object-type-alias ->
-   `StructDef`" treatment `Record_` got — expected, and harmless on its own (per-item lowering
-   resilience means it's skipped without blocking anything else, the same way `nativeBufferHooks`
-   was for `array-buffer.ts`).
+   **`codecs` itself: done.** Rather than modeling `Record<TypedArrayKind, Codec>` as a real Rust
+   value (a `HashMap` rebuilt on every access, or closures living in a `const`, neither necessary
+   for a small fixed table), `try_emit_data_view_codec_table` recognizes the whole shape as a unit
+   (the same philosophy as `Item::PerTenantCache`) and emits three inherent methods directly on
+   `TypedArrayKind` — `codec_bytes`/`codec_get`/`codec_set` — extracting each entry's byte width and
+   `DataView` method suffix structurally from the real lowered `Expr` tree (not a hand-duplicated
+   parallel table, so it can't drift from the TS source), while lowering the setter's own value
+   expression (`Math.max(0, Math.min(255, Math.round(x)))` for `Uint8ClampedArray`, bare `x`
+   otherwise) through the ordinary `emit_expr` pipeline. `new DataView(X.buffer, ...)` is erased
+   entirely at lowering time (`lower.rs`) to just `X` — Rust's byte-conversion functions
+   (`f64::from_le_bytes` etc.) need no separate "view" wrapper. `Codec`'s own type alias (method
+   signatures, not properties) still doesn't get a `StructDef` — expected and harmless, since
+   nothing needs it once `codecs` is expressed as enum methods instead of real struct values.
+
+   Chasing this from "lowers" to "actually compiles" surfaced a long tail of **real, general
+   gaps** no prior generated file had exercised (typed-arrays.ts is the first file with real
+   byte-level number/`usize` arithmetic, an early-return `Option` guard, and a "void" closure whose
+   last statement isn't an explicit `return`) — all fixed in `emit_rust.rs`, none typed-arrays.ts-
+   specific:
+   - **A block-scoping bug in `Stmt::If`**: a `const`/`let` declared inside an `if`/`else` branch
+     leaked into `LOCAL_REFNESS` for the rest of the enclosing function, so a *later*, unrelated
+     closure redeclaring the same name (its own local, not a real capture) got wrongly treated as
+     capturing an "outer" binding — `get`'s trap has two sibling branches that both declare their
+     own `const bytes = ...`. Fixed by saving/restoring `LOCAL_REFNESS` around each branch.
+   - **`Number(x)`/`is_array_index_string`/`typeof key === "string"`** previously assumed `x`/`key`
+     was always a `T::Value` or always a `PropertyKey` respectively — both now branch on which one
+     it actually is (`Number(key)` parses `PropertyKey`'s `Display` text; `Number(value)` calls
+     `Tenant::to_number`; a `PropertyKey`-typed `typeof === "string"`/array-index check matches the
+     `String` variant directly instead of calling `Tenant::typeof_tag`, which doesn't apply to a
+     host-level key at all).
+   - **`toIndex`'s Rust return type (`usize`) now gets cast to `f64` once, at the shim call site**,
+     instead of leaking `usize` into arithmetic that's `f64` everywhere else it's used
+     (`source.offset + i * codec.bytes`) — every existing caller either already cast explicitly at
+     the point of use (harmless double-cast) or benefits from the fix directly.
+   - **A native arithmetic expression (`record.length * codec.bytes`) or a `number`-typed struct
+     field (`record.length`) returned directly from a trap** now gets `Tenant::number_value`
+     wrapping, the same as a bare numeric literal already did — trap return coercion previously
+     only recognized literals and two hand-picked call shapes.
+   - **A bare arithmetic expression used as an `if` condition** (`if (offset % codec.bytes)`) now
+     gets an explicit `!= 0.0` — TS's "truthy number" has no Rust equivalent.
+   - **`if (x) { ... }` for an `Option`-typed `x`** (no negation — `const bufferRecord =
+     that.#buffers.record(...); if (bufferRecord) { ...bufferRecord.handle... }`) now becomes a
+     real `if let Some(x) = x.clone() { ... }`, alongside the existing `if (!x) continue;`/`if (!x)
+     throw;` narrowing forms. A `Map.get(...)`/cross-file-class method registered
+     `returns_option: true` (`BufferPrimordial.record`) now also marks its own local
+     `Option`-typed, which those narrowing forms depend on to fire in the first place.
+   - **A closure whose body falls off the end without an explicit `return`** (`typed-arrays.ts`'s
+     `set` builtin — a "void" JS function whose last statement is a loop) now gets a trailing
+     `Ok(tenant.undefined_value())` appended; every closure before this had happened to always end
+     in an explicit `return`/`throw`.
+   - **A `BufferKind`-typed argument fed a string literal directly** (`hooks.allocate("array-buffer",
+     ...)`) now converts through `buffer_kind_literal` — previously only handled at one call site
+     (`emit_call`'s class-instance-method-call branch), not `BufferHooks` method calls generally.
+   - **A `BufferHooks`-typed parameter used more than once in the same function** (`typedArraysPrimordial`
+     passes `hooks` to both `bufferPrimordial(tenant, hooks)` and `new
+     TypedArrayPrimordialImpl(...)`) needed `H: Clone` added to the generated bound, and the
+     cross-file-factory call site to clone rather than move it — `NativeBufferHooks` now derives
+     `Clone` (trivial; it's a unit struct).
+   - **A class constructor parameter typed `object`/`Function`/`unknown`** (`objectPrototype:
+     object`) is `emit_param`'s reference-typed convention (`&T::Value`), but the field it's stored
+     into is owned (`T::Value`) — constructor field-assignment now clones a reference-typed param
+     when storing it, the same gap `BufferHooks`-typed constructor params never had (those are
+     already owned on both sides).
+   - **An interface a same-module class explicitly `implements`** now always resolves to that
+     class in `rust_type`, even when the interface's own shape also happens to be plain-data
+     enough to have gotten a `StructDef` of its own (`TypedArrayPrimordial { constructors: ... }` —
+     unlike the method-shaped `BufferPrimordial`, which has no competing `StructDef` at all, so
+     this ordering never mattered before). Was also a real bug in `typed-arrays.ts` itself: the
+     class never declared `implements TypedArrayPrimordial` in the first place — fixed alongside.
+
+   All fixed, all covered by the existing 48-test suite passing with zero regressions, confirmed
+   by `array-buffer.rs` regenerating identically. `typed_arrays.rs` is wired into
+   `jade-primordial-rt/src/lib.rs` and `jade-primordial-rt` builds clean end to end.
 7. `proxy.ts` last: reuses the same class lowering for `ProxyState` (now proven against a real
    file, not just designed), needs `functionPrimordial` wired the same way `object.ts` was for
    `function.ts`, plus tuple types/holey array destructuring and discriminated-union-as-enum type

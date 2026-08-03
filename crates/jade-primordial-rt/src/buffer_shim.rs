@@ -23,7 +23,7 @@ pub struct NativeBufferHandle(Rc<RefCell<Vec<u8>>>);
 
 /// The default in-memory `BufferHooks` adapter — always available, never implicitly selected
 /// (mirrors `nativeBufferHooks`'s own "explicit opt-in, never automatic" contract).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct NativeBufferHooks;
 
 impl BufferHooks for NativeBufferHooks {
