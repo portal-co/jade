@@ -6,22 +6,36 @@
 `jade-primordial-rt`'s module tree, and behavior-tested. Items 1 (`TenantExoticHandler`-from-
 object-literal), 2 (`BufferHooks` shim), and `class` lowering (below, under "Recommended order"
 item 5) are now all **done and tested**, and `array-buffer.ts` generates real, compiling,
-tested Rust end to end. **`typed-arrays.ts` is now also done: it fully IR-lowers, generates, and
-compiles**, including `codecs` (item 6, closed — see its own subsection below for the full list of
-gaps this closed, both the ones already known and several new ones the `codecs`/byte-arithmetic
-work surfaced). `jade-primordial-rt` builds clean with `typed_arrays.rs` wired into `lib.rs`, and
-all 48 existing tests across `jade-primordial-ir`/`jade-primordial-rt`/`jade-tenant-rt` still pass
-(`array-buffer.rs` regenerates identically modulo nondeterministic clone-prelude ordering,
-confirmed via diff throughout). **Not yet done**: a dedicated behavioral test for
-`typed_arrays.rs` (byte-level read/write round-trips) — blocked on a real but separate gap, not
-specific to typed arrays: class-lowering never generates a public accessor for a TS class's own
-*public* (non-`#`) fields, only the private `Inner` storage, so nothing outside the generating
-module can reach a specific typed-array constructor to drive a test through. `array-buffer.ts` has
-the identical gap (`ArrayBuffer`/`ArrayBufferPrototype` are public in TS but Rust-inaccessible
-externally) and was never held to this bar either — worth fixing generally (one new
-accessor-per-public-field case in class emission) before either file's Rust output gets a real
-behavior-level test, but out of scope for this pass. Remaining: `proxy.ts` (item 7) — see
-"Recommended order for whoever picks this up" for exact status and next steps.
+tested Rust end to end. `typed-arrays.ts` is also done: it fully IR-lowers, generates, and
+compiles, including `codecs` (item 6, closed — see its own subsection below for the full list of
+gaps this closed). **`proxy.ts` is now done too (item 7, closed)**: `ProxyState` refactored into
+a real class (`ProxyStateImpl`, `#target`/`#handler`/`#revoked` private fields, `requireLive`/
+`target`/`handler`/`revoke` methods), `trap` redesigned as a top-level function instead of a
+`proxyExotic`-local closure, `TrapResult` resolves structurally to `Option<T::Value>` in Rust with
+no generated enum needed. `jade-primordial-rt` builds clean with `proxy.rs` wired into `lib.rs`,
+and all 48 existing tests across `jade-primordial-ir`/`jade-primordial-rt`/`jade-tenant-rt` still
+pass, with `array-buffer.rs` regenerating byte-for-byte identical and `typed_arrays.rs`
+regenerating identical modulo the same nondeterministic clone-prelude ordering as before —
+confirmed via diff. See item 7's own subsection below for the full list of gaps this closed, most
+of them general emitter bugs no prior file had exercised (a class method that itself throws by
+calling another throwing method, an owned/`Option`-typed local reused after being consumed into an
+array-literal call argument, a cross-file top-level function call needing borrow-hoisting for a
+nested `tenant` call). A TS-side behavioral test for the new revocable-proxy path (`revoke()`/
+`existingState`) was added to `primordials.e2e.ts`, since none existed before.
+
+**Not yet done**: a dedicated Rust-side behavioral test for either `typed_arrays.rs` or
+`proxy.rs`'s generated output — blocked on a real but separate gap, not specific to either file:
+class-lowering never generates a public accessor for a TS class's own *public* (non-`#`) fields,
+only the private `Inner` storage, so nothing outside the generating module can reach a specific
+typed-array constructor (or, for `proxy.ts`, `ProxyPrimordial.Proxy` is already a plain public
+field, so this gap doesn't block a `proxy.rs` test the same way — but no such test exists yet
+regardless). `array-buffer.ts` has the identical public-field gap (`ArrayBuffer`/
+`ArrayBufferPrototype` are public in TS but Rust-inaccessible externally) and was never held to
+this bar either — worth fixing generally (one new accessor-per-public-field case in class
+emission) before any of these three files' Rust output gets a real behavior-level test, but out of
+scope for this pass. With `proxy.ts` closed, all ten primordial files' original scope from
+`docs/primordial-ir-plan.md` items 1-2 (proxy/buffer gaps) is now done; `promise.ts`/`realm.ts`
+remain the plan's own later phases, untouched by this doc.
 
 ## One capability all three files need: `TenantExoticHandler` from an object literal — DONE
 
@@ -505,10 +519,115 @@ proves it.**
    All fixed, all covered by the existing 48-test suite passing with zero regressions, confirmed
    by `array-buffer.rs` regenerating identically. `typed_arrays.rs` is wired into
    `jade-primordial-rt/src/lib.rs` and `jade-primordial-rt` builds clean end to end.
-7. `proxy.ts` last: reuses the same class lowering for `ProxyState` (now proven against a real
-   file, not just designed), needs `functionPrimordial` wired the same way `object.ts` was for
-   `function.ts`, plus tuple types/holey array destructuring and discriminated-union-as-enum type
-   aliases for `TrapResult`.
+7. `proxy.ts` last: **done**. Reused the same class lowering `ProxyState` was always meant to
+   use, but the TS source needed real adjustment first, not just IR coverage:
+   - **`ProxyState` refactored from a plain mutable object into `ProxyStateImpl`**, a real class
+     implementing a method-shaped `ProxyState` interface (`requireLive`/`target`/`handler`/
+     `revoke`). `#target`/`#handler` stay non-`Option`-typed (unlike the original design's minor
+     GC-hint of clearing them on `revoke()`) specifically to avoid needing truthiness narrowing on
+     an `Option`-typed *class field*, which only works for a bare local variable so far (via
+     `OPTION_LOCALS`) — `#revoked: bool` alone gates all access through `requireLive()`.
+   - **`trap` redesigned as a top-level function**, not a closure local to `proxyExotic` — closure
+     lowering only recognizes the fixed `makeBuiltin` apply/construct shape (`thisArg`/`args`,
+     returning `T::Value`), which `trap`'s own shape (`name: string` first, returning `TrapResult`)
+     doesn't match. `tenant`/`state` became explicit parameters instead of captured closure state,
+     the same adjustment `array-buffer.ts`'s `shell`/`record` made earlier.
+   - **`TrapResult` (`{found: false} | {found: true; value: unknown}`) resolves directly to
+     `Option<T::Value>`** via a name-based special case in `rust_type`, not a generated enum — no
+     general discriminated-union support was built (see "Explicitly not proposed here", still
+     accurate: this stayed exactly as narrow as planned). `.found`/`.value` reads translate to
+     `.is_some()`/`.clone().unwrap()` via a new `TRAP_RESULT_TYPED_LOCALS` local-tracking set.
+   - A separately-declared `const native: TenantExoticHandler = {...}; tenant.makeExotic(null,
+     native);` was inlined directly into the `makeExotic(...)` call — handler-literal recognition
+     only fires when the object literal is inline, not referenced via a variable.
+   - `existingState` became a required (not optional) parameter, with callers passing `undefined`
+     explicitly, matching the parameter-registration machinery below rather than fighting it.
+
+   Getting the resulting IR to lower and the Rust to actually compile surfaced a long tail of
+   **general emitter gaps**, none `proxy.ts`-specific, all fixed in `emit_rust.rs` and covered by
+   the existing 48-test suite passing with zero regressions:
+   - **`new_class_instance_name`** now recognizes `existing ?? new ClassName(...)` (nullish-coalesce
+     reusing a possibly-passed-in instance), not just a bare `new ClassName(...)`, so `const state =
+     existingState ?? new ProxyStateImpl(...)` registers `state` in `CLASS_INSTANCE_LOCALS`.
+   - **Class/interface-typed function *parameters*** now register into `CLASS_INSTANCE_LOCALS`
+     during `emit_fn_decl` (previously only `Stmt::Let` bindings did) — needed for `trap`'s own
+     `state: ProxyState` parameter, so `state.target()`/`state.handler()` resolve as method calls.
+     `emit_fn_decl` also gained a `CLASS_INSTANCE_LOCALS.clear()` at its top, matching
+     `emit_class_method`'s existing discipline (a latent gap: no top-level function had ever needed
+     a class-typed parameter before, so nothing had ever exercised stale entries leaking in).
+   - **Optional non-guest-value-typed parameters** (`existingState: ProxyState | undefined`) now
+     register into `OPTION_LOCALS` during `emit_fn_decl`, routing through the ordinary
+     `.unwrap_or(...)` translation instead of the bare-ident nullish-check heuristic added earlier
+     for `Number(value)`-style cases (which assumed any non-`OPTION_LOCALS` bare ident was a guest
+     `T::Value`).
+   - **A private class field read directly returned** (`return this.#target;`) needed an explicit
+     `.clone()` neither `coerce_return_value` nor `coerce_literal_to_value` added before —
+     `emit_member`'s class-field branch deliberately returns a *borrow* through
+     `self.inner.borrow().<field>` (correct for its only previously-observed use, being the
+     receiver of a further call, which bypasses this coercion entirely via `emit_call`'s own
+     class-field-aware branches), but a bare `return` of that borrow tries to move out of a
+     temporary `Ref` that doesn't outlive the statement. Fixed in both return-coercion paths.
+   - **A class method that itself throws only by calling another throwing method**
+     (`ProxyStateImpl::target`/`::handler` calling `require_live()`, with no `throw` of their own)
+     wasn't detected as throwing at all — `block_throws`/`expr_throws` only looked for a syntactic
+     `throw`, not a transitive call. Fixed with a new one-hop case in `expr_throws` (a call to
+     another same-class method throws if that method's own body does) plus a new
+     `class_method_throws(class_name, method_name)` helper — needed because naively re-running
+     `block_throws` on another method's body from an unrelated caller's context resolves `this`
+     against whatever class is *currently* being emitted (`CURRENT_CLASS`), not the target method's
+     own class, unless `CURRENT_CLASS` is temporarily pointed at it first.
+   - **A non-generator class method call site now appends `?` when the target method throws** —
+     previously assumed "never `?`-suffixed: every generator method call is `TenantYield`-wrapped
+     (which appends its own `?`), a non-generator method is never throwing" — true until
+     `target`/`handler` became the first non-generator *and* throwing methods observed.
+   - **`keys as PropertyKey[]`** (an array-typed TS cast, `ownKeys`/`ownPropertyKeys`'s own
+     `guestArrayLike(...)` result) needed per-element `Tenant::to_property_key` conversion —
+     `emit_cast` only had a single-value `PropertyKey` case before, no `TypeRef::Array` case.
+   - **`getOwnPropertyDescriptor`/`getPrototypeOf`'s `coerce_trap_return_value`** double-wrapped an
+     already-`Option`-shaped trap-return expression (`return yield tenant.yieldTenant(tenant
+     .getOwnPropertyDescriptor(...))`) in an extra `Some(...)` — a pre-existing bug in the
+     `OptionValue`/`OptionDescriptor` branch, never exercised before because no prior trap had ever
+     forwarded straight through to the corresponding `Tenant` method's own already-`Option`-typed
+     result. Fixed by reusing `returns_option` (which already recognized this exact tenant-call
+     shape for a different purpose) as an extra "don't re-wrap" check.
+   - **Guest-value `!x` truthy-checks** (`!result.value`, `TrapResult`'s unwrapped payload) needed
+     `Tenant::to_boolean` — Rust's `!` only applies to `bool`, but TS's `!`/`!!` truthy-checks any
+     value. Also fixed a name collision: `result.value === undefined` was being mis-recognized as a
+     `TenantPropertyDescriptor.value` field check (`emit_eq_cmp`'s `DESCRIPTOR_FIELDS` heuristic),
+     needing an explicit `TRAP_RESULT_TYPED_LOCALS` exclusion guard.
+   - **A same-module top-level function call's own array-literal argument
+     (`emit_value_slice_array_literal`, `trap`'s `args: readonly unknown[]`)** needed several
+     per-element fixes beyond the original `PropertyKey`-conversion case: a `&T::Value`-typed bare
+     local (`receiver`/`descriptors`/`source`) needs `.clone()` for this owned-`T::Value` slot; an
+     `Option<T::Value>`-typed local (`setPrototypeOf`'s `prototype`) needs
+     `.clone().unwrap_or_else(|| tenant.null_value())`, cloned first since it's reused after the
+     call in the trap's own fallback branch; and a plain owned `T::Value` local (`set`'s own
+     `value` parameter) also needs `.clone()` for the same reused-after-the-call reason — settled
+     on cloning *every* bare-ident element unconditionally rather than trying to prove which ones
+     are single-use, since a guest `T::Value`/class-instance clone is always cheap and correct here.
+   - **The same call's own leading arguments** needed two more general fixes mirroring
+     `emit_shim_call`'s existing ones: `maybe_hoist_arg` (hoisting a nested-`tenant`-borrowing
+     argument into its own `let` before the call, to avoid `tenant` being borrowed twice in one
+     statement) wasn't wired into the local-function-call branch at all; and a class-instance-typed
+     argument passed by value (`trap(tenant, state, ...)`, `state: ProxyState`) was being *moved*
+     rather than cloned, breaking every later reuse of the same local in the same trap body
+     (sometimes even later in the very same call's own array-literal argument) — now cloned like
+     any other class-instance value, matching the `Rc<RefCell<...>>` cheap-clone convention used
+     everywhere else in this codebase.
+   - **A `ClassInterface | undefined`-typed call argument** (`proxyExotic(tenant, target, handler,
+     existingState)`/`proxyExotic(..., undefined)`) needed the same `None`/`Some((...).clone())`
+     handling `ArgKind::OptionalValue` already gives a guest-value `Option`, but for a class
+     instance instead — no `TypeRef::Optional` case existed in the local-function-call argument
+     loop at all before this.
+   - **A new `functionPrimordial` cross-file factory entry** in `cross_file.rs` (`FunctionPrimordial`
+     for `FunctionPrototype`, transitively depending on `ObjectPrimordial`'s own cache) — the same
+     kind of entry `bufferPrimordial` already had, just for `function.ts` instead of
+     `array-buffer.ts`.
+
+   All fixed, all covered by the existing 48-test suite passing with zero regressions;
+   `array-buffer.rs` regenerates byte-for-byte identical and `typed_arrays.rs` regenerates identical
+   modulo the same nondeterministic clone-prelude ordering as before. `proxy.rs` is wired into
+   `jade-primordial-rt/src/lib.rs` and `jade-primordial-rt` builds clean end to end.
 
 ## Explicitly not proposed here
 

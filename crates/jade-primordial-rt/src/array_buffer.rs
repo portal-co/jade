@@ -1,5 +1,7 @@
 /* This is GENERATED code by gen-primordials, from packages/jade-js/primordials/array-buffer.ts. */
 #[allow(unused_imports)]
+use crate::function::FunctionPrimordial;
+#[allow(unused_imports)]
 use crate::object::ObjectPrimordial;
 #[allow(unused_imports)]
 use portal_solutions_jade_tenant_rt::{
@@ -116,9 +118,9 @@ impl<T: Tenant + 'static, H: BufferHooks + 'static> BufferPrimordialImpl<T, H> {
                             tenant,
                             "slice",
                             {
-                                let record = record.clone();
                                 let object_prototype = object_prototype.clone();
                                 let that = that.clone();
+                                let record = record.clone();
                                 move | tenant : & mut T , _this : T :: Value , args : & [T :: Value] | -> Result < T :: Value , TenantError > { let __undefined = tenant . undefined_value () ; let mut length = ((that . inner . borrow_mut () . hooks . byte_length (& (record . handle))) . map (| v | v as f64)) ? ; let mut begin = f64 :: min (({ let __hoisted_arg0 = & { let __arg = (args) . get (0usize) . cloned () . unwrap_or_else (|| __undefined . clone ()) ; if matches ! (tenant . typeof_tag (& __arg) , ValueTag :: Undefined | ValueTag :: Null) { tenant . number_value (0f64) } else { __arg } } ; ((crate :: types_shim :: to_index (tenant , __hoisted_arg0)) ? as f64) }) as f64 , (length) as f64) ; let mut end = f64 :: min (({ let __hoisted_arg0 = & { let __arg = (args) . get (1usize) . cloned () . unwrap_or_else (|| __undefined . clone ()) ; if matches ! (tenant . typeof_tag (& __arg) , ValueTag :: Undefined | ValueTag :: Null) { tenant . number_value (length) } else { __arg } } ; ((crate :: types_shim :: to_index (tenant , __hoisted_arg0)) ? as f64) }) as f64 , (length) as f64) ; return Ok (({ let __hoisted_arg2 = (that . inner . borrow_mut () . hooks . slice (& (record . handle) , (begin) as usize , (end) as usize)) ? ; that . shell (tenant , record . kind , __hoisted_arg2 , & object_prototype) }) ?) ; }
                             },
                             None,
@@ -337,9 +339,9 @@ impl<T: Tenant + 'static, H: BufferHooks + 'static> BufferPrimordialImpl<T, H> {
                 }
             },
             Some(Box::new({
-                let object_prototype = object_prototype.clone();
-                let kind = kind.clone();
                 let that = that.clone();
+                let kind = kind.clone();
+                let object_prototype = object_prototype.clone();
                 move |tenant: &mut T,
                       _target: T::Value,
                       args: &[T::Value]|

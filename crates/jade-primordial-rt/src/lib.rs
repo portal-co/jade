@@ -19,3 +19,4 @@ pub mod function;
 pub mod reflect;
 pub mod array_buffer;
 pub mod typed_arrays;
+pub mod proxy;

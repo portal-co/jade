@@ -57,6 +57,13 @@ thread_local! {
     /// (`installMethod`/`lock`), the same way `tenant_method`/`shims` do for the other two kinds
     /// of callee this emitter recognizes.
     static LOCAL_FN_PARAMS: RefCell<HashMap<String, Vec<Option<TypeRef>>>> = RefCell::new(HashMap::new());
+    /// Locally-defined top-level function name -> its own declared return type (unwrapped from
+    /// `TenantGenerator<X>` to just `X`, matching how `emit_fn_decl` reads it) — consulted by
+    /// `returns_option` so a local bound from `yield tenant.yieldTenant(someLocalFn(...))` (e.g.
+    /// `proxy.ts`'s `const result = ...trap(...)`) gets marked `Option`-typed when the callee's
+    /// own return type resolves that way (`TrapResult` -> `Option<T::Value>`), the same as a
+    /// `Tenant`/cross-file-class method already does.
+    static LOCAL_FN_RETURN_TYPES: RefCell<HashMap<String, TypeRef>> = RefCell::new(HashMap::new());
     /// `interface` name -> its field list, populated from every `Item::StructDef` in the module
     /// currently being emitted. Consulted by `rust_type` (a `TenantGenerator<ObjectPrimordial>`
     /// return type needs to resolve to the generated `ObjectPrimordial<T>` struct) and by
@@ -78,6 +85,14 @@ thread_local! {
     /// Drives the `=== undefined`/`!== undefined` -> `.is_none()`/`.is_some()` lowering and the
     /// Option-narrowing `Cond`/`if (!X) continue;` peepholes.
     static OPTION_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// Local-variable-names (snake_case) bound from a call to a function returning `TrapResult`
+    /// specifically (`proxy.ts`'s `trap`) — a narrower set than `OPTION_LOCALS` (every one of
+    /// these is also in `OPTION_LOCALS`, but not every `OPTION_LOCALS` member has `.found`/
+    /// `.value` sub-fields — `TypedArrayPrimordialImpl`'s `bufferRecord`, from `BufferPrimordial
+    /// .record`, is directly the `Option<BufferRecord>` itself, checked with a bare `if
+    /// (bufferRecord)`). Drives `emit_member`'s `.found` -> `.is_some()`/`.value` -> `.unwrap()`
+    /// translation.
+    static TRAP_RESULT_TYPED_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     /// Unique-name counter for generated `TenantExoticHandler`-implementing structs (see
     /// `emit_exotic_handler_literal`) — one file can construct more than one exotic in different
     /// factory functions (`array-buffer.ts`'s buffer shell and, per kind, `typed-arrays.ts`'s
@@ -110,6 +125,17 @@ thread_local! {
     /// (`key === "byteLength"`, common in exotic-handler traps) needs the literal converted via
     /// `PropertyKey::from(...)` before the two sides can be compared at all.
     static PROPERTY_KEY_TYPED_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// Local-variable-name (snake_case) -> "this is specifically `Option<T::Value>`" set —
+    /// narrower than `OPTION_LOCALS` (which also covers `Option<f64>` and other non-guest-value
+    /// `Option`s). Populated only by `emit_exotic_handler_literal` for a trap parameter declared
+    /// `"Option<T::Value>"` in [`EXOTIC_TRAPS`] (currently just `setPrototypeOf`'s `prototype`).
+    /// Consulted wherever a bare guest-`Option<T::Value>` local needs different handling than an
+    /// ordinary `T::Value` local: `emit_call_arg`'s `OptionalValue` case must pass it through
+    /// as-is instead of re-wrapping in `Some(...)` (it's already `Option`-shaped), and
+    /// `emit_value_slice_array_literal` must unwrap it to a real guest value via
+    /// `Tenant::null_value()` for `None` (a `readonly unknown[]` slot needs a genuine `T::Value`,
+    /// never a Rust `Option`).
+    static OPTION_VALUE_TYPED_LOCALS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     /// Local-variable-name (snake_case) -> "this is a `BufferKind`-typed local" set, the same
     /// role as `PROPERTY_KEY_TYPED_LOCALS` but for `TYPE_SHIMS`'s `BufferKind` entry: `kind ===
     /// "shared-array-buffer"` needs to become `kind == BufferKind::SharedArrayBuffer`, not a
@@ -217,6 +243,45 @@ fn is_f64_typed(name: &str) -> bool {
 
 fn class_def(name: &str) -> Option<ClassDef> {
     CLASS_DEFS.with(|m| m.borrow().get(name).cloned())
+}
+
+/// Whether `class_name`'s own `method_name` throws (a non-generator method, `Result`-returning
+/// in Rust) — used by call sites (`emit_call`'s class-instance-method-call branch, `expr_throws`'s
+/// own same-class-method-call case) to decide whether *their* call needs a trailing `?`. Not just
+/// `block_throws(&method.func.body)` directly: that body's own `this.<otherMethod>()` calls
+/// (`ProxyStateImpl::target`/`::handler` calling `require_live`) resolve through
+/// `class_instance_obj`'s `Expr::ThisArg` case, which reads `CURRENT_CLASS` — but `CURRENT_CLASS`
+/// reflects whatever class (if any) is *actually* being emitted right now, not `class_name`, when
+/// this is called from an unrelated caller's context (a top-level function like `trap`, or a
+/// different class's own method). Temporarily pointing `CURRENT_CLASS` at `class_name` for the
+/// duration of this check keeps `this` resolving correctly regardless of who's asking.
+fn class_method_throws(class_name: &str, method_name: &str) -> bool {
+    let Some(def) = class_def(class_name) else { return false };
+    let Some(method) = def.methods.iter().find(|m| m.name == method_name) else { return false };
+    if method.func.is_generator {
+        return false;
+    }
+    let saved = CURRENT_CLASS.with(|c| c.borrow().clone());
+    CURRENT_CLASS.with(|c| *c.borrow_mut() = Some(class_name.to_string()));
+    let throws = block_throws(&method.func.body);
+    CURRENT_CLASS.with(|c| *c.borrow_mut() = saved);
+    throws
+}
+
+/// The class name of a `new ClassName(...)` expression — either directly, or as the right-hand
+/// side of `existing ?? new ClassName(...)` (`proxy.ts`'s `existingState ?? new
+/// ProxyStateImpl(target, handler)`, reusing a possibly-passed-in instance or constructing a
+/// fresh one) — see `Stmt::Let`'s `CLASS_INSTANCE_LOCALS` registration, which uses this instead of
+/// matching `Expr::New` directly so both shapes register their local the same way.
+fn new_class_instance_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::New { callee, .. } => {
+            let Expr::Ident(name) = callee.as_ref() else { return None };
+            class_def(name).is_some().then_some(name.as_str())
+        }
+        Expr::Bin { op: BinOp::Nullish, rhs, .. } => new_class_instance_name(rhs),
+        _ => None,
+    }
 }
 
 /// A same-module class's own name, if `interface_name` refers to a class directly (its own name)
@@ -566,7 +631,9 @@ fn emit_call_arg(expr: &Expr, kind: shims::ArgKind) -> Result<TokenStream, IrErr
         shims::ArgKind::OptionalValue => {
             if is_nullish_lit(expr) {
                 quote! { None }
-            } else if matches!(expr, Expr::Cast { target: TypeRef::Optional(_), .. }) {
+            } else if matches!(expr, Expr::Cast { target: TypeRef::Optional(_), .. })
+                || matches!(expr, Expr::Ident(name) if OPTION_VALUE_TYPED_LOCALS.with(|m| m.borrow().contains(&to_snake_case(name))))
+            {
                 tokens
             } else {
                 quote! { Some((#tokens).clone()) }
@@ -644,6 +711,23 @@ fn try_emit_module(module: &Module) -> TokenStream {
                 && let Some(name) = &func.name
             {
                 map.insert(name.clone(), func.params.iter().map(|p| p.ty.clone()).collect());
+            }
+        }
+    });
+    LOCAL_FN_RETURN_TYPES.with(|map| {
+        let mut map = map.borrow_mut();
+        map.clear();
+        for item in &module.items {
+            if let Item::FnDecl(func) = item
+                && let Some(name) = &func.name
+            {
+                let unwrapped = match &func.return_type {
+                    Some(TypeRef::Generic { name, args }) if name == "TenantGenerator" && args.len() == 1 => Some(args[0].clone()),
+                    other => other.clone(),
+                };
+                if let Some(ty) = unwrapped {
+                    map.insert(name.clone(), ty);
+                }
             }
         }
     });
@@ -1194,6 +1278,12 @@ fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
             // parameter's own name, so unlike `TYPE_SHIMS`'s fixed absolute paths this is
             // special-cased directly rather than added to that table.
             "BufferHandle" => quote! { H::Handle },
+            // `proxy.ts`'s `TrapResult` (`{ found: false } | { found: true; value: unknown }`) —
+            // resolves directly to `Option<T::Value>` rather than a generated enum; see the type
+            // alias's own doc comment in `proxy.ts` and `emit_object_lit`/`emit_member`'s
+            // `TrapResult`-shaped-construction/`.found`/`.value` special cases, which recognize
+            // the TS-side shape structurally rather than needing a real IR item for it.
+            "TrapResult" => quote! { Option<T::Value> },
             // A struct/class *field* typed `BufferHooks` (e.g. `BufferPrimordialImpl`'s
             // `#hooks`) is the class's own `H: BufferHooks` generic parameter, owned outright —
             // unlike a `BufferHooks`-typed *function parameter*, which `emit_param` types as
@@ -1314,7 +1404,20 @@ fn expr_throws(expr: &Expr) -> bool {
                 if LOCAL_FN_PARAMS.with(|m| m.borrow().contains_key(name)));
             let is_cross_file_call = matches!(callee.as_ref(), Expr::Ident(name)
                 if imported_source(name).is_some_and(|source| cross_file::lookup(&source, name).is_some()));
-            is_shim_call || is_local_call || is_cross_file_call || expr_throws(callee) || args.iter().any(call_arg_throws)
+            // A call to another method on a known same-module class instance
+            // (`this.requireLive()`, `proxy.ts`'s `ProxyStateImpl.target()`/`.handler()` calling
+            // their own `requireLive()`) throws if *that* method's own body does — a class
+            // method's `throws`-ness isn't otherwise visible to its callers, since
+            // `emit_class_method` computes it independently per method with no cross-method
+            // awareness. Only one level deep (checks the callee's body directly, not further
+            // transitively) — sufficient for the surveyed source, where no class method calls
+            // another throwing method through more than one hop.
+            let is_throwing_class_method_call = if let Expr::Member { obj, prop: MemberProp::Ident(method) } = callee.as_ref() {
+                class_instance_obj(obj).is_some_and(|(class_name, _)| class_method_throws(&class_name, method))
+            } else {
+                false
+            };
+            is_shim_call || is_local_call || is_cross_file_call || is_throwing_class_method_call || expr_throws(callee) || args.iter().any(call_arg_throws)
         }
         Expr::New { callee, args } => expr_throws(callee) || args.iter().any(call_arg_throws),
         Expr::Member { obj, prop } => {
@@ -1389,6 +1492,37 @@ fn emit_fn_decl(func: &FnDecl) -> Result<TokenStream, IrError> {
             && matches!(param.ty, Some(TypeRef::Named(ref n)) if n == "BufferKind")
         {
             BUFFER_KIND_TYPED_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(pname)));
+        }
+    }
+    // A parameter typed `X | undefined` where `X` isn't one of the names that map directly to a
+    // guest `T::Value` (`object`/`Function`/`unknown`) is a *real* Rust `Option<_>` — e.g.
+    // `proxy.ts`'s `existingState: ProxyState | undefined` (`Option<ProxyStateImpl<T>>`) — not a
+    // guest value that might itself be the guest `null`/`undefined`. Registering it in
+    // `OPTION_LOCALS` routes `existingState ?? new ProxyStateImpl(...)` through the ordinary
+    // `Option::unwrap_or_else` nullish translation instead of the `Tenant::typeof_tag`-based one
+    // meant for guest values.
+    for param in &func.params {
+        if let Pattern::Ident(pname) = &param.pattern
+            && let Some(TypeRef::Optional(inner)) = &param.ty
+            && !matches!(inner.as_ref(), TypeRef::Named(n) if n == "object" || n == "Function" || n == "unknown")
+        {
+            OPTION_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(pname)));
+        }
+    }
+    // A parameter typed as a same-module class (by name or by an interface it `implements`) is a
+    // class instance too, exactly like a `let`-bound one — needed for a top-level function that
+    // takes an existing instance as an explicit parameter rather than constructing its own (e.g.
+    // `proxy.ts`'s `trap(tenant, state: ProxyState, ...)`, called from `proxyExotic` with its own
+    // `state` local). Cleared first, matching `emit_class_method`'s own discipline, since a stale
+    // entry from whatever function/method was emitted previously would otherwise leak in (this
+    // never mattered before nothing needed it, but that's no longer true).
+    CLASS_INSTANCE_LOCALS.with(|m| m.borrow_mut().clear());
+    for param in &func.params {
+        if let Pattern::Ident(pname) = &param.pattern
+            && let Some(TypeRef::Named(ty_name)) = &param.ty
+            && let Some(class_name) = class_backing_interface(ty_name)
+        {
+            CLASS_INSTANCE_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(pname), class_name));
         }
     }
 
@@ -1815,6 +1949,40 @@ fn returns_option(init: &Expr) -> bool {
         // — e.g. `const bufferRecord = that.#buffers.record(tenant, first);`, later checked with
         // `if (bufferRecord) {...}`.
         || is_cross_file_class_option_call(init)
+        // A call to a same-module top-level generator function whose own declared return type
+        // resolves `Option`-shaped (`TrapResult` -> `Option<T::Value>`) — e.g. `proxy.ts`'s
+        // `const result = yield tenant.yieldTenant(trap(tenant, state, "get", [...]));`.
+        || local_fn_call_returns_option(init)
+}
+
+/// Whether `expr` is `yield tenant.yieldTenant(someLocalFn(...))` where `someLocalFn` is a
+/// same-module top-level function registered in `LOCAL_FN_RETURN_TYPES` with an `Option`-shaped
+/// return type — see `returns_option`'s doc comment.
+fn local_fn_call_returns_option(expr: &Expr) -> bool {
+    let Expr::TenantYield(inner) = expr else { return false };
+    let Expr::Call { callee, .. } = inner.as_ref() else { return false };
+    let Expr::Ident(name) = callee.as_ref() else { return false };
+    LOCAL_FN_RETURN_TYPES.with(|m| {
+        m.borrow()
+            .get(name)
+            .is_some_and(|ty| matches!(ty, TypeRef::Optional(_)) || matches!(ty, TypeRef::Named(n) if n == "TrapResult"))
+    })
+}
+
+/// Narrower than `local_fn_call_returns_option`: specifically a call to a function returning
+/// `TrapResult` (`proxy.ts`'s `trap`) — see `TRAP_RESULT_TYPED_LOCALS`'s doc comment.
+fn local_fn_call_returns_trap_result(expr: &Expr) -> bool {
+    let Expr::TenantYield(inner) = expr else { return false };
+    let Expr::Call { callee, .. } = inner.as_ref() else { return false };
+    let Expr::Ident(name) = callee.as_ref() else { return false };
+    LOCAL_FN_RETURN_TYPES.with(|m| m.borrow().get(name).is_some_and(|ty| matches!(ty, TypeRef::Named(n) if n == "TrapResult")))
+}
+
+/// Whether `expr` is `X.value` where `X` is a `TRAP_RESULT_TYPED_LOCALS` local — see `Expr::Un`'s
+/// `UnOp::Not` special case, which needs to know this to insert `Tenant::to_boolean`.
+fn is_trap_result_value_field(expr: &Expr) -> bool {
+    let Expr::Member { obj, prop: MemberProp::Ident(field) } = expr else { return false };
+    field == "value" && matches!(obj.as_ref(), Expr::Ident(n) if TRAP_RESULT_TYPED_LOCALS.with(|m| m.borrow().contains(&to_snake_case(n))))
 }
 
 /// Whether `expr` is a call to a cross-file class method registered `returns_option: true` (e.g.
@@ -1897,6 +2065,18 @@ fn coerce_return_value(expr: &Expr, tokens: TokenStream) -> Result<TokenStream, 
     // loop/match binding — see `LOCAL_REFNESS`) needs an explicit `.clone()`: the function's own
     // declared return type is always an owned `T::Value`/struct, never a reference.
     if matches!(expr, Expr::Ident(name) if is_known_ref(&to_snake_case(name))) {
+        return Ok(quote! { (#tokens).clone() });
+    }
+    // A private class field read directly returned (`proxy.ts`'s `ProxyStateImpl.target()`:
+    // `return this.#target;`) — `emit_member`'s class-field branch deliberately produces a
+    // *borrow* through `self.inner.borrow().<field>` with no `.clone()` (every other occurrence
+    // is itself the receiver of a further call, which bypasses this coercion entirely via
+    // `emit_call`'s own class-field-aware branches). A bare `return` of that borrow would try to
+    // move out of the temporary `Ref`, which doesn't live past the statement.
+    if let Expr::Member { obj, prop } = expr
+        && member_prop_field_name(prop).is_some()
+        && class_instance_obj(obj).is_some()
+    {
         return Ok(quote! { (#tokens).clone() });
     }
     Ok(tokens)
@@ -2133,14 +2313,14 @@ fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
                     });
                 }
             };
-            // `const impl = new BufferPrimordialImpl(hooks);` — registers `impl` as a known
-            // class-instance local so later `impl.<method>(...)`/`impl.<field> = ...` references
-            // resolve through `class_instance_obj` the same way a method's own `that`/`this` does.
-            if let Some(Expr::New { callee, .. }) = init
-                && let Expr::Ident(class_name) = callee.as_ref()
-                && class_def(class_name).is_some()
-            {
-                CLASS_INSTANCE_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(name), class_name.clone()));
+            // `const impl = new BufferPrimordialImpl(hooks);` (or `const state: ProxyState =
+            // existingState ?? new ProxyStateImpl(target, handler);` — a possibly-passed-in
+            // instance reused via nullish-coalesce, or a freshly constructed one) — registers the
+            // local as a known class-instance local so later `impl.<method>(...)`/`impl.<field> =
+            // ...` references resolve through `class_instance_obj` the same way a method's own
+            // `that`/`this` does.
+            if let Some(class_name) = init.as_ref().and_then(new_class_instance_name) {
+                CLASS_INSTANCE_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(name), class_name.to_string()));
             }
             // `const codec = codecs[kind];` — `codecs[kind]` erased to bare `kind` (see
             // `emit_member`'s `CODEC_TABLE_NAME`-aware computed-access case), so `codec` itself is
@@ -2157,6 +2337,9 @@ fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
             if init.as_ref().is_some_and(returns_option) {
                 OPTION_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(name)));
             }
+            if init.as_ref().is_some_and(local_fn_call_returns_trap_result) {
+                TRAP_RESULT_TYPED_LOCALS.with(|m| m.borrow_mut().insert(to_snake_case(name)));
+            }
             if init.as_ref().is_some_and(is_buffer_hooks_usize_returning_call) {
                 F64_TYPED_LOCALS.with(|set| set.borrow_mut().insert(to_snake_case(name)));
             }
@@ -2166,6 +2349,9 @@ fn emit_stmt(stmt: &Stmt) -> Result<TokenStream, IrError> {
             Ok(quote! { let mut #ident = #value; })
         }
         Stmt::Expr(expr) => {
+            // A same-class throwing method call (`this.requireLive();`) already gets its own
+            // trailing `?` from `emit_call`'s class-instance-method-call branch — nothing extra
+            // needed here.
             let value = emit_expr(expr)?;
             Ok(quote! { #value; })
         }
@@ -2418,6 +2604,15 @@ fn emit_expr(expr: &Expr) -> Result<TokenStream, IrError> {
             Ok(quote! { (#inner)? })
         }
         Expr::Bin { op, lhs, rhs } => emit_bin(*op, lhs, rhs),
+        // `!result.value`/`!!result.value` (`proxy.ts`'s `TrapResult.value`, a guest `T::Value`
+        // after `emit_member`'s unwrap translation) — TS's logical `!` truthy-checks a guest
+        // value; Rust's own `!` only works on `bool`, so this needs `Tenant::to_boolean` first.
+        // Every other `!X` in the surveyed source already produces a real `bool` on its own
+        // (comparisons, `.found`'s `.is_some()`, etc.), so this is scoped to exactly this shape.
+        Expr::Un { op: UnOp::Not, arg } if is_trap_result_value_field(arg) => {
+            let arg = emit_expr(arg)?;
+            Ok(quote! { (!tenant.to_boolean(&(#arg))) })
+        }
         Expr::Un { op: UnOp::Not, arg } => {
             let arg = emit_expr(arg)?;
             Ok(quote! { (!#arg) })
@@ -2499,6 +2694,20 @@ fn emit_member(obj: &Expr, prop: &MemberProp) -> Result<TokenStream, IrError> {
             let obj_tokens = emit_expr(obj)?;
             Ok(quote! { #obj_tokens.codec_bytes() })
         }
+        // `result.found`/`result.value` where `result` is a `TRAP_RESULT_TYPED_LOCALS` local
+        // (bound from a call to `trap`, `Option<T::Value>` on the Rust side — see `rust_type`'s
+        // `"TrapResult"` case). `.found` is a plain presence check; `.value` unwraps, safe in
+        // practice because every real use only reads `.value` after `.found` already confirmed
+        // `Some` (Rust can't see that itself from the TS-level `? :`/`if` structure, but the
+        // value is never read otherwise in the surveyed source).
+        MemberProp::Ident(field)
+            if (field == "found" || field == "value")
+                && let Expr::Ident(name) = obj
+                && TRAP_RESULT_TYPED_LOCALS.with(|m| m.borrow().contains(&to_snake_case(name))) =>
+        {
+            let obj_tokens = emit_expr(obj)?;
+            Ok(if field == "found" { quote! { #obj_tokens.is_some() } } else { quote! { (#obj_tokens.clone().unwrap()) } })
+        }
         MemberProp::Ident(field) => {
             let obj_tokens = emit_expr(obj)?;
             let field_ident = format_ident!("{}", to_snake_case(field));
@@ -2552,7 +2761,28 @@ fn emit_member(obj: &Expr, prop: &MemberProp) -> Result<TokenStream, IrError> {
 /// drawn from `DESCRIPTOR_FIELDS`, see `emit_descriptor_object_literal`), or a literal matching
 /// some locally-`interface`-declared struct's exact field set (`{ Object: ObjectFn,
 /// ObjectPrototype }`, see `emit_struct_literal`). Anything else is unsupported.
+/// `{ found: false }` -> `None`, `{ found: true, value: X }` -> `Some(X)` — `proxy.ts`'s
+/// `TrapResult` construction sites (see `rust_type`'s own `"TrapResult"` case and its doc
+/// comment for why this resolves to `Option<T::Value>` rather than a generated enum). Returns
+/// `None` (the outer `Option`, not `TrapResult`'s own `None`) if `props` doesn't match either
+/// shape, so `emit_object_literal` falls through to its other recognized shapes.
+fn try_emit_trap_result_literal(props: &[ObjectProp]) -> Option<Result<TokenStream, IrError>> {
+    match props {
+        [ObjectProp::KeyValue { key: PropKey::Ident(k), value: Expr::Lit(Lit::Bool(false)) }] if k == "found" => {
+            Some(Ok(quote! { None }))
+        }
+        [
+            ObjectProp::KeyValue { key: PropKey::Ident(k1), value: Expr::Lit(Lit::Bool(true)) },
+            ObjectProp::KeyValue { key: PropKey::Ident(k2), value: value_expr },
+        ] if k1 == "found" && k2 == "value" => Some(emit_expr(value_expr).map(|value_tokens| quote! { Some(#value_tokens) })),
+        _ => None,
+    }
+}
+
 fn emit_object_literal(props: &[ObjectProp]) -> Result<TokenStream, IrError> {
+    if let Some(result) = try_emit_trap_result_literal(props) {
+        return result;
+    }
     if let Some(tokens) = try_emit_tenant_invocation_literal(props)? {
         return Ok(tokens);
     }
@@ -2793,6 +3023,9 @@ fn emit_exotic_handler_literal(proto_expr: &Expr, props: &[ObjectProp]) -> Resul
             if *ty_str == "&PropertyKey" {
                 PROPERTY_KEY_TYPED_LOCALS.with(|set| set.borrow_mut().insert(name.clone()));
             }
+            if *ty_str == "Option<T::Value>" {
+                OPTION_VALUE_TYPED_LOCALS.with(|set| set.borrow_mut().insert(name.clone()));
+            }
             let ident = format_ident!("{name}");
             let ty: TokenStream = ty_str.parse().unwrap();
             param_tokens.push(quote! { #ident: #ty });
@@ -2892,6 +3125,11 @@ fn coerce_trap_return_value(kind: TrapReturn, expr: &Expr, tokens: TokenStream) 
         TrapReturn::OptionValue | TrapReturn::OptionDescriptor => match expr {
             Expr::Lit(Lit::Undefined) | Expr::Lit(Lit::Null) => quote! { None },
             Expr::Cast { target: TypeRef::Optional(_), .. } => tokens,
+            // `return yield tenant.yieldTenant(tenant.getOwnPropertyDescriptor(...))` /
+            // `...getPrototypeOf(...)` — the callee's own Rust return type is already
+            // `Option<_>` (see `returns_option`), so wrapping in another `Some(...)` here would
+            // double-wrap it instead of forwarding the `None`/`Some(_)` it already produced.
+            _ if returns_option(expr) => tokens,
             _ => quote! { Some((#tokens).clone()) },
         },
         TrapReturn::Bool | TrapReturn::KeyList | TrapReturn::Void => tokens,
@@ -3055,6 +3293,50 @@ fn emit_struct_literal(def: &StructDef, props: &[ObjectProp]) -> Result<TokenStr
 /// `[...prefix, ...callArgs]`) — never a guest-visible array. Each spread element is required
 /// (a plain non-spread element mixed into a spread-containing literal would need `once((x,))`
 /// wrapping, not observed in the surveyed source) so every element is uniformly chained.
+/// A `readonly unknown[]`-typed array-literal call argument (`proxy.ts`'s `trap(tenant, state,
+/// "get", [state.target(), key, receiver])`) — each element becomes a guest `T::Value`
+/// individually (a `PropertyKey`-typed element, e.g. `key`, converts via
+/// `Tenant::property_key_value`; everything else is already `T::Value`), then the whole thing is
+/// borrowed to match the callee's own `&[T::Value]` parameter type (`emit_param`'s translation of
+/// `readonly unknown[]`).
+fn emit_value_slice_array_literal(elements: &[ArrayElement]) -> Result<TokenStream, IrError> {
+    let mut items = Vec::new();
+    for element in elements {
+        let ArrayElement::Normal(e) = element else {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: "spread element in a `readonly unknown[]`-typed array literal".into(),
+            });
+        };
+        let tokens = emit_expr(e)?;
+        let snake = if let Expr::Ident(n) = e { Some(to_snake_case(n)) } else { None };
+        let tokens = if snake.as_deref().is_some_and(is_property_key_typed) {
+            quote! { (tenant.property_key_value(#tokens))? }
+        } else if snake.as_deref().is_some_and(|n| OPTION_VALUE_TYPED_LOCALS.with(|m| m.borrow().contains(n))) {
+            // A trap parameter that's already `Option<T::Value>` (`setPrototypeOf`'s
+            // `prototype`) needs unwrapping to a real guest value — a `readonly unknown[]` slot
+            // is always a genuine `T::Value`, never a Rust `Option`. Cloned first: `prototype`
+            // is reused after this array literal in the trap's own fallback branch
+            // (`tenant.setPrototypeOf(state.target(), prototype)`), and `Option::unwrap_or_else`
+            // otherwise moves out of it.
+            quote! { (#tokens).clone().unwrap_or_else(|| tenant.null_value()) }
+        } else if snake.is_some() {
+            // Any other bare local — whether a `&T::Value`-typed ref (a trap's own `receiver`/
+            // `descriptors`/`source` parameter, needing an owned clone for this owned-`T::Value`
+            // array slot) or already owned (`set`'s own `value: T::Value` parameter) — gets
+            // cloned rather than moved: the local is very often still referenced later in the
+            // same trap body (`set`'s fallback branch reuses `value` after this array literal
+            // already consumed it once), and cloning a guest `T::Value` is always cheap/valid
+            // here, unlike a move which would only be safe for a genuinely single-use local.
+            quote! { (#tokens).clone() }
+        } else {
+            tokens
+        };
+        items.push(tokens);
+    }
+    Ok(quote! { &[#(#items),*] })
+}
+
 fn emit_array_literal(elements: &[ArrayElement]) -> Result<TokenStream, IrError> {
     if elements.iter().any(|e| matches!(e, ArrayElement::Spread(_))) {
         let mut chain: Option<TokenStream> = None;
@@ -3226,6 +3508,16 @@ fn coerce_literal_to_value(expr: &Expr, tokens: TokenStream) -> TokenStream {
         Expr::Bin { op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod, .. } => {
             quote! { tenant.number_value(#tokens) }
         }
+        // A private class field read directly returned (`proxy.ts`'s `ProxyStateImpl.target()`:
+        // `return this.#target;`) — `emit_member`'s class-field branch deliberately produces a
+        // *borrow* through `self.inner.borrow().<field>` with no `.clone()` (see its own doc
+        // comment: every other occurrence is itself the receiver of a further call, which
+        // bypasses this coercion entirely via `emit_call`'s own class-field-aware branches). A
+        // bare `return` of that borrow would try to move out of the temporary `Ref`, which
+        // doesn't live past the statement — needs an explicit clone here instead.
+        Expr::Member { obj, prop } if member_prop_field_name(prop).is_some() && class_instance_obj(obj).is_some() => {
+            quote! { (#tokens).clone() }
+        }
         _ => tokens,
     }
 }
@@ -3364,8 +3656,15 @@ fn emit_eq_cmp(op: BinOp, lhs: &Expr, rhs: &Expr) -> Result<TokenStream, IrError
         return Ok(quote! { (tenant.typeof_tag(#arg_t) #cmp ValueTag::#variant) });
     }
     if is_nullish_lit(rhs) {
+        // `result.value` on a `TRAP_RESULT_TYPED_LOCALS` local (`proxy.ts`'s `TrapResult.value`)
+        // shares its field name with `TenantPropertyDescriptor.value` — excluded here so it goes
+        // through `emit_member`'s own `TrapResult`-aware translation (an unwrap, not
+        // `.is_none()`/`.is_some()` on the field directly) instead of being mistaken for one.
+        let is_trap_result_field = matches!(lhs, Expr::Member { obj, .. }
+            if matches!(obj.as_ref(), Expr::Ident(n) if TRAP_RESULT_TYPED_LOCALS.with(|m| m.borrow().contains(&to_snake_case(n)))));
         if let Expr::Member { obj, prop: MemberProp::Ident(field) } = lhs
             && DESCRIPTOR_FIELDS.contains(&field.as_str())
+            && !is_trap_result_field
         {
             let obj_t = emit_expr(obj)?;
             let field_ident = format_ident!("{}", field);
@@ -3419,6 +3718,12 @@ fn emit_cast(expr: &Expr, target: &TypeRef) -> Result<TokenStream, IrError> {
         TypeRef::Optional(inner) if matches!(inner.as_ref(), TypeRef::Named(n) if n == "object" || n == "Function") => {
             let e = emit_call_arg(expr, shims::ArgKind::Ref)?;
             Ok(quote! { tenant.nullable(#e) })
+        }
+        // `keys as PropertyKey[]` — `keys: Vec<T::Value>` (from `guestArrayLike`) needs a
+        // per-element `Tenant::to_property_key` conversion, not a bare type-level erasure.
+        TypeRef::Array(inner) if matches!(inner.as_ref(), TypeRef::Named(n) if n == "PropertyKey") => {
+            let e = emit_expr(expr)?;
+            Ok(quote! { (#e).iter().map(|__k| tenant.to_property_key(__k)).collect::<Vec<_>>() })
         }
         _ => emit_expr(expr),
     }
@@ -3553,11 +3858,15 @@ fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
         if let Some(extra) = CLASS_METHOD_EXTRA_ARGS.with(|m| m.borrow().get(&(class_name.clone(), method.clone())).cloned()) {
             arg_tokens.extend(extra);
         }
-        // Never `?`-suffixed: mirrors the local-function-call branch below — every call to a
-        // generator method in the surveyed source is wrapped in `TenantYield`, which already
-        // appends the `?`; a non-generator, non-throwing method (the only other kind observed so
-        // far) needs no `?` in the first place.
+        // A non-generator method is never wrapped in `TenantYield` at its call site (that only
+        // ever wraps a generator method's own call, appending `?` there), so if it's Rust-side
+        // `Result`-returning at all (`class_method.func.body` itself throws, or transitively
+        // calls another throwing method — see `expr_throws`'s own class-method-call case,
+        // `ProxyStateImpl::target`/`::handler` calling `require_live`), this call site is the
+        // only place that can propagate it.
+        let needs_question_mark = class_method_throws(&class_name, method);
         let call = quote! { #obj_tokens.#method_ident(#(#arg_tokens),*) };
+        let call = if needs_question_mark { quote! { (#call)? } } else { call };
         return Ok(if lets.is_empty() { call } else { quote! { { #(#lets)* #call } } });
     }
 
@@ -3761,21 +4070,69 @@ fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
                 construct: format!("{name}(...) called with {} args, expected {}", args.len(), param_tys.len()),
             });
         }
+        let mut lets = Vec::new();
         let mut arg_tokens = Vec::new();
-        for (arg, ty) in args.iter().zip(param_tys.iter()) {
+        for (i, (arg, ty)) in args.iter().zip(param_tys.iter()).enumerate() {
             let CallArg::Normal(expr) = arg else {
                 return Err(IrError::Unsupported {
                     file: String::new(),
                     construct: format!("spread argument to local function call `{name}`"),
                 });
             };
+            // A `readonly unknown[]`-typed array-literal argument (`trap`'s own `args` parameter
+            // — `proxy.ts`'s `trap(tenant, state, "get", [state.target(), key, receiver])`) needs
+            // per-element conversion (a `PropertyKey`-typed element, e.g. `key`, becomes a guest
+            // value via `Tenant::property_key_value`) and an outer `&`, neither of which
+            // `arg_kind_for_type`/`emit_call_arg`'s generic per-type handling covers (no
+            // `TypeRef::Array` case at all, only `TypeRef::Named`).
+            if let Expr::Array(elements) = expr
+                && matches!(ty, Some(TypeRef::Array(inner)) if matches!(inner.as_ref(), TypeRef::Named(n) if n == "unknown"))
+            {
+                let tokens = emit_value_slice_array_literal(elements)?;
+                arg_tokens.push(maybe_hoist_arg(expr, tokens, i, &mut lets));
+                continue;
+            }
+            // A `ClassInterface | undefined`-typed parameter (`proxyExotic`'s own `existingState:
+            // ProxyState | undefined`) resolves to `Option<ProxyStateImpl<T>>` in Rust (see
+            // `emit_fn_decl`'s `OPTION_LOCALS` registration for this exact shape) — an explicit
+            // `undefined`/`null` argument needs `None`, and a real class-instance argument needs
+            // `Some((...).clone())`, neither of which `arg_kind_for_type`'s generic `TypeRef`
+            // dispatch covers (no `TypeRef::Optional` case at all).
+            if let Some(TypeRef::Optional(inner)) = ty
+                && let TypeRef::Named(n) = inner.as_ref()
+                && class_backing_interface(n).is_some()
+            {
+                let tokens = if is_nullish_lit(expr) {
+                    quote! { None }
+                } else {
+                    let inner_tokens = emit_expr(expr)?;
+                    quote! { Some((#inner_tokens).clone()) }
+                };
+                arg_tokens.push(maybe_hoist_arg(expr, tokens, i, &mut lets));
+                continue;
+            }
             let kind = ty.as_ref().map(arg_kind_for_type).unwrap_or(shims::ArgKind::Owned);
-            arg_tokens.push(emit_call_arg(expr, kind)?);
+            let tokens = emit_call_arg(expr, kind)?;
+            // A class-instance-typed parameter (`trap`'s own `state: ProxyState`) is passed by
+            // value in Rust too (matching the TS signature, no `&`), but the caller's own local
+            // almost always outlives this one call (`proxy.ts`'s traps reuse `state` in a
+            // fallback branch after the `trap(...)` call returns, sometimes even later in the
+            // very same argument list via `state.target()`) — clone the cheap `Rc<RefCell<...>>`
+            // wrapper rather than moving it, the same convention captured class-instance fields
+            // already use (see `emit_exotic_handler_literal`'s `field_inits`).
+            let tokens = if matches!(kind, shims::ArgKind::Owned)
+                && matches!(ty, Some(TypeRef::Named(n)) if class_backing_interface(n).is_some())
+            {
+                quote! { (#tokens).clone() }
+            } else {
+                tokens
+            };
+            arg_tokens.push(maybe_hoist_arg(expr, tokens, i, &mut lets));
         }
         // Never `?`-suffixed here: every local function in the surveyed source is only ever
         // called wrapped in `TenantYield` (`yield tenant.yieldTenant(installMethod(...))`),
         // which already appends the `?` — see `emit_shim_call`'s matching note.
-        return Ok(quote! { #fn_ident(#(#arg_tokens),*) });
+        return Ok(quote! { {#(#lets)* #fn_ident(#(#arg_tokens),*)} });
     }
 
     if let Expr::Closure(func) = callee {

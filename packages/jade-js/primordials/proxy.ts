@@ -1,5 +1,5 @@
 import type {
-  Tenant, TenantExoticHandler, TenantGenerator, TenantPropertyDescriptor,
+  Tenant, TenantGenerator, TenantPropertyDescriptor,
 } from "../tenants/types.ts";
 import { assertObject, defineData, descriptorObject, guestArrayLike, makeBuiltin, readGuestDescriptor } from "./types.ts";
 import { functionPrimordial } from "./function.ts";
@@ -93,7 +93,7 @@ function* proxyExotic(
   existingState: ProxyState | undefined,
 ): TenantGenerator<object> {
   const state: ProxyState = existingState ?? new ProxyStateImpl(target, handler);
-  const native: TenantExoticHandler = {
+  return yield tenant.yieldTenant(tenant.makeExotic(null, {
     *get(receiver, key) {
       const result = yield tenant.yieldTenant(trap(tenant, state, "get", [state.target(), key, receiver]));
       return result.found ? result.value : yield tenant.yieldTenant(tenant.get(state.target(), key));
@@ -166,8 +166,7 @@ function* proxyExotic(
       const result = yield tenant.yieldTenant(trap(tenant, state, "assign", [state.target(), source]));
       if (!result.found) yield tenant.yieldTenant(tenant.assign(state.target(), source));
     },
-  };
-  return yield tenant.yieldTenant(tenant.makeExotic(null, native));
+  }));
 }
 
 export function* proxyPrimordial(tenant: Tenant): TenantGenerator<ProxyPrimordial> {

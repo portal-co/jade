@@ -71,6 +71,18 @@ pub const TABLE: &[CrossFileFactory] = &[
         transitive_caches: &[],
     },
     CrossFileFactory {
+        module: "./function.ts",
+        name: "functionPrimordial",
+        rust_fn_path: "crate::function::function_primordial",
+        struct_name: "FunctionPrimordial",
+        struct_path: "crate::function::FunctionPrimordial",
+        module_path: "crate::function",
+        cache_type_path: "crate::function::FunctionPrimordialCache",
+        cache_needs_buffer_hooks: false,
+        extra_params: &[],
+        transitive_caches: &["ObjectPrimordial"],
+    },
+    CrossFileFactory {
         module: "./array-buffer.ts",
         name: "bufferPrimordial",
         rust_fn_path: "crate::array_buffer::buffer_primordial",

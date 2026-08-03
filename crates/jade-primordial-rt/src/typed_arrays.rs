@@ -2,6 +2,8 @@
 #[allow(unused_imports)]
 use crate::array_buffer::BufferPrimordialImpl;
 #[allow(unused_imports)]
+use crate::function::FunctionPrimordial;
+#[allow(unused_imports)]
 use crate::object::ObjectPrimordial;
 #[allow(unused_imports)]
 use portal_solutions_jade_tenant_rt::{
@@ -264,9 +266,9 @@ impl<T: Tenant + 'static, H: BufferHooks + 'static> TypedArrayPrimordialImpl<T, 
                             tenant,
                             "subarray",
                             {
-                                let codec = codec.clone();
                                 let record = record.clone();
                                 let that = that.clone();
+                                let codec = codec.clone();
                                 move | tenant : & mut T , _this : T :: Value , args : & [T :: Value] | -> Result < T :: Value , TenantError > { let __undefined = tenant . undefined_value () ; let mut begin = f64 :: min (({ let __hoisted_arg0 = & { let __arg = (args) . get (0usize) . cloned () . unwrap_or_else (|| __undefined . clone ()) ; if matches ! (tenant . typeof_tag (& __arg) , ValueTag :: Undefined | ValueTag :: Null) { tenant . number_value (0f64) } else { __arg } } ; ((crate :: types_shim :: to_index (tenant , __hoisted_arg0)) ? as f64) }) as f64 , (record . length) as f64) ; let mut end = f64 :: min (({ let __hoisted_arg0 = & { let __arg = (args) . get (1usize) . cloned () . unwrap_or_else (|| __undefined . clone ()) ; if matches ! (tenant . typeof_tag (& __arg) , ValueTag :: Undefined | ValueTag :: Null) { tenant . number_value (record . length) } else { __arg } } ; ((crate :: types_shim :: to_index (tenant , __hoisted_arg0)) ? as f64) }) as f64 , (record . length) as f64) ; return Ok ((that . create (tenant , record . kind , & record . buffer , (record . offset + (begin * codec . codec_bytes ())) , f64 :: max ((0f64) as f64 , ((end - begin)) as f64))) ?) ; }
                             },
                             None,
@@ -278,9 +280,9 @@ impl<T: Tenant + 'static, H: BufferHooks + 'static> TypedArrayPrimordialImpl<T, 
                             tenant,
                             "set",
                             {
-                                let codec = codec.clone();
                                 let record = record.clone();
                                 let that = that.clone();
+                                let codec = codec.clone();
                                 move | tenant : & mut T , _this : T :: Value , args : & [T :: Value] | -> Result < T :: Value , TenantError > { let __undefined = tenant . undefined_value () ; let mut source = (that . inner . borrow () . records) . get (& tenant . object_id (& (args) . get (0usize) . cloned () . unwrap_or_else (|| __undefined . clone ()))) . cloned () ; let Some (source) = source else { return Err (TenantError :: TypeError (("TypedArray.set requires a Jade typed array") . to_string ())) ; } ; let mut start = { let __hoisted_arg0 = & { let __arg = (args) . get (1usize) . cloned () . unwrap_or_else (|| __undefined . clone ()) ; if matches ! (tenant . typeof_tag (& __arg) , ValueTag :: Undefined | ValueTag :: Null) { tenant . number_value (0f64) } else { __arg } } ; ((crate :: types_shim :: to_index (tenant , __hoisted_arg0)) ? as f64) } ; if ((start + source . length) > record . length) { return Err (TenantError :: RangeError (("source is too large") . to_string ())) ; } { let mut i = 0f64 ; while i < source . length { let mut source_codec = source . kind ; let mut source_handle = (that . inner . borrow () . buffers . record (tenant , & source . buffer)) . unwrap () . handle ; let mut bytes = (that . inner . borrow_mut () . hooks . read (& (source_handle) , ((source . offset + (i * source_codec . codec_bytes ()))) as usize , (source_codec . codec_bytes ()) as usize)) ? ; let mut number = source_codec . codec_get (& (bytes) , (0f64) as usize) ; let mut target = vec ! [0u8 ; (codec . codec_bytes ()) as usize] ; codec . codec_set (& mut (target) , (0f64) as usize , number) ; (that . inner . borrow_mut () . hooks . write (& ((that . inner . borrow () . buffers . record (tenant , & record . buffer)) . unwrap () . handle) , ((record . offset + (((start + i)) * codec . codec_bytes ()))) as usize , & (target))) ? ; i += 1.0 ; } } Ok (tenant . undefined_value ()) }
                             },
                             None,
@@ -545,8 +547,8 @@ impl<T: Tenant + 'static, H: BufferHooks + 'static> TypedArrayPrimordialImpl<T, 
             },
             Some(Box::new({
                 let kind = kind.clone();
-                let codec = codec.clone();
                 let that = that.clone();
+                let codec = codec.clone();
                 move |tenant: &mut T,
                       _target: T::Value,
                       args: &[T::Value]|
