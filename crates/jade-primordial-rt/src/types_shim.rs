@@ -308,13 +308,13 @@ impl<T: Tenant> TenantCallableExoticHandler<T> for BuiltinHandler<T> {
 /// this module's doc comment for why the exotic handler is a hand-written struct.
 pub fn make_builtin<T: Tenant + 'static>(
     tenant: &mut T,
-    name: &str,
+    name: impl AsRef<str>,
     apply: impl FnMut(&mut T, T::Value, &[T::Value]) -> Result<T::Value, TenantError> + 'static,
     construct: Option<ConstructFn<T>>,
     proto: Option<T::Value>,
 ) -> Result<T::Value, TenantError> {
     let handler = BuiltinHandler {
-        name: name.to_string(),
+        name: name.as_ref().to_string(),
         apply: Box::new(apply),
         construct,
         descriptors: HashMap::new(),
@@ -322,7 +322,7 @@ pub fn make_builtin<T: Tenant + 'static>(
         extensible: true,
     };
     let shell = tenant.make_callable_exotic(proto, Box::new(handler))?;
-    let name_value = tenant.string_value(name);
+    let name_value = tenant.string_value(name.as_ref());
     define_data(
         tenant,
         &shell,

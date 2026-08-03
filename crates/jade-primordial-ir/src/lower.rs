@@ -161,26 +161,27 @@ fn lower_decl(file: &str, decl: &ast::Decl) -> Result<Option<Item>, IrError> {
             if !iface.extends.is_empty() {
                 return Err(unsupported(file, "interface with `extends`"));
             }
-            let mut fields = Vec::new();
-            for member in &iface.body.body {
-                let ast::TsTypeElement::TsPropertySignature(sig) = member else {
-                    return Err(unsupported(file, format!("interface member {member:?}")));
-                };
-                let name = match sig.key.as_ref() {
-                    ast::Expr::Ident(id) => id.sym.to_string(),
-                    other => return Err(unsupported(file, format!("interface property key {other:?}"))),
-                };
-                let Some(type_ann) = &sig.type_ann else {
-                    return Err(unsupported(file, "interface property with no type annotation"));
-                };
-                fields.push((name, lower_ts_type(file, &type_ann.type_ann)?));
-            }
+            let fields = lower_type_elements(file, &iface.body.body)?;
             Ok(Some(Item::StructDef(StructDef {
                 name: iface.id.sym.to_string(),
                 fields,
             })))
         }
-        ast::Decl::TsTypeAlias(_) => Ok(None),
+        ast::Decl::TsTypeAlias(alias) => {
+            if let Some(variants) = string_union_variants(&alias.type_ann) {
+                return Ok(Some(Item::StringEnumDef(StringEnumDef { name: alias.id.sym.to_string(), variants })));
+            }
+            // A plain object-shaped type alias (`type Record_ = { kind: ...; buffer: ...; ... }`)
+            // — the same field-layout-driven translation an `interface` gets (see the arm above),
+            // just spelled with `type` instead. `typed-arrays.ts`'s local `Record_` is the first
+            // example; unlike `interface`, most type aliases are *not* this shape (plain unions,
+            // `object`, etc.) and are erased as before.
+            if let ast::TsType::TsTypeLit(lit) = alias.type_ann.as_ref() {
+                let fields = lower_type_elements(file, &lit.members)?;
+                return Ok(Some(Item::StructDef(StructDef { name: alias.id.sym.to_string(), fields })));
+            }
+            Ok(None)
+        }
         ast::Decl::Fn(fn_decl) => {
             let name = fn_decl.ident.sym.to_string();
             let func = lower_function(file, &fn_decl.function, Some(name.clone()))?;
@@ -195,10 +196,51 @@ fn lower_decl(file: &str, decl: &ast::Decl) -> Result<Option<Item>, IrError> {
     }
 }
 
+/// Shared by the `interface`/object-type-alias field-layout lowering above: every member must be
+/// a plain property signature (`name: Type;`), matching the closed shape actually observed.
+fn lower_type_elements(file: &str, members: &[ast::TsTypeElement]) -> Result<Vec<(String, TypeRef)>, IrError> {
+    let mut fields = Vec::new();
+    for member in members {
+        let ast::TsTypeElement::TsPropertySignature(sig) = member else {
+            return Err(unsupported(file, format!("type member {member:?}")));
+        };
+        let name = match sig.key.as_ref() {
+            ast::Expr::Ident(id) => id.sym.to_string(),
+            other => return Err(unsupported(file, format!("property key {other:?}"))),
+        };
+        let Some(type_ann) = &sig.type_ann else {
+            return Err(unsupported(file, "property with no type annotation"));
+        };
+        fields.push((name, lower_ts_type(file, &type_ann.type_ann)?));
+    }
+    Ok(fields)
+}
+
 /// Lowers a `class ... implements X { ... }` declaration into a [`ClassDef`] — see its doc
 /// comment for the exact closed shape recognized. No `extends`, no static members, no
 /// decorators, no accessors/auto-accessors/index signatures: every one of those is a hard
 /// rejection here rather than a guess.
+/// If `ty` is a union of only string-literal members (e.g. `"Int8Array" | "Uint8Array" | ...`),
+/// the literals in source order — see `Item::StringEnumDef`. Anything else (a plain `object`
+/// alias, a union with a non-literal member, an intersection) returns `None`, meaning the type
+/// alias is erased as usual rather than becoming a `StringEnumDef`.
+fn string_union_variants(ty: &ast::TsType) -> Option<Vec<String>> {
+    let ast::TsType::TsUnionOrIntersectionType(ast::TsUnionOrIntersectionType::TsUnionType(union)) = ty else {
+        return None;
+    };
+    union
+        .types
+        .iter()
+        .map(|t| match t.as_ref() {
+            ast::TsType::TsLitType(lit) => match &lit.lit {
+                ast::TsLit::Str(s) => Some(atom_string(&s.value)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
 fn lower_class(file: &str, class: &ast::Class, name: String) -> Result<ClassDef, IrError> {
     if class.super_class.is_some() {
         return Err(unsupported(file, format!("class `{name}` has an `extends` clause")));

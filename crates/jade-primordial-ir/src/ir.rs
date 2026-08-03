@@ -55,6 +55,23 @@ pub enum Item {
     /// self-recursive/self-referencing closures like `array-buffer.ts`'s `shell`) just an
     /// ordinary cheap `.clone()` like any other captured value.
     ClassDef(ClassDef),
+    /// A string-literal-union type alias (`export type Name = "A" | "B" | ...;`), lowered
+    /// specially rather than erased like an ordinary type alias (see `lower.rs`). Unlike most
+    /// erased type aliases, values of this shape are used as real runtime data — `Map` keys,
+    /// `makeBuiltin`'s `name` argument — not just type annotations, so Rust emission needs a real
+    /// type: a plain enum with an `AsRef<str>` impl (`emit_rust.rs`'s `emit_string_enum_def`).
+    /// `TypedArrayKind` is the first example; `BufferKind` has the same shape but is skipped here
+    /// (see `TYPE_SHIMS`) since it already has an earlier, hand-written counterpart in
+    /// `jade-tenant-rt` that a hand-written trait (`BufferHooks`) depends on.
+    StringEnumDef(StringEnumDef),
+}
+
+#[derive(Debug, Clone)]
+pub struct StringEnumDef {
+    pub name: String,
+    /// The exact string literals, in source order — each becomes one enum variant (PascalCased)
+    /// and that variant's own `AsRef<str>` rendering.
+    pub variants: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

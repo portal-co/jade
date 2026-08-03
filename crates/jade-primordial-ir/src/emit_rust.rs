@@ -128,6 +128,11 @@ thread_local! {
     /// the top of `try_emit_module`, the same way `STRUCT_DEFS` is. Consulted by
     /// `class_instance_obj` and by field/method lookups throughout class-body emission.
     static CLASS_DEFS: RefCell<HashMap<String, ClassDef>> = RefCell::new(HashMap::new());
+    /// This module's own string-literal-union type aliases (`Item::StringEnumDef`s), by name —
+    /// populated once at the top of `try_emit_module`, the same way `STRUCT_DEFS`/`CLASS_DEFS`
+    /// are. Consulted by `rust_type`'s fallback chain (after `STRUCT_DEFS`/`class_backing_interface`
+    /// find no match) to resolve a reference to one of these as its generated enum type.
+    static STRING_ENUM_DEFS: RefCell<HashMap<String, StringEnumDef>> = RefCell::new(HashMap::new());
     /// Local-variable-name (snake_case) -> class name, for locals known to hold an instance of
     /// one of this module's own classes — either from `new ClassName(...)` (`emit_stmt`'s
     /// `Stmt::Let` handling) or from `const X = this;` inside one of that class's own methods
@@ -255,6 +260,7 @@ fn type_needs_tenant(ty: &TypeRef) -> bool {
                 // too, the same as a direct struct reference — `class_backing_interface` is
                 // `rust_type`'s own resolution path for exactly this case.
                 || class_backing_interface(n).is_some()
+                || cross_file::lookup_class(n).is_some_and(|c| c.needs_tenant)
         }
         TypeRef::Generic { args, .. } => args.iter().any(type_needs_tenant),
         TypeRef::Optional(inner) | TypeRef::Array(inner) => type_needs_tenant(inner),
@@ -272,6 +278,7 @@ fn type_needs_buffer_hooks(ty: &TypeRef) -> bool {
             n == "BufferHandle"
                 || n == "BufferHooks"
                 || class_backing_interface(n).and_then(|c| class_def(&c)).is_some_and(|def| class_needs_buffer_hooks(&def))
+                || cross_file::lookup_class(n).is_some_and(|c| c.needs_buffer_hooks)
         }
         TypeRef::Generic { args, .. } => args.iter().any(type_needs_buffer_hooks),
         TypeRef::Optional(inner) | TypeRef::Array(inner) => type_needs_buffer_hooks(inner),
@@ -580,6 +587,15 @@ fn try_emit_module(module: &Module) -> TokenStream {
             }
         }
     });
+    STRING_ENUM_DEFS.with(|map| {
+        let mut map = map.borrow_mut();
+        map.clear();
+        for item in &module.items {
+            if let Item::StringEnumDef(def) = item {
+                map.insert(def.name.clone(), def.clone());
+            }
+        }
+    });
     PER_TENANT_CACHE.with(|cache| {
         *cache.borrow_mut() = module.items.iter().find_map(|item| match item {
             Item::PerTenantCache { name, value_ty, .. } => Some((name.clone(), value_ty.clone())),
@@ -637,7 +653,12 @@ fn try_emit_module(module: &Module) -> TokenStream {
     // crate::object::ObjectPrimordial;` for its own `ObjectPrimordial`), a hard duplicate-
     // definition error, not merely redundant.
     for factory in cross_file::TABLE {
-        if STRUCT_DEFS.with(|d| d.borrow().contains_key(factory.struct_name)) {
+        // `factory.struct_name` may name either a `StructDef` (`ObjectPrimordial`) or a
+        // `ClassDef` (`BufferPrimordialImpl`, method-shaped interfaces having no `StructDef` of
+        // their own — see `lower.rs`) — either means this *is* that file, so skip the self-import.
+        if STRUCT_DEFS.with(|d| d.borrow().contains_key(factory.struct_name))
+            || CLASS_DEFS.with(|d| d.borrow().contains_key(factory.struct_name))
+        {
             continue;
         }
         let path: TokenStream = factory.struct_path.parse().unwrap_or_default();
@@ -666,6 +687,7 @@ fn item_label(item: &Item) -> String {
         Item::ModuleConst { name, .. } => format!("const `{name}`"),
         Item::TypeImport { .. } | Item::ValueImport { .. } => "import".to_string(),
         Item::ClassDef(def) => format!("class `{}`", def.name),
+        Item::StringEnumDef(def) => format!("type `{}`", def.name),
     }
 }
 
@@ -695,6 +717,12 @@ fn emit_item(item: &Item) -> Result<Option<TokenStream>, IrError> {
         }),
         Item::FnDecl(func) => Ok(Some(emit_fn_decl(func)?)),
         Item::ClassDef(def) => Ok(Some(emit_class_def(def)?)),
+        // Skipped entirely if this name is already hand-shimmed (`BufferKind`, via `TYPE_SHIMS`)
+        // — that table is the authority for those; regenerating would produce a redundant, unused
+        // duplicate enum rather than a conflict (nothing references the bare local name), but
+        // there's no reason to emit dead code.
+        Item::StringEnumDef(def) if TYPE_SHIMS.iter().any(|(n, _)| *n == def.name) => Ok(None),
+        Item::StringEnumDef(def) => Ok(Some(emit_string_enum_def(def))),
     }
 }
 
@@ -789,6 +817,48 @@ fn buffer_kind_literal(expr: &Expr) -> Option<TokenStream> {
     Some(quote! { portal_solutions_jade_tenant_rt::BufferKind::#variant_ident })
 }
 
+/// PascalCases a string-literal enum variant's own source text into a valid Rust identifier
+/// (`"array-buffer"` -> `"ArrayBuffer"`; `"Int8Array"` -> `"Int8Array"`, unchanged since it's
+/// already one) — non-alphanumeric characters are dropped and start a new capitalized segment.
+fn to_pascal_case_variant(s: &str) -> String {
+    let mut out = String::new();
+    let mut capitalize_next = true;
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            if capitalize_next {
+                out.extend(ch.to_uppercase());
+                capitalize_next = false;
+            } else {
+                out.push(ch);
+            }
+        } else {
+            capitalize_next = true;
+        }
+    }
+    out
+}
+
+/// Generates a real Rust `enum` for a [`StringEnumDef`], plus an `AsRef<str>` impl back to each
+/// variant's original string literal — needed at call sites like `makeBuiltin(tenant, kind, ...)`
+/// where a TS string parameter is fed a value of this type (see `make_builtin`'s own `impl
+/// AsRef<str>` parameter in `jade-primordial-rt::types_shim`).
+fn emit_string_enum_def(def: &StringEnumDef) -> TokenStream {
+    let enum_ident = format_ident!("{}", def.name);
+    let variant_idents: Vec<_> = def.variants.iter().map(|v| format_ident!("{}", to_pascal_case_variant(v))).collect();
+    let variant_strs: &Vec<&str> = &def.variants.iter().map(String::as_str).collect();
+    quote! {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum #enum_ident { #(#variant_idents),* }
+        impl AsRef<str> for #enum_ident {
+            fn as_ref(&self) -> &str {
+                match self {
+                    #(#enum_ident::#variant_idents => #variant_strs),*
+                }
+            }
+        }
+    }
+}
+
 fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
     match ty {
         TypeRef::Named(name) => Ok(match name.as_str() {
@@ -826,6 +896,22 @@ fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
                     let def = class_def(&class_name).unwrap();
                     let (_, generic_args) = class_generics(&def);
                     quote! { #ident<#generic_args> }
+                } else if STRING_ENUM_DEFS.with(|m| m.borrow().contains_key(other)) {
+                    let ident = format_ident!("{other}");
+                    quote! { #ident }
+                } else if let Some(cross_class) = cross_file::lookup_class(other) {
+                    let path: TokenStream = cross_class.rust_path.parse().map_err(|e| IrError::Unsupported {
+                        file: String::new(),
+                        construct: format!("cross-file class `{other}` rust_path did not parse as Rust: {e}"),
+                    })?;
+                    let mut generic_args = Vec::new();
+                    if cross_class.needs_tenant {
+                        generic_args.push(quote! { T });
+                    }
+                    if cross_class.needs_buffer_hooks {
+                        generic_args.push(quote! { H });
+                    }
+                    quote! { #path<#(#generic_args),*> }
                 } else {
                     return Err(IrError::Unsupported {
                         file: String::new(),
@@ -840,7 +926,7 @@ fn rust_type(ty: &TypeRef) -> Result<TokenStream, IrError> {
         // `Function`/`unknown` (a guest value, not `Hash`/`Eq`-able) maps to `T::ObjectId`
         // instead — see `is_object_identity_map_type`, which callers touching the map's own
         // `.get`/`.set`/`.has`/`.delete` calls consult to convert the key argument accordingly.
-        TypeRef::Generic { name, args } if (name == "Map" || name == "WeakMap") && args.len() == 2 => {
+        TypeRef::Generic { name, args } if (name == "Map" || name == "WeakMap" || name == "ReadonlyMap") && args.len() == 2 => {
             let key = if matches!(&args[0], TypeRef::Named(n) if n == "object" || n == "Function" || n == "unknown") {
                 quote! { T::ObjectId }
             } else {
@@ -2892,6 +2978,55 @@ fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
         return Ok(if spec.returns_usize { quote! { (#call).map(|v| v as f64) } } else { call });
     }
 
+    // A method call on a class field typed as a *cross-file* class's own interface
+    // (`that.#buffers.record(...)`, `that.#buffers.shell(...)`) — `BufferPrimordialImpl` lives in
+    // a different generated file, so this can't resolve through `CLASS_DEFS`/`class_def` (which
+    // only knows this module's own classes) the way the local class-instance-method-call branch
+    // above does. See `cross_file::CLASS_TABLE`. The field itself is a `BufferPrimordialImpl<T,
+    // H>` value (already reference-shared via its own `Rc<RefCell<Inner>>`), so no clone is
+    // needed just to call an inherent `&self` method through the borrow.
+    if let Expr::Member { obj: field_obj, prop: MemberProp::Ident(method) } = callee
+        && let Expr::Member { obj: recv_obj, prop: recv_prop } = field_obj.as_ref()
+        && let Some(field_name) = member_prop_field_name(recv_prop)
+        && let Some((class_name, recv_tokens)) = class_instance_obj(recv_obj)
+        && let Some(field) = class_field_lookup(&class_name, field_name)
+        && let TypeRef::Named(interface_name) = &field.ty
+        && let Some(cross_class) = cross_file::lookup_class(interface_name)
+        && let Some(cross_method) = cross_class.methods.iter().find(|m| m.ts_name == method)
+    {
+        if args.len() != cross_method.param_types.len() {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!(
+                    "`{interface_name}.{method}(...)` called with {} args, expected {}",
+                    args.len(),
+                    cross_method.param_types.len()
+                ),
+            });
+        }
+        let field_ident = format_ident!("{}", to_snake_case(field_name));
+        let method_ident = format_ident!("{}", cross_method.rust_name);
+        let mut arg_tokens = Vec::new();
+        for (arg, ty_name) in args.iter().zip(cross_method.param_types.iter()) {
+            let CallArg::Normal(expr) = arg else {
+                return Err(IrError::Unsupported {
+                    file: String::new(),
+                    construct: format!("spread argument to `{interface_name}.{method}(...)`"),
+                });
+            };
+            let ty = TypeRef::Named((*ty_name).to_string());
+            if matches!(&ty, TypeRef::Named(n) if n == "BufferKind")
+                && let Some(variant) = buffer_kind_literal(expr)
+            {
+                arg_tokens.push(variant);
+                continue;
+            }
+            let kind = arg_kind_for_type(&ty);
+            arg_tokens.push(emit_call_arg(expr, kind)?);
+        }
+        return Ok(quote! { #recv_tokens.inner.borrow().#field_ident.#method_ident(#(#arg_tokens),*) });
+    }
+
     if let Expr::Member { obj, prop: MemberProp::Ident(method) } = callee
         && let Expr::Ident(recv) = obj.as_ref()
         && recv == "tenant"
@@ -2931,27 +3066,59 @@ fn emit_call(callee: &Expr, args: &[CallArg]) -> Result<TokenStream, IrError> {
         && let Some(source) = imported_source(name)
         && let Some(factory) = cross_file::lookup(&source, name)
     {
-        let [CallArg::Normal(Expr::Ident(tenant_arg))] = args else {
+        // Leading argument is always the bare `tenant` this crate expects; anything after that
+        // matches `factory.extra_params` one-for-one (`bufferPrimordial(tenant, hooks)` has one).
+        let Some((CallArg::Normal(Expr::Ident(tenant_arg)), rest)) = args.split_first() else {
             return Err(IrError::Unsupported {
                 file: String::new(),
-                construct: format!("{name}(...) called with an argument shape other than the bare `tenant` this crate expects"),
+                construct: format!("{name}(...) called with an argument shape other than a leading bare `tenant` this crate expects"),
             });
         };
         if tenant_arg != "tenant" {
             return Err(IrError::Unsupported {
                 file: String::new(),
-                construct: format!("{name}(...) called with a non-`tenant` argument"),
+                construct: format!("{name}(...) called with a non-`tenant` leading argument"),
+            });
+        }
+        if rest.len() != factory.extra_params.len() {
+            return Err(IrError::Unsupported {
+                file: String::new(),
+                construct: format!(
+                    "{name}(...) called with {} args, expected 1 (tenant) + {}",
+                    args.len(),
+                    factory.extra_params.len()
+                ),
             });
         }
         let path: TokenStream = factory.rust_fn_path.parse().map_err(|e| IrError::Unsupported {
             file: String::new(),
             construct: format!("cross-file factory `{name}` rust_fn_path did not parse as Rust: {e}"),
         })?;
+        let mut arg_tokens = vec![quote! { tenant }];
+        for (arg, (_, ty_name)) in rest.iter().zip(factory.extra_params.iter()) {
+            let CallArg::Normal(expr) = arg else {
+                return Err(IrError::Unsupported {
+                    file: String::new(),
+                    construct: format!("spread argument to cross-file factory `{name}(...)`"),
+                });
+            };
+            let kind = arg_kind_for_type(&TypeRef::Named((*ty_name).to_string()));
+            arg_tokens.push(emit_call_arg(expr, kind)?);
+        }
         let cache_ident = format_ident!("{}", cross_file::cache_param_name(factory));
+        arg_tokens.push(quote! { #cache_ident });
+        for transitive in factory.transitive_caches {
+            let transitive_factory = cross_file::TABLE.iter().find(|f| f.struct_name == *transitive).ok_or_else(|| IrError::Unsupported {
+                file: String::new(),
+                construct: format!("cross-file factory `{name}` names an unregistered transitive cache `{transitive}`"),
+            })?;
+            let transitive_ident = format_ident!("{}", cross_file::cache_param_name(transitive_factory));
+            arg_tokens.push(quote! { #transitive_ident });
+        }
         // Never `?`-suffixed here either — same reasoning as the local-function-call and shim
         // branches: every real call site wraps this in `yield tenant.yieldTenant(...)`, which
         // already appends the `?`.
-        return Ok(quote! { #path(tenant, #cache_ident) });
+        return Ok(quote! { #path(#(#arg_tokens),*) });
     }
 
     if let Expr::Ident(name) = callee

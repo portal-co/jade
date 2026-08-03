@@ -30,19 +30,99 @@ pub struct CrossFileFactory {
     /// cache type itself is referenced fully-qualified at its one use site (the extra parameter
     /// this factory's caller gains), so it doesn't need its own prelude `use`.
     pub module_path: &'static str,
+    /// Positional parameters this factory takes beyond the leading bare `tenant` — each a
+    /// (TS-side param name, param type name) pair, in call order, resolved through the ordinary
+    /// `arg_kind_for_type`/`emit_call_arg` machinery the same way a class method's own parameters
+    /// are. Empty for `objectPrimordial` (`tenant` only); `bufferPrimordial(tenant, hooks)` has
+    /// one entry (`hooks`, `"BufferHooks"`).
+    pub extra_params: &'static [(&'static str, &'static str)],
+    /// Other entries in this same table (by their own `struct_name`) whose cache parameter this
+    /// factory's *generated Rust function* also requires, because it calls that other factory
+    /// internally — e.g. `buffer_primordial` calls `objectPrimordial` for `ObjectPrototype`, so a
+    /// caller of `bufferPrimordial` must also supply `object_primordial_cache`.
+    /// `objectPrimordial` has none (no further cross-file dependencies of its own).
+    pub transitive_caches: &'static [&'static str],
 }
 
-pub const TABLE: &[CrossFileFactory] = &[CrossFileFactory {
-    module: "./object.ts",
-    name: "objectPrimordial",
-    rust_fn_path: "crate::object::object_primordial",
-    struct_name: "ObjectPrimordial",
-    struct_path: "crate::object::ObjectPrimordial",
-    module_path: "crate::object",
-}];
+pub const TABLE: &[CrossFileFactory] = &[
+    CrossFileFactory {
+        module: "./object.ts",
+        name: "objectPrimordial",
+        rust_fn_path: "crate::object::object_primordial",
+        struct_name: "ObjectPrimordial",
+        struct_path: "crate::object::ObjectPrimordial",
+        module_path: "crate::object",
+        extra_params: &[],
+        transitive_caches: &[],
+    },
+    CrossFileFactory {
+        module: "./array-buffer.ts",
+        name: "bufferPrimordial",
+        rust_fn_path: "crate::array_buffer::buffer_primordial",
+        struct_name: "BufferPrimordialImpl",
+        struct_path: "crate::array_buffer::BufferPrimordialImpl",
+        module_path: "crate::array_buffer",
+        extra_params: &[("hooks", "BufferHooks")],
+        transitive_caches: &["ObjectPrimordial"],
+    },
+];
 
 pub fn lookup(module: &str, name: &str) -> Option<&'static CrossFileFactory> {
     TABLE.iter().find(|entry| entry.module == module && entry.name == name)
+}
+
+/// A cross-file *class* referenced only as a field's interface type (e.g. `TypedArrayPrimordialImpl`'s
+/// `#buffers: BufferPrimordial`, backed by `array-buffer.ts`'s `BufferPrimordialImpl`) — the
+/// class-analogue of `CrossFileFactory`, needed because `gen-primordials` lowers/emits one file
+/// at a time, so `CLASS_DEFS` (populated fresh per invocation) never sees another file's classes.
+pub struct CrossFileClassMethod {
+    /// The method name as called from TS (`"record"`, `"shell"`).
+    pub ts_name: &'static str,
+    /// The Rust inherent method name (currently always identical after `to_snake_case`, but kept
+    /// distinct in case that ever isn't true).
+    pub rust_name: &'static str,
+    /// Parameter type names in declared order, exactly as they'd appear in `TypeRef::Named` —
+    /// resolved through the same `arg_kind_for_type` table any other typed parameter list is.
+    pub param_types: &'static [&'static str],
+}
+
+pub struct CrossFileClass {
+    /// The import source exactly as written (`"./array-buffer.ts"`).
+    pub module: &'static str,
+    /// The interface name a field/param type names (`"BufferPrimordial"`) — what callers of
+    /// `lookup_class` search by, since that's the only name visible outside the defining file
+    /// (the class itself, `BufferPrimordialImpl`, is erased from the interface it implements —
+    /// see `lower.rs`'s method-shaped-interface erasure).
+    pub interface_name: &'static str,
+    /// Fully-qualified path to the class's own generated wrapper type
+    /// (`"crate::array_buffer::BufferPrimordialImpl"`).
+    pub rust_path: &'static str,
+    /// Whether the class's own generic parameter list includes `T: Tenant`/`H: BufferHooks` —
+    /// used to build the right `<...>` argument list at each reference (mirrors `class_generics`
+    /// for a same-module class).
+    pub needs_tenant: bool,
+    pub needs_buffer_hooks: bool,
+    pub methods: &'static [CrossFileClassMethod],
+}
+
+pub const CLASS_TABLE: &[CrossFileClass] = &[CrossFileClass {
+    module: "./array-buffer.ts",
+    interface_name: "BufferPrimordial",
+    rust_path: "crate::array_buffer::BufferPrimordialImpl",
+    needs_tenant: true,
+    needs_buffer_hooks: true,
+    methods: &[
+        CrossFileClassMethod { ts_name: "record", rust_name: "record", param_types: &["Tenant", "unknown"] },
+        CrossFileClassMethod {
+            ts_name: "shell",
+            rust_name: "shell",
+            param_types: &["Tenant", "BufferKind", "BufferHandle", "object"],
+        },
+    ],
+}];
+
+pub fn lookup_class(interface_name: &str) -> Option<&'static CrossFileClass> {
+    CLASS_TABLE.iter().find(|entry| entry.interface_name == interface_name)
 }
 
 /// The extra parameter name a caller gains when it uses this factory — `object_primordial_cache`

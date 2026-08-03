@@ -64,6 +64,10 @@ fn emit_item(out: &mut String, item: &Item, level: usize) {
             emit_class_def(out, def, level);
             out.push('\n');
         }
+        Item::StringEnumDef(def) => {
+            let variants = def.variants.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(" | ");
+            out.push_str(&format!("export type {} = {variants};\n", def.name));
+        }
     }
 }
 
