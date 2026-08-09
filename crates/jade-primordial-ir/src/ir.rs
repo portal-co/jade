@@ -39,7 +39,11 @@ pub enum Item {
     /// Any other module-level `const`/`let` whose initializer isn't a `PerTenantCache` (e.g.
     /// `typed-arrays.ts`'s `codecs` table).
     ModuleConst { name: String, mutable: bool, init: Expr },
-    FnDecl(FnDecl),
+    /// `is_exported` tracks the original source's `export` keyword — needed only by TS emission
+    /// (a regenerated bundle other files import from needs `export function objectPrimordial`
+    /// to actually resolve); Rust emission never looked at it, so it's ignored there just like
+    /// before this field existed.
+    FnDecl { func: FnDecl, is_exported: bool },
     /// A `class ... implements X { ... }` declaration. Lowered only for the closed shape
     /// actually used (see `docs/proxy-and-buffer-primordial-gap-plan.md`'s class-lowering
     /// note): private/public fields (plain-initialized, or declared `!`/`?` with no
@@ -54,7 +58,9 @@ pub enum Item {
     /// exactly what makes capturing `self` into a nested closure (`const self = this;`, used for
     /// self-recursive/self-referencing closures like `array-buffer.ts`'s `shell`) just an
     /// ordinary cheap `.clone()` like any other captured value.
-    ClassDef(ClassDef),
+    /// See `Item::FnDecl`'s doc comment — same `is_exported` role, same Rust-emission
+    /// indifference to it.
+    ClassDef { def: ClassDef, is_exported: bool },
     /// A string-literal-union type alias (`export type Name = "A" | "B" | ...;`), lowered
     /// specially rather than erased like an ordinary type alias (see `lower.rs`). Unlike most
     /// erased type aliases, values of this shape are used as real runtime data — `Map` keys,
@@ -64,6 +70,23 @@ pub enum Item {
     /// (see `TYPE_SHIMS`) since it already has an earlier, hand-written counterpart in
     /// `jade-tenant-rt` that a hand-written trait (`BufferHooks`) depends on.
     StringEnumDef(StringEnumDef),
+    /// A type-only declaration `lower.rs` can't (and, for a method-shaped interface, deliberately
+    /// doesn't try to) turn into a structural `Item::StructDef`/`Item::StringEnumDef` — a
+    /// method-shaped `interface` (Rust's translation is a same-module class implementing it
+    /// instead, per that design) or a type alias that isn't a plain object/string-union shape
+    /// (e.g. a union of object-literal types). `source` is the *original* source text of just
+    /// this declaration (no leading `export`), sliced by span from the file being lowered, so TS
+    /// emission can restate it verbatim instead of silently dropping it — the previous behavior
+    /// left dangling references (`class X implements Erased`, `Foo<AlsoErased>`) in regenerated
+    /// TypeScript, invisible to Rust emission (which never referenced the erased name) but a real
+    /// `tsc`/runtime-import failure for anything reading the regenerated TS as real source. Rust
+    /// emission ignores this item entirely — unchanged from before, since it never looked at
+    /// erased items either.
+    VerbatimTypeDecl {
+        name: String,
+        is_exported: bool,
+        source: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

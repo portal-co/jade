@@ -56,17 +56,30 @@ fn emit_item(out: &mut String, item: &Item, level: usize) {
             emit_expr(out, init, level);
             out.push_str(";\n");
         }
-        Item::FnDecl(func) => {
+        Item::FnDecl { func, is_exported } => {
+            if *is_exported {
+                out.push_str("export ");
+            }
             emit_fn_decl(out, func, level);
             out.push('\n');
         }
-        Item::ClassDef(def) => {
+        Item::ClassDef { def, is_exported } => {
+            if *is_exported {
+                out.push_str("export ");
+            }
             emit_class_def(out, def, level);
             out.push('\n');
         }
         Item::StringEnumDef(def) => {
             let variants = def.variants.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(" | ");
             out.push_str(&format!("export type {} = {variants};\n", def.name));
+        }
+        Item::VerbatimTypeDecl { is_exported, source, .. } => {
+            if *is_exported {
+                out.push_str("export ");
+            }
+            out.push_str(source);
+            out.push('\n');
         }
     }
 }

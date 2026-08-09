@@ -1,0 +1,6 @@
+{
+  "//": "Type-checks packages/jade-js/.generated (the output of `npm run regen` in packages/jade-js, see docs/bundle-pass-build-step-plan.md) as its own project, separate from the root tsconfig.json's default whole-repo scan of hand-written source. Usage: npx tsc --noEmit -p tsconfig.generated-check.json",
+  "extends": "./tsconfig.json",
+  "include": ["packages/jade-js/.generated/**/*.ts"],
+  "exclude": ["packages/jade-js/.generated/rewrite.typecheck.ts"]
+}

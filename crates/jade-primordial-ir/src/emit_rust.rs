@@ -683,7 +683,7 @@ fn try_emit_module(module: &Module) -> TokenStream {
         let mut map = map.borrow_mut();
         map.clear();
         for item in &module.items {
-            if let Item::ClassDef(def) = item {
+            if let Item::ClassDef { def, .. } = item {
                 map.insert(def.name.clone(), def.clone());
             }
         }
@@ -707,7 +707,7 @@ fn try_emit_module(module: &Module) -> TokenStream {
         let mut map = map.borrow_mut();
         map.clear();
         for item in &module.items {
-            if let Item::FnDecl(func) = item
+            if let Item::FnDecl { func, .. } = item
                 && let Some(name) = &func.name
             {
                 map.insert(name.clone(), func.params.iter().map(|p| p.ty.clone()).collect());
@@ -718,7 +718,7 @@ fn try_emit_module(module: &Module) -> TokenStream {
         let mut map = map.borrow_mut();
         map.clear();
         for item in &module.items {
-            if let Item::FnDecl(func) = item
+            if let Item::FnDecl { func, .. } = item
                 && let Some(name) = &func.name
             {
                 let unwrapped = match &func.return_type {
@@ -736,7 +736,7 @@ fn try_emit_module(module: &Module) -> TokenStream {
         map.clear();
         let cache = PER_TENANT_CACHE.with(|c| c.borrow().clone());
         for item in &module.items {
-            let Item::ClassDef(def) = item else { continue };
+            let Item::ClassDef { def, .. } = item else { continue };
             for method in &def.methods {
                 let debug_text = format!("{:?}", method.func);
                 let mut extra = Vec::new();
@@ -799,19 +799,27 @@ fn try_emit_module(module: &Module) -> TokenStream {
 
 fn item_label(item: &Item) -> String {
     match item {
-        Item::FnDecl(func) => format!("fn `{}`", func.name.as_deref().unwrap_or("<anonymous>")),
+        Item::FnDecl { func, .. } => format!("fn `{}`", func.name.as_deref().unwrap_or("<anonymous>")),
         Item::StructDef(def) => format!("interface `{}`", def.name),
         Item::PerTenantCache { name, .. } => format!("cache `{name}`"),
         Item::ModuleConst { name, .. } => format!("const `{name}`"),
         Item::TypeImport { .. } | Item::ValueImport { .. } => "import".to_string(),
-        Item::ClassDef(def) => format!("class `{}`", def.name),
+        Item::ClassDef { def, .. } => format!("class `{}`", def.name),
         Item::StringEnumDef(def) => format!("type `{}`", def.name),
+        Item::VerbatimTypeDecl { name, .. } => format!("type-only decl `{name}`"),
     }
 }
 
 fn emit_item(item: &Item) -> Result<Option<TokenStream>, IrError> {
     match item {
         Item::TypeImport { .. } | Item::ValueImport { .. } => Ok(None),
+        // Unchanged from before `Item::VerbatimTypeDecl` existed: this Rust path never resolved
+        // a method-shaped interface/unrepresentable type alias to anything on its own even when
+        // it was silently erased (`Ok(None)`) at lowering — `rust_type`'s same-module-class
+        // fallback is what actually resolves a reference to one of these names for Rust
+        // emission. See `Item::VerbatimTypeDecl`'s own doc comment: it exists only to give *TS*
+        // emission something to restate; Rust emission still has nothing to do with it.
+        Item::VerbatimTypeDecl { .. } => Ok(None),
         Item::StructDef(def) => Ok(Some(emit_struct_def(def)?)),
         Item::PerTenantCache { value_ty, .. } => {
             let cache_ident = format_ident!("{value_ty}Cache");
@@ -842,8 +850,8 @@ fn emit_item(item: &Item) -> Result<Option<TokenStream>, IrError> {
             file: String::new(),
             construct: "module-level const emission".into(),
         }),
-        Item::FnDecl(func) => Ok(Some(emit_fn_decl(func)?)),
-        Item::ClassDef(def) => Ok(Some(emit_class_def(def)?)),
+        Item::FnDecl { func, .. } => Ok(Some(emit_fn_decl(func)?)),
+        Item::ClassDef { def, .. } => Ok(Some(emit_class_def(def)?)),
         // Skipped entirely if this name is already hand-shimmed (`BufferKind`, via `TYPE_SHIMS`)
         // — that table is the authority for those; regenerating would produce a redundant, unused
         // duplicate enum rather than a conflict (nothing references the bare local name), but

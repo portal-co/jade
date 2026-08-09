@@ -1,0 +1,118 @@
+import type { HostAsyncCapability, HostTask } from "../async-host.ts";
+import { hostTaskFromPromise } from "../async-host.ts";
+import { guestAbiMixin } from "./narrow.ts";
+import type { Tenant } from "./types.ts";
+export const WSDOM_TENANT_RUNTIME_IMPORT = "@portal-solutions/jade-js/wsdom-tenant-runtime";
+type Callback = (value: unknown) => unknown;
+type ServerDescriptor = {
+    kind: "server";
+    capability: string;
+    id: number;
+    callable?: boolean;
+};
+type Request = {
+    capability: string;
+    requestId: number;
+    operation: string;
+    args: unknown[];
+    resolve: Callback;
+    reject: Callback;
+};
+function isServerDescriptor(value: unknown): value is ServerDescriptor {
+    return (value !== null && typeof value === "object" && (value as {
+        kind?: unknown;
+    }).kind === "server" && typeof (value as {
+        capability?: unknown;
+    }).capability === "string" && typeof (value as {
+        id?: unknown;
+    }).id === "number");
+}
+export function installServerTenantRuntime(request: Callback, release: Callback, capability: string, async: HostAsyncCapability): Tenant {
+    let nextRequestId = 1;
+    let tenant: Tenant;
+    const serverShims = new WeakMap<object, ServerDescriptor>();
+    const releaseQueue: number[] = [];
+    let releaseScheduled = false;
+    const flushRelease = ()=>{
+        releaseScheduled = false;
+        if (releaseQueue.length !== 0) {
+            const ids = releaseQueue.splice(0);
+            release({
+                capability,
+                serverValueIds: ids
+            });
+        }
+    };
+    const finalizer = typeof FinalizationRegistry === "undefined" ? undefined : new FinalizationRegistry<number>((id)=>{
+        releaseQueue.push(id);
+        if (!releaseScheduled) {
+            releaseScheduled = true;
+            queueMicrotask(flushRelease);
+        }
+    });
+    const shim = (descriptor: ServerDescriptor): object =>{
+        const out = descriptor.callable ? function(this: unknown, ...args: unknown[]) {
+            return tenant.driveTenant(tenant.invoke(out as Function, {
+                kind: "apply",
+                thisArg: this,
+                args
+            }), false, false);
+        } : Object.create(null);
+        Object.freeze(out);
+        serverShims.set(out, descriptor);
+        finalizer?.register(out, descriptor.id);
+        return out;
+    };
+    const toWire = (value: unknown): unknown =>{
+        if (value !== null && (typeof value === "object" || typeof value === "function")) {
+            const descriptor = serverShims.get(value as object);
+            if (descriptor !== undefined) return descriptor;
+        }
+        return value;
+    };
+    const fromWire = (value: unknown): unknown =>isServerDescriptor(value) && value.capability === capability ? shim(value) : value;
+    const bridge = {
+        request (operation: string, args: unknown[]): HostTask<unknown> {
+            const requestId = nextRequestId++;
+            const pending = new Promise<unknown>((resolve, reject)=>{
+                const resolveCallback: Callback = (value)=>resolve(fromWire(value));
+                const rejectCallback: Callback = (error)=>reject(error);
+                request({
+                    capability,
+                    requestId,
+                    operation,
+                    args: args.map(toWire),
+                    resolve: resolveCallback,
+                    reject: rejectCallback
+                } satisfies Request);
+            });
+            return hostTaskFromPromise(async, pending);
+        }
+    };
+    const op = (name: string)=>function*(...args: unknown[]) {
+            return yield tenant.yieldHostTask(async, bridge.request(name, args));
+        };
+    tenant = Object.assign(Object.create(null), {
+        make: op("make"),
+        makeFunction: op("makeFunction"),
+        makeExotic: op("makeExotic"),
+        makeCallableExotic: op("makeCallableExotic"),
+        *invoke (callee: Function, invocation: unknown) {
+            return yield bridge.request("invoke", [
+                callee,
+                invocation
+            ]);
+        },
+        ownsObject (value: object) {
+            return serverShims.has(value);
+        },
+        get: op("get"),
+        set: op("set"),
+        has: op("has"),
+        delete: op("delete"),
+        ownKeys: op("ownKeys"),
+        define: op("define"),
+        assign: op("assign")
+    }, guestAbiMixin) as Tenant;
+    return tenant;
+}

@@ -1,0 +1,26 @@
+import type { HostToGuest, GuestToHost, GuestFnResult, HostFnResult } from "./rewrite.ts";
+import type { GuestPromise } from "./primordials/promise.ts";
+import type { HostTask } from "./async-host.ts";
+type HostFn = (n: number, s: string) => boolean;
+const correctGuestStub: HostToGuest<HostFn> = (n: number, s: string): boolean =>n > 0 && s.length > 0;
+const wrongParamStub: HostToGuest<HostFn> = (n: number, s: number): boolean =>n > 0 && s > 0;
+const wrongReturnStub: HostToGuest<HostFn> = (n: number, s: string): string =>`${n}${s}`;
+type HostAsyncFn = (id: number) => string;
+declare const guestPromise: GuestPromise<string>;
+const guestAsyncStub: HostToGuest<HostAsyncFn, true, false> = (_id: number): GuestPromise<string> =>guestPromise;
+const wrongAsyncStub: HostToGuest<HostAsyncFn, true, false> = (id: number): string =>`${id}`;
+type GuestFn = (x: number) => Generator<number, void, unknown>;
+const correctHostWrapper: GuestToHost<GuestFn, false, false> = (x: number): Generator<number, void, unknown> =>(function*() {
+        yield x;
+    })();
+type _GuestAsyncResult = GuestFnResult<number, true, false>;
+declare const guestAsyncResult: _GuestAsyncResult;
+type _HostAsyncResult = HostFnResult<number, true, false>;
+declare const hostAsyncResult: _HostAsyncResult;
+const _wrongHostAsyncResult: _HostAsyncResult = Promise.resolve(1);
+const _wrongGuestAsyncResult: _GuestAsyncResult = Promise.resolve(1);
+void correctGuestStub;
+void guestAsyncStub;
+void correctHostWrapper;
+void guestAsyncResult;
+void hostAsyncResult;

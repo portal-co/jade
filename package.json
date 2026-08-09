@@ -10,5 +10,9 @@
         "typescript": "^5.9.2",
         "zshy": "^0.4.2"
     },
+    "overrides": {
+        "@portal-solutions/semble-common": "file:../semble/packages/rt/common",
+        "@portal-solutions/semble-weak-map.factory": "file:../semble/packages/rt/weak-map/factory"
+    },
     "type": "module"
 }

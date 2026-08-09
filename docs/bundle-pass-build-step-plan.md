@@ -47,9 +47,62 @@
   methods (`has`, `delete`, `getOwnPropertyDescriptor`, ...) stay untouched. Private accessors
   (`get #x()`/`set #x()`) remain explicitly out of scope. 10/10 tests pass (including the two
   new ones).
-- **Not yet done**: Phase 4-6 (CI regen+diff wiring, pointing `zshy`'s `exports` at the
-  generated directory, tsc/e2e regression coverage) — deferred pending a decision on priority,
-  not blocked on anything technical.
+- **Phases 4-6, all done**:
+  - **Two more real bugs found and fixed** by actually running the orchestrator against every
+    real file and type-checking/executing the result, rather than trusting per-file unit tests
+    alone:
+    1. `lower.rs` erased a method-shaped `interface` (any `TsMethodSignature` member) or an
+       unrepresentable `type` alias entirely — a pre-existing gap shared by `emit_ts.rs` and
+       `emit_ast.rs` alike (the missing information lived in the IR, not either emitter). This
+       left dangling references in regenerated TypeScript: `primordials/proxy.ts`'s `class
+       ProxyStateImpl implements ProxyState` with no `ProxyState` declared anywhere,
+       `primordials/array-buffer.ts`'s `BufferHandle`/`BufferHooks`/`BufferPrimordial`
+       similarly missing. Fixed with a new `Item::VerbatimTypeDecl { name, is_exported, source
+       }` — `source` is sliced by byte-offset span directly from the original file (not
+       re-derived), so both emitters can restate the declaration verbatim instead of dropping
+       it; Rust emission (which never referenced these names directly — `rust_type`'s
+       same-module-class fallback already resolves them) is unaffected, confirmed by diffing
+       regenerated `array_buffer.rs` against the checked-in `jade-primordial-rt` output (only
+       difference: an unrelated, pre-existing closure-capture-ordering nondeterminism).
+    2. `Item::FnDecl`/`Item::ClassDef` never tracked the original source's `export` keyword, so
+       no regenerated primordial function/class (`objectPrimordial`, `BufferPrimordialImpl`,
+       ...) could actually be imported by another file — harmless for Rust emission (never
+       needed it) but fatal for a real cross-file TypeScript bundle. Fixed by adding
+       `is_exported: bool` to both variants, threaded from `lower_decl`'s existing call sites.
+  - The private-helper-method forwarder's `(...args)` call also needed `tsc` to accept
+    spreading `args` into `#name`'s fixed-arity parameter list (TS2556). Typing the *rest
+    parameter* (`: any` or `: any[]`) does **not** work — verified empirically, both still
+    trigger TS2556, since the check is on the spread expression's own declared type and no
+    array type (even `any[]`) counts as a tuple. Casting the *callee* to `any` instead
+    (`(this.#name as any)(...args)`) does work. Gated behind a new
+    `TenantExposureConfig::type_forwarder_args_as_any` (default `false`): the crate's original
+    runtime call site (`transform_bundle_source` against already-stripped JS from a live
+    `toString()`) must never inject TypeScript-only syntax into its output; `jade-bundle-build`
+    sets it `true` since its output is real TypeScript `tsc` needs to accept.
+  - **Full regression proof, against the real codebase, not fixtures**: `npx tsc --noEmit -p
+    tsconfig.generated-check.json` (new, checked-in scoped tsconfig) is **clean — zero errors**
+    — across all 41 regenerated files. All 7 real e2e suites (`tenant.e2e.ts`,
+    `primordials.e2e.ts`, `trap.e2e.ts`, `tenant-compose.e2e.ts`, `exotic-tenant.e2e.ts`,
+    `rewrite.e2e.ts`, `promise.e2e.ts`) **pass running directly against `packages/jade-js/
+    .generated/`** via `node`, identically to hand-written source.
+  - Unrelated environment fix required to get any of this running at all: the npm-published
+    `@portal-solutions/semble-weak-map.factory@0.1.3` is missing the `./gc-hooks` subpath
+    `packages/jade-js/gc.ts` imports (and `@portal-solutions/semble-gc` isn't published at
+    all) — pre-existing, unrelated to this plan, blocked `tsc`/e2e execution even against
+    unmodified hand-written source. Fixed via root `package.json`'s new `overrides` field
+    pointing `@portal-solutions/semble-common` and `@portal-solutions/semble-weak-map.factory`
+    at the local `../semble` clone (which has real, built `dist/gc-hooks.*`), per the user's
+    explicit instruction; `../semble`'s own `npm install` resolves its further transitive deps
+    (`@portal-solutions/semble-gc` as a sibling workspace, `@portal-solutions/hooker-snap` from
+    npm) normally.
+  - `packages/jade-js/package.json`'s `zshy.exports` now point at `.generated/*.ts` instead of
+    hand-written source paths — the actual "what ships" swap flagged as needing explicit review
+    when this plan was first written. `npm run regen` (new script) regenerates
+    `packages/jade-js/.generated/`, which is checked into git (matching `jade-primordial-rt`'s
+    existing generated-and-committed convention) so drift is visible in a normal diff; this
+    repo has no CI configured at all yet (no `.github/`), so an automated "regenerate and diff,
+    fail on drift" *CI job* specifically is not wired up — that's a separate decision (which CI
+    provider, etc.) left for whenever this repo gets CI at all.
 
 ## Problem and intended result
 

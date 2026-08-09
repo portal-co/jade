@@ -93,7 +93,7 @@ pub fn lower_module(file_name: &str, source: &str) -> Result<LoweredModule, IrEr
     let mut items = Vec::new();
     let mut skipped = Vec::new();
     for item in &module.body {
-        match lower_module_item(file_name, item) {
+        match lower_module_item(file_name, source, item) {
             Ok(Some(lowered)) => items.push(lowered),
             Ok(None) => {}
             Err(err) => {
@@ -115,11 +115,21 @@ fn unsupported(file: &str, construct: impl Into<String>) -> IrError {
     }
 }
 
-fn lower_module_item(file: &str, item: &ast::ModuleItem) -> Result<Option<Item>, IrError> {
+fn lower_module_item(file: &str, source: &str, item: &ast::ModuleItem) -> Result<Option<Item>, IrError> {
     match item {
-        ast::ModuleItem::ModuleDecl(decl) => lower_module_decl(file, decl),
-        ast::ModuleItem::Stmt(stmt) => lower_top_level_stmt(file, stmt),
+        ast::ModuleItem::ModuleDecl(decl) => lower_module_decl(file, source, decl),
+        ast::ModuleItem::Stmt(stmt) => lower_top_level_stmt(file, source, stmt),
     }
+}
+
+/// Byte-offset slice of `source` covering exactly `span` — valid because [`lower_module`] parses
+/// a single file into a fresh [`SourceMap`], whose first (only) file starts at `BytePos(1)`
+/// (`swc_common::SourceMap::new_source_file`), so `BytePos.0 - 1` is a direct UTF-8 byte index
+/// into `source`.
+fn source_slice(source: &str, span: swc_common::Span) -> String {
+    let lo = span.lo.0 as usize - 1;
+    let hi = span.hi.0 as usize - 1;
+    source[lo..hi].to_string()
 }
 
 fn import_names(specifiers: &[ast::ImportSpecifier]) -> Vec<String> {
@@ -133,41 +143,43 @@ fn import_names(specifiers: &[ast::ImportSpecifier]) -> Vec<String> {
         .collect()
 }
 
-fn lower_module_decl(file: &str, decl: &ast::ModuleDecl) -> Result<Option<Item>, IrError> {
+fn lower_module_decl(file: &str, source: &str, decl: &ast::ModuleDecl) -> Result<Option<Item>, IrError> {
     match decl {
         ast::ModuleDecl::Import(import) => {
-            let source = atom_string(&import.src.value);
+            let import_source = atom_string(&import.src.value);
             let names = import_names(&import.specifiers);
             Ok(Some(if import.type_only {
-                Item::TypeImport { source, names }
+                Item::TypeImport { source: import_source, names }
             } else {
-                Item::ValueImport { source, names }
+                Item::ValueImport { source: import_source, names }
             }))
         }
-        ast::ModuleDecl::ExportDecl(export) => lower_decl(file, &export.decl),
+        ast::ModuleDecl::ExportDecl(export) => lower_decl(file, source, true, &export.decl),
         other => Err(unsupported(file, format!("module declaration {other:?}"))),
     }
 }
 
-fn lower_top_level_stmt(file: &str, stmt: &ast::Stmt) -> Result<Option<Item>, IrError> {
+fn lower_top_level_stmt(file: &str, source: &str, stmt: &ast::Stmt) -> Result<Option<Item>, IrError> {
     match stmt {
-        ast::Stmt::Decl(decl) => lower_decl(file, decl),
+        ast::Stmt::Decl(decl) => lower_decl(file, source, false, decl),
         other => Err(unsupported(file, format!("top-level statement {other:?}"))),
     }
 }
 
-fn lower_decl(file: &str, decl: &ast::Decl) -> Result<Option<Item>, IrError> {
+fn lower_decl(file: &str, source: &str, is_exported: bool, decl: &ast::Decl) -> Result<Option<Item>, IrError> {
     match decl {
-        // A type alias is erased entirely — TS emission re-declares the original source's own
-        // type aliases verbatim instead of round-tripping them through the IR (see
-        // `emit_ts.rs`). An interface is different: it's erased from *TS* emission the same way,
-        // but it drives the generated Rust struct's field layout, so it becomes a real
-        // `Item::StructDef` here rather than being discarded.
+        // A type alias that isn't a plain string-union or object shape (see the arms below)
+        // becomes `Item::VerbatimTypeDecl` — Rust emission has no use for it (never produces a
+        // real Rust type from an arbitrary TS type expression), but TS emission needs it restated
+        // verbatim, not silently dropped (see `Item::VerbatimTypeDecl`'s own doc comment for why
+        // dropping it left dangling references in regenerated TypeScript). An interface is
+        // different when its shape *is* representable: it drives the generated Rust struct's
+        // field layout, so it becomes a real `Item::StructDef` here instead.
         // A method-shaped interface (any `TsMethodSignature` member) can't become a plain
-        // `StructDef` (no generic method-signature parsing here) — erased the same way a type
-        // alias is (`Ok(None)`), rather than a hard rejection, on the assumption that a `class`
-        // elsewhere in this same module `implements` it and *that* becomes the real Rust type a
-        // reference to this interface name resolves to (see `emit_rust.rs`'s `rust_type`, which
+        // `StructDef` either (no generic method-signature parsing here) — also
+        // `Item::VerbatimTypeDecl`, on the assumption that a `class` elsewhere in this same
+        // module `implements` it and *that* becomes the real Rust type a reference to this
+        // interface name resolves to for Rust emission (see `emit_rust.rs`'s `rust_type`, which
         // falls back to a same-module class's own type — by class name or by its `implements`
         // list — for any interface name it doesn't have a `StructDef` for). `BufferHooks` was the
         // first such interface (before any class existed to back it, hence its own hand-written
@@ -176,7 +188,11 @@ fn lower_decl(file: &str, decl: &ast::Decl) -> Result<Option<Item>, IrError> {
         // is the first one backed by a *generated* class. See
         // `docs/proxy-and-buffer-primordial-gap-plan.md`.
         ast::Decl::TsInterface(iface) if iface.body.body.iter().any(|m| matches!(m, ast::TsTypeElement::TsMethodSignature(_))) => {
-            Ok(None)
+            Ok(Some(Item::VerbatimTypeDecl {
+                name: iface.id.sym.to_string(),
+                is_exported,
+                source: source_slice(source, iface.span),
+            }))
         }
         ast::Decl::TsInterface(iface) => {
             if !iface.extends.is_empty() {
@@ -196,22 +212,29 @@ fn lower_decl(file: &str, decl: &ast::Decl) -> Result<Option<Item>, IrError> {
             // — the same field-layout-driven translation an `interface` gets (see the arm above),
             // just spelled with `type` instead. `typed-arrays.ts`'s local `Record_` is the first
             // example; unlike `interface`, most type aliases are *not* this shape (plain unions,
-            // `object`, etc.) and are erased as before.
+            // `object`, etc.) and fall through to `Item::VerbatimTypeDecl` below instead.
             if let ast::TsType::TsTypeLit(lit) = alias.type_ann.as_ref() {
                 let fields = lower_type_elements(file, &lit.members)?;
                 return Ok(Some(Item::StructDef(StructDef { name: alias.id.sym.to_string(), fields })));
             }
-            Ok(None)
+            Ok(Some(Item::VerbatimTypeDecl {
+                name: alias.id.sym.to_string(),
+                is_exported,
+                source: source_slice(source, alias.span),
+            }))
         }
         ast::Decl::Fn(fn_decl) => {
             let name = fn_decl.ident.sym.to_string();
             let func = lower_function(file, &fn_decl.function, Some(name.clone()))?;
-            Ok(Some(Item::FnDecl(func)))
+            Ok(Some(Item::FnDecl { func, is_exported }))
         }
         ast::Decl::Var(var_decl) => lower_module_var_decl(file, var_decl),
         ast::Decl::Class(class_decl) => {
             let name = class_decl.ident.sym.to_string();
-            Ok(Some(Item::ClassDef(lower_class(file, &class_decl.class, name)?)))
+            Ok(Some(Item::ClassDef {
+                def: lower_class(file, &class_decl.class, name)?,
+                is_exported,
+            }))
         }
         other => Err(unsupported(file, format!("declaration {other:?}"))),
     }

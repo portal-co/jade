@@ -10,15 +10,22 @@
 //! in place as the parity oracle during migration (see the plan's "Migrating `emit_ts.rs`"
 //! section) rather than being deleted outright in one pass.
 //!
-//! Known gap carried over unchanged from `emit_ts.rs`, not introduced here: neither emitter
-//! marks any top-level `Item::FnDecl`/`Item::ClassDef`/`Item::ModuleConst` as `export`ed (only
-//! `StructDef`/`StringEnumDef` get `export`). That means today's regenerated output cannot
-//! actually be imported by another module — harmless for a single-file `tsc --noEmit` check,
-//! but a real blocker for shipping a generated bundle other files import from (see the plan's
-//! orchestrator, which needs primordial exports like `objectPrimordial` to resolve). The IR
-//! itself has no exported-ness field to draw on (`ir::Item` variants carry no visibility flag),
-//! so fixing this needs an IR change, not just an emitter change — tracked as follow-up, not
-//! fixed here, to keep this module's job to "match what the IR already says," faithfully.
+//! Two gaps found (via `crates/jade-bundle-build`'s real run against the whole package, not
+//! synthetic fixtures) and fixed in `lower.rs`/`ir.rs`, shared by both this emitter and
+//! `emit_ts.rs` since the missing information lived in the IR itself, not either emitter:
+//! - `Item::FnDecl`/`Item::ClassDef` now carry `is_exported`, threaded from the original
+//!   source's own `export` keyword — previously dropped silently, so no regenerated primordial
+//!   function/class (`objectPrimordial`, `BufferPrimordialImpl`, ...) could actually be imported
+//!   by another file. `Item::ModuleConst` still doesn't track it (no `ir::Item` construction
+//!   site needs it today — the one real exported module-level const, `array-buffer.ts`'s
+//!   `nativeBufferHooks`, never reaches the IR at all; it's built directly from `instanceof`,
+//!   which `lower_module` already rejects, so that file falls back to a direct parse instead).
+//! - `Item::VerbatimTypeDecl` (see its own doc comment) replaces silently erasing a method-shaped
+//!   `interface` or an unrepresentable `type` alias — those were previously dropped from *both*
+//!   emitters' output while a same-module `class ... implements ErasedName` or a signature
+//!   referencing the erased type's name stayed behind, producing regenerated TypeScript with
+//!   dangling references (`primordials/proxy.ts`'s `ProxyState`/`TrapResult`,
+//!   `primordials/array-buffer.ts`'s `BufferHandle`/`BufferHooks`/`BufferPrimordial`).
 
 use crate::ir;
 use swc_atoms::Atom;
@@ -125,14 +132,67 @@ fn emit_item(item: &ir::Item) -> Vec<ModuleItem> {
                 }],
             }))))]
         }
-        ir::Item::FnDecl(func) => vec![ModuleItem::Stmt(Stmt::Decl(Decl::Fn(emit_top_level_fn_decl(
-            func,
-        ))))],
-        ir::Item::ClassDef(def) => vec![ModuleItem::Stmt(Stmt::Decl(Decl::Class(emit_class_decl(def))))],
+        ir::Item::FnDecl { func, is_exported } => {
+            let decl = Decl::Fn(emit_top_level_fn_decl(func));
+            vec![export_wrap(decl, *is_exported)]
+        }
+        ir::Item::ClassDef { def, is_exported } => {
+            let decl = Decl::Class(emit_class_decl(def));
+            vec![export_wrap(decl, *is_exported)]
+        }
         ir::Item::StringEnumDef(def) => vec![ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
             span: DUMMY_SP,
             decl: Decl::TsTypeAlias(Box::new(emit_string_enum_def(def))),
         }))],
+        ir::Item::VerbatimTypeDecl { is_exported, source, .. } => {
+            let decl = parse_verbatim_decl(source);
+            vec![export_wrap(decl, *is_exported)]
+        }
+    }
+}
+
+/// `ModuleItem::Stmt(Stmt::Decl(decl))` when not exported, or the same `Decl` wrapped in
+/// `ModuleDecl::ExportDecl` when it is — the two shapes every top-level `Decl` in this emitter
+/// needs to choose between based on the IR's own `is_exported` flag.
+fn export_wrap(decl: Decl, is_exported: bool) -> ModuleItem {
+    if is_exported {
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl {
+            span: DUMMY_SP,
+            decl,
+        }))
+    } else {
+        ModuleItem::Stmt(Stmt::Decl(decl))
+    }
+}
+
+/// Re-parses a [`ir::Item::VerbatimTypeDecl`]'s stored source (sliced verbatim from the
+/// originally-lowered file, no leading `export`) back into a real `Decl` node. Must reparse
+/// cleanly — it was sliced from source that already parsed successfully once during lowering,
+/// covering exactly one `interface`/`type` declaration and nothing else — a parse failure or a
+/// different shape coming back here means `lower.rs`'s span slicing itself is broken, which
+/// should fail loudly rather than silently drop the declaration a second time.
+fn parse_verbatim_decl(source: &str) -> Decl {
+    let cm: swc_common::sync::Lrc<swc_common::SourceMap> = Default::default();
+    let fm = cm.new_source_file(
+        swc_common::sync::Lrc::new(swc_common::FileName::Custom("verbatim-type-decl.ts".into())),
+        source.to_owned(),
+    );
+    let lexer = swc_ecma_parser::lexer::Lexer::new(
+        swc_ecma_parser::Syntax::Typescript(swc_ecma_parser::TsSyntax {
+            tsx: false,
+            decorators: false,
+            ..Default::default()
+        }),
+        Default::default(),
+        swc_ecma_parser::StringInput::from(&*fm),
+        None,
+    );
+    let module = swc_ecma_parser::Parser::new_from(lexer)
+        .parse_typescript_module()
+        .unwrap_or_else(|err| panic!("VerbatimTypeDecl source failed to reparse: {err:?}\n---\n{source}"));
+    match module.body.into_iter().next() {
+        Some(ModuleItem::Stmt(Stmt::Decl(decl))) => decl,
+        other => panic!("VerbatimTypeDecl source reparsed to an unexpected shape: {other:?}\n---\n{source}"),
     }
 }
 
@@ -1087,10 +1147,29 @@ mod tests {
         // to begin with (it was dropped from `module` before printing) — so re-lowering it
         // should be fully clean, not hit the same skip a second time.
         let reparsed = expect_full_relower("array-buffer.ts (round-tripped)", &printed);
+        // `Item::VerbatimTypeDecl.source` is raw sliced text — the *original* file's hand
+        // formatting (this file has three: `BufferHandle`/`BufferHooks`/`BufferPrimordial`),
+        // versus `swc_ecma_codegen`'s own formatting on the reparsed side (the printed output
+        // went through real AST construction, not a second verbatim slice of identical text).
+        // Different whitespace, same structure — normalize before comparing, since exact
+        // formatting was never a correctness property `VerbatimTypeDecl` claims to preserve
+        // (only "still a valid, referenceable declaration" is).
+        let mut module = module;
+        let mut reparsed = reparsed;
+        normalize_verbatim_type_decl_whitespace(&mut module);
+        normalize_verbatim_type_decl_whitespace(&mut reparsed);
         assert_eq!(
             module, reparsed,
             "emit_ast's printed output must lower back to the same IR\n---\n{printed}"
         );
+    }
+
+    fn normalize_verbatim_type_decl_whitespace(module: &mut ir::Module) {
+        for item in &mut module.items {
+            if let ir::Item::VerbatimTypeDecl { source, .. } = item {
+                *source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+            }
+        }
     }
 
     #[test]

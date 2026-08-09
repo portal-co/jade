@@ -65,6 +65,11 @@ const GENERATED_DIR_NAME: &str = ".generated";
 fn tenant_exposure_config() -> TenantExposureConfig {
     let mut config = TenantExposureConfig::with_tenant_class("Tenant");
     config.tenant_classes.insert("MergedTenant".to_owned());
+    // This orchestrator's output is real TypeScript other files/tsc consume — unlike the
+    // crate's default (runtime-path-safe) config, a leftover TS type annotation here is
+    // harmless, and omitting it would make `tsc` reject a generated forwarder's spread call
+    // (see `TenantExposureConfig::type_forwarder_args_as_any`'s doc comment).
+    config.type_forwarder_args_as_any = true;
     config
 }
 

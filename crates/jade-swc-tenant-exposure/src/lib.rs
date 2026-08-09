@@ -51,6 +51,19 @@ pub struct TenantExposureConfig {
     pub helper_functions: BTreeSet<String>,
     /// Stable prefix for generated accessor keys.
     pub mangling_namespace: String,
+    /// Whether a generated private-helper-method forwarder's call site casts its callee to
+    /// `any` (see `make_method_forwarder`'s doc comment for why a cast, not a parameter type
+    /// annotation, is what's actually needed — `tsc` otherwise rejects spreading the forwarded
+    /// arguments into a fixed-arity call). Defaults to `false`: the crate's original, still-live
+    /// runtime call site
+    /// (`transform_bundle_source` invoked against `Function.prototype.toString()`-reflected,
+    /// already-stripped JS) must never inject TypeScript-only syntax into its output — that
+    /// source was never going through another type-stripping pass, so a leftover type
+    /// annotation there is directly unparseable by `tenant_inline::extract_tenant_methods`'s
+    /// `Syntax::Es` parser (and by any real JS engine, if it's ever re-evaluated as JS). A
+    /// build-time caller composing this with `swc_ecma_codegen`-printed TypeScript output that
+    /// *does* still need `tsc` to accept it (e.g. `crates/jade-bundle-build`) sets this `true`.
+    pub type_forwarder_args_as_any: bool,
 }
 
 impl TenantExposureConfig {
@@ -65,6 +78,7 @@ impl TenantExposureConfig {
                 .collect(),
             helper_functions: Default::default(),
             mangling_namespace: "jade$tenant".to_owned(),
+            type_forwarder_args_as_any: false,
         }
     }
 
@@ -336,7 +350,11 @@ fn transform_tenant_class(
         }
     }
     for (method_name, key) in planned_forwarders {
-        class.body.push(make_method_forwarder(&key, &method_name));
+        class.body.push(make_method_forwarder(
+            &key,
+            &method_name,
+            config.type_forwarder_args_as_any,
+        ));
     }
     if rewritten_any {
         report.transformed_tenants.push(class_name.to_string());
@@ -662,12 +680,41 @@ fn make_setter(key: &str, field: &Atom) -> ClassMember {
 /// further than this one level: only the *rewritten selected public method*'s call site needs a
 /// syntax that's legal outside the class, and `this[MANGLED](...)` is exactly that, the same
 /// "native member access, not a bespoke lowering" approach the field accessors already use.
-fn make_method_forwarder(key: &str, method_name: &Atom) -> ClassMember {
+///
+/// `type_args_as_any` controls whether the call casts its callee to `any` (`(this.#name as
+/// any)(...args)` instead of `this.#name(...args)`) — see
+/// [`TenantExposureConfig::type_forwarder_args_as_any`]'s doc comment for why this can't be
+/// unconditional: without it, `tsc` rejects spreading `args` into `#name`'s fixed-arity
+/// parameter list ("A spread argument must either have a tuple type or be passed to a rest
+/// parameter") whenever `#name` doesn't itself take a rest parameter — true of every real
+/// private helper method forwarded so far (`#shadowForKey(key)`, `#missing(operation)`) — but
+/// the cast itself is TypeScript-only syntax the crate's runtime call site must never inject
+/// into already-stripped JS. Typing the *rest parameter* instead (`: any`/`: any[]`) does not
+/// work no matter which — TS2556 checks the spread's own declared type, and neither an
+/// `any`-typed nor an `any[]`-typed rest parameter changes that (only an actual tuple type
+/// would, which isn't available generically here); casting the *callee* to `any` is the
+/// construct that actually disables the check, by making the whole call untyped.
+fn make_method_forwarder(key: &str, method_name: &Atom, type_args_as_any: bool) -> ClassMember {
     let args = Ident::new("args".into(), DUMMY_SP, Default::default());
+    let callee_expr = if type_args_as_any {
+        Expr::Paren(swc_ecma_ast::ParenExpr {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::TsAs(swc_ecma_ast::TsAsExpr {
+                span: DUMMY_SP,
+                expr: Box::new(private_member(method_name)),
+                type_ann: Box::new(swc_ecma_ast::TsType::TsKeywordType(swc_ecma_ast::TsKeywordType {
+                    span: DUMMY_SP,
+                    kind: swc_ecma_ast::TsKeywordTypeKind::TsAnyKeyword,
+                })),
+            })),
+        })
+    } else {
+        private_member(method_name)
+    };
     let call = Expr::Call(swc_ecma_ast::CallExpr {
         span: DUMMY_SP,
         ctxt: Default::default(),
-        callee: swc_ecma_ast::Callee::Expr(Box::new(private_member(method_name))),
+        callee: swc_ecma_ast::Callee::Expr(Box::new(callee_expr)),
         args: vec![swc_ecma_ast::ExprOrSpread {
             spread: Some(DUMMY_SP),
             expr: Box::new(Expr::Ident(args.clone())),
@@ -1254,10 +1301,18 @@ mod tests {
             out.contains("this.#shadow.get(key)"),
             "the forwarder's own body must keep using the real private field: {out}"
         );
-        // A new public mangled forwarding method was generated...
+        // A new public mangled forwarding method was generated. `type_forwarder_args_as_any`
+        // defaults to `false` (this is the crate's runtime-safe default config, per
+        // `TenantExposureConfig::type_forwarder_args_as_any`'s doc comment) — its rest parameter
+        // must stay untyped, not `TypeScript`-annotated, since this default config path is what
+        // the dynamic runtime call site (already-stripped JS in, must stay valid JS out) uses.
         assert!(
             out.contains("[\"__jade$tenant$") && out.contains("](...args)"),
             "missing generated forwarder: {out}"
+        );
+        assert!(
+            !out.contains(" as any"),
+            "default config must not inject TS-only syntax into runtime-path output: {out}"
         );
         // ...and `get`'s call site was rewritten to use it instead of the private method name.
         let methods = extract_tenant_methods(&out);
@@ -1271,6 +1326,34 @@ mod tests {
             get.body_block.contains("__jade$tenant$"),
             "got: {}",
             get.body_block
+        );
+    }
+
+    #[test]
+    fn type_forwarder_args_as_any_opts_into_ts_typed_forwarder_params() {
+        // The build-time-only opt-in (`crates/jade-bundle-build` sets this): the same class as
+        // above, but requesting the `as any` callee cast `tsc` needs to accept spreading `args`
+        // into `#shadowForKey`'s fixed-arity parameter list. Typing the *rest parameter* instead
+        // (`: any`/`: any[]`) does not work no matter which — verified empirically, both still
+        // trigger TS2556 — only casting the callee (making the whole call untyped) does.
+        let src = r#"
+            class T {
+                #shadow = new Map();
+                #shadowForKey(key) { return this.#shadow.get(key); }
+                *get(obj, key) { return this.#shadowForKey(key).get(obj); }
+            }
+        "#;
+        let mut cfg = config();
+        cfg.type_forwarder_args_as_any = true;
+        let (out, report) = transform_bundle_source(src, &cfg).unwrap();
+        assert_eq!(report.transformed_tenants, vec!["T"]);
+        assert!(
+            out.contains("[\"__jade$tenant$") && out.contains("](...args)"),
+            "missing generated forwarder: {out}"
+        );
+        assert!(
+            out.contains("as any)(...args)"),
+            "missing the callee-cast that actually satisfies tsc's TS2556 check: {out}"
         );
     }
 

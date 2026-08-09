@@ -5,18 +5,19 @@
   "main": "index.js",
   "types": "index.d.ts",
   "zshy": {
-    "module": "index.ts",
-    "main": "index.ts",
+    "module": ".generated/index.ts",
+    "main": ".generated/index.ts",
     "exports": {
-      ".": "index.ts",
-      "./gc": "gc.ts",
-      "./tenants": "tenants/index.ts",
-      "./primordials": "primordials/index.ts",
-      "./wsdom-tenant-runtime": "wsdom-tenant-runtime.ts"
+      ".": ".generated/index.ts",
+      "./gc": ".generated/gc.ts",
+      "./tenants": ".generated/tenants/index.ts",
+      "./primordials": ".generated/primordials/index.ts",
+      "./wsdom-tenant-runtime": ".generated/wsdom-tenant-runtime.ts"
     }
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "regen": "cargo run -p portal-solutions-jade-bundle-build --manifest-path ../../Cargo.toml"
   },
   "keywords": [],
   "author": "",
