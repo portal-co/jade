@@ -1,0 +1,18 @@
+[package]
+name = "portal-solutions-jade-bundle-build"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "Build-time orchestrator composing jade-primordial-ir's TypeScript emission with jade-swc-tenant-exposure's bundle pass"
+
+[[bin]]
+name = "jade-bundle-build"
+path = "src/main.rs"
+
+[dependencies]
+portal-solutions-jade-primordial-ir = { path = "../jade-primordial-ir" }
+portal-solutions-jade-swc-tenant-exposure = { path = "../jade-swc-tenant-exposure" }
+swc_common = { workspace = true }
+swc_ecma_ast = { workspace = true }
+swc_ecma_codegen = { workspace = true }
+swc_ecma_parser = { workspace = true }

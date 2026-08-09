@@ -8,6 +8,7 @@
 //! See the primordial-IR plan for the full design and phased rollout.
 
 pub mod cross_file;
+pub mod emit_ast;
 pub mod emit_rust;
 pub mod emit_ts;
 pub mod intrinsics;
@@ -38,13 +39,21 @@ impl fmt::Display for IrError {
 
 impl std::error::Error for IrError {}
 
-/// Parse `source` (the contents of `file_name`, used only for diagnostics) into a [`ir::Module`].
-pub fn translate_source(file_name: &str, source: &str) -> Result<ir::Module, IrError> {
+/// Parse `source` (the contents of `file_name`, used only for diagnostics) into a
+/// [`lower::LoweredModule`] — see that type's doc comment for why a caller producing real,
+/// executed output (not just Rust codegen) must check `.skipped` before trusting `.module`.
+pub fn translate_source(file_name: &str, source: &str) -> Result<lower::LoweredModule, IrError> {
     lower::lower_module(file_name, source)
 }
 
 pub fn emit_typescript(module: &ir::Module) -> String {
     emit_ts::emit_module(module)
+}
+
+/// Build a real `swc_ecma_ast::Module` from `module` — see `emit_ast`'s module doc comment for
+/// why this exists alongside `emit_typescript`'s text output.
+pub fn emit_ast(module: &ir::Module) -> swc_ecma_ast::Module {
+    emit_ast::emit_module(module)
 }
 
 pub fn emit_rust_source(module: &ir::Module, module_name: &str) -> String {

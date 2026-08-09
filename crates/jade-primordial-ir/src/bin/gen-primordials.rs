@@ -28,7 +28,10 @@ fn main() {
     let source = fs::read_to_string(&file).expect("read source file");
     let file_name = file.file_stem().unwrap().to_string_lossy().to_string();
     let module = match portal_solutions_jade_primordial_ir::translate_source(&file_name, &source) {
-        Ok(module) => module,
+        // Skipped items were already reported individually by `lower_module` itself; per
+        // "Per-item emission" (docs/primordial-ir-plan.md), this ad hoc CLI's own established
+        // policy is to still emit whatever did lower rather than fail the whole file.
+        Ok(lowered) => lowered.module,
         Err(err) => {
             eprintln!("{err}");
             std::process::exit(1);

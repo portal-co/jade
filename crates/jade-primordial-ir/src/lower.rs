@@ -41,7 +41,21 @@ fn atom_string(atom: &swc_atoms::Wtf8Atom) -> String {
     atom.as_wtf8().to_string_lossy().into_owned()
 }
 
-pub fn lower_module(file_name: &str, source: &str) -> Result<Module, IrError> {
+/// [`lower_module`]'s result: the (possibly partial) lowered [`Module`] plus every top-level
+/// item that couldn't lower. `gen-primordials`' Rust emission path has always treated a skipped
+/// item as safe to ignore — nothing in generated Rust calls an item that was never emitted, so
+/// the caller simply won't compile against it (a real, enforced failure mode, not a silent
+/// one). A caller emitting TypeScript that will actually execute (e.g. the bundle-build
+/// orchestrator, `docs/bundle-pass-build-step-plan.md`) has no such backstop — a dropped
+/// function is a `ReferenceError` at *runtime*, not a build error — so it must check `skipped`
+/// itself before trusting `module` as a faithful full-coverage translation, rather than relying
+/// on `Result::Ok` alone the way `gen-primordials.rs` always could.
+pub struct LoweredModule {
+    pub module: Module,
+    pub skipped: Vec<IrError>,
+}
+
+pub fn lower_module(file_name: &str, source: &str) -> Result<LoweredModule, IrError> {
     let cm: Lrc<SourceMap> = Default::default();
     let fm = cm.new_source_file(Lrc::new(FileName::Custom(file_name.to_string())), source.to_string());
     let syntax = Syntax::Typescript(TsSyntax {
@@ -77,14 +91,21 @@ pub fn lower_module(file_name: &str, source: &str) -> Result<Module, IrError> {
     // file that can't fully lower doesn't silently produce nothing downstream of the first
     // failure either.
     let mut items = Vec::new();
+    let mut skipped = Vec::new();
     for item in &module.body {
         match lower_module_item(file_name, item) {
             Ok(Some(lowered)) => items.push(lowered),
             Ok(None) => {}
-            Err(err) => eprintln!("gen-primordials: skipping an item in {file_name}: {err}"),
+            Err(err) => {
+                eprintln!("gen-primordials: skipping an item in {file_name}: {err}");
+                skipped.push(err);
+            }
         }
     }
-    Ok(Module { items })
+    Ok(LoweredModule {
+        module: Module { items },
+        skipped,
+    })
 }
 
 fn unsupported(file: &str, construct: impl Into<String>) -> IrError {

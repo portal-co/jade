@@ -3,12 +3,12 @@
 //! section of the primordial-IR plan) rather than modeling general TypeScript — anything
 //! outside this set is a hard `lower.rs` rejection, never silently dropped or guessed at.
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub items: Vec<Item>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     /// A type-only import, tracked for signature purposes and erased from both emission
     /// targets (e.g. `import type { Tenant, TenantGenerator } from "../tenants/types.ts"`).
@@ -66,7 +66,7 @@ pub enum Item {
     StringEnumDef(StringEnumDef),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StringEnumDef {
     pub name: String,
     /// The exact string literals, in source order — each becomes one enum variant (PascalCased)
@@ -74,7 +74,7 @@ pub struct StringEnumDef {
     pub variants: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassDef {
     pub name: String,
     /// `implements X` interface name(s), as written. TS re-emission reproduces this verbatim;
@@ -89,7 +89,7 @@ pub struct ClassDef {
     pub methods: Vec<ClassMethod>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassField {
     pub name: String,
     pub is_private: bool,
@@ -110,20 +110,20 @@ pub struct ClassField {
     pub definite_assignment: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassMethod {
     pub name: String,
     pub is_private: bool,
     pub func: FnDecl,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StructDef {
     pub name: String,
     pub fields: Vec<(String, TypeRef)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypeRef {
     /// A named type as written in the source (`Function`, `object`, `Tenant`, ...). Emission
     /// backends map recognized names to their own equivalents (`Function`/`object` -> the
@@ -137,7 +137,7 @@ pub enum TypeRef {
     Array(Box<TypeRef>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FnDecl {
     pub name: Option<String>,
     pub is_generator: bool,
@@ -154,7 +154,7 @@ pub struct FnDecl {
     pub return_type: Option<TypeRef>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub pattern: Pattern,
     /// Whether the parameter had a `= default` initializer (`args[1] ?? 0`-style defaulting is
@@ -165,7 +165,7 @@ pub struct Param {
     pub ty: Option<TypeRef>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     Ident(String),
     /// Shallow object destructuring only (`const { ObjectPrototype } = ...`) — the only shape
@@ -173,16 +173,16 @@ pub enum Pattern {
     ObjectShallow(Vec<ShallowBinding>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ShallowBinding {
     pub key: String,
     pub binding: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Block(pub Vec<Stmt>);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Let {
         pattern: Pattern,
@@ -220,7 +220,7 @@ pub enum Stmt {
     Continue,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Ident(String),
     Lit(Lit),
@@ -299,7 +299,7 @@ pub enum Expr {
     NonNull(Box<Expr>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MemberProp {
     Ident(String),
     Computed(Box<Expr>),
@@ -308,32 +308,32 @@ pub enum MemberProp {
     Private(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CallArg {
     Normal(Expr),
     Spread(Expr),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ArrayElement {
     Normal(Expr),
     Spread(Expr),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ObjectProp {
     KeyValue { key: PropKey, value: Expr },
     Method { key: PropKey, func: FnDecl },
     Spread(Expr),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PropKey {
     Ident(String),
     Computed(Box<Expr>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Lit {
     Str(String),
     Num(f64),
@@ -342,7 +342,7 @@ pub enum Lit {
     Undefined,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TemplatePart {
     Str(String),
     Expr(Expr),

@@ -4765,8 +4765,8 @@ export function* makeSmokeExotic(tenant: Tenant, proto: object): TenantGenerator
 "#;
 
     fn emit() -> String {
-        let module = crate::lower::lower_module("exotic-smoke", SMOKE_SOURCE).expect("lowering should succeed");
-        super::emit_module(&module, "exotic-smoke")
+        let lowered = crate::lower::lower_module("exotic-smoke", SMOKE_SOURCE).expect("lowering should succeed");
+        super::emit_module(&lowered.module, "exotic-smoke")
     }
 
     #[test]
