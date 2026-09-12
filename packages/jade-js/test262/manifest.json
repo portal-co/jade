@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "features": {},
+  "harnessIncludes": {},
+  "flags": {
+    "module": {
+      "status": "unsupported",
+      "note": "jade-vm-frontend parses the script goal only; no module goal exists"
+    },
+    "onlyStrict": {
+      "status": "unsupported",
+      "note": "frontend does not implement strict-mode semantics yet"
+    },
+    "async": {
+      "status": "partial",
+      "note": "runs only on async-capable cells (Phase 5); sync cells skip-flag"
+    },
+    "CanBlockIsFalse": {
+      "status": "unsupported",
+      "note": "host never blocks; Atomics.wait tests are out of scope"
+    },
+    "non-deterministic": {
+      "status": "partial",
+      "note": "excluded from the expectation ratchet, still reported"
+    }
+  },
+  "unsupportedConstructs": {}
+}

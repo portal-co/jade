@@ -1,5 +1,5 @@
 [workspace]
-members=["crates/jade-vm", "crates/jade-vm-core", "crates/jade-vm-wasm", "crates/jade-vm-wsdom", "crates/jade-vm-jit", "crates/jade-vm-frontend", "crates/jade-swc-tenant-exposure", "crates/jade-vm-e2e-tests", "crates/jade-cfg-opt", "crates/jade-vm-jit-swc", "crates/jade-tenant-rt", "crates/jade-primordial-ir", "crates/jade-primordial-rt", "crates/jade-bundle-build"]
+members=["crates/jade-vm", "crates/jade-vm-core", "crates/jade-vm-wasm", "crates/jade-vm-wsdom", "crates/jade-vm-jit", "crates/jade-vm-frontend", "crates/jade-swc-tenant-exposure", "crates/jade-vm-e2e-tests", "crates/jade-cfg-opt", "crates/jade-vm-jit-swc", "crates/jade-tenant-rt", "crates/jade-primordial-ir", "crates/jade-primordial-rt", "crates/jade-bundle-build", "crates/jade-test262"]
 resolver="3"
 
 [workspace.package]
