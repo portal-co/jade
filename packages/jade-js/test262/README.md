@@ -22,6 +22,11 @@ Implements `docs/test262-plan.md`. Reads: the plan first, then this file.
 # Rust orchestrator (plan's Phase-0 criterion):
 cargo run -p portal-solutions-jade-test262 -- --shard smoke
 
+# Multi-env runs (jit-t*) belong in release mode — Tier 2's CFG/SSA round-trip is
+# ~10x slower unoptimized:
+cargo build --release -p portal-solutions-jade-test262
+./target/release/jade-test262 --shard test262:language/literals
+
 # TS orchestrator:
 node --experimental-strip-types packages/jade-js/test262/run.ts --shard smoke
 

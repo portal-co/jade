@@ -1,4 +1,1730 @@
 {
   "version": 1,
-  "tests": {}
+  "tests": {
+    "11.8.2-1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "11.8.2-2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "11.8.2-3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "11.8.2-4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "11.8.3-1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "11.8.3-2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "11.8.3-3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "11.8.3-4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A2.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A2.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A2.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A2.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A2.3_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A2.4_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A2.4_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A2.4_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A2.4_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T1.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T1.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T1.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T2.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T2.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T2.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T2.4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T2.5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T2.6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T2.7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T2.8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.1_T2.9.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.2_T1.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A3.2_T1.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.10.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.11.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.12_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.12_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.1_A4.9.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A2.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A2.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A2.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A2.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A2.3_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A2.4_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A2.4_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A2.4_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A2.4_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T1.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T1.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T1.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T2.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T2.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T2.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T2.4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T2.5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T2.6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T2.7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T2.8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.1_T2.9.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.2_T1.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A3.2_T1.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.10.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.11.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.12_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.12_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.2_A4.9.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A2.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A2.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A2.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A2.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A2.3_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A2.4_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A2.4_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A2.4_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A2.4_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T1.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T1.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T1.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T2.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T2.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T2.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T2.4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T2.5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T2.6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T2.7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T2.8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.1_T2.9.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.2_T1.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A3.2_T1.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.10.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.11.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.12_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.12_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.3_A4.9.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A2.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A2.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A2.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A2.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A2.3_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A2.4_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A2.4_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A2.4_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A2.4_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T1.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T1.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T1.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T2.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T2.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T2.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T2.4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T2.5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T2.6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T2.7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T2.8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.1_T2.9.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.2_T1.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A3.2_T1.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.10.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.11.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.12_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.12_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.8.4_A4.9.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A2.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A2.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A2.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A2.4_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A2.4_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A2.4_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A2.4_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A3.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A3.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A3.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A4.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A4.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A4.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A4.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A5.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A5.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A5.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A6.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A6.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A6.2_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A7.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A7.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A7.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A7.4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A7.5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A7.6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A7.7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A7.8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.1_A7.9.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A2.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A2.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A2.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A2.4_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A2.4_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A2.4_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A2.4_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A3.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A3.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A3.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A4.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A4.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A4.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A4.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A5.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A5.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A5.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A6.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A6.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A6.2_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A7.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A7.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A7.3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A7.4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A7.5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A7.6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A7.7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A7.8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S11.9.2_A7.9.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.1_A2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.1_A5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A1.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A1.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A1.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A1.2_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A10_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A10_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A12_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S12.5_A5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "S9.1_A1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "bigint-and-bigint.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint-and-boolean.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint-and-incomparable-primitive.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint-and-incomparable-string.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint-and-non-finite.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint-and-number-extremes.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint-and-number.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint-and-object.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint-and-string.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint-and-symbol.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/binary-invalid-digit.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/exponent-part.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/hexadecimal-invalid-digit.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/legacy-octal-like-invalid-00n.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/legacy-octal-like-invalid-01n.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/legacy-octal-like-invalid-07n.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/mv-is-not-integer-dil-dot-dds.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/mv-is-not-integer-dot-dds.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/non-octal-like-invalid-0008n.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/non-octal-like-invalid-012348n.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/non-octal-like-invalid-08n.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/non-octal-like-invalid-09n.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-bil-bd-nsl-bd-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-bil-bd-nsl-bd.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-bil-bd-nsl-bds.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-bil-bds-nsl-bd.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-bil-bds-nsl-bds.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-bil-nsl-bd-dunder-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-bil-nsl-bd-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-dd-nsl-dd-one-of.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-dd-nsl-dds-dunder-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-dd-nsl-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-dds-nsl-dd.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-dds-nsl-dds-dunder-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-dds-nsl-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-hil-hd-nsl-hd-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-hil-hd-nsl-hd.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-hil-hd-nsl-hds.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-hil-hds-nsl-hd.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-hil-hds-nsl-hds.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-hil-nsl-hd-dunder-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-hil-nsl-hd-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-hil-od-nsl-od-one-of.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-lol-00-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-lol-01-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-lol-07-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-lol-0_0-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-lol-0_1-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-lol-0_7-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-nonoctal-08-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-nonoctal-09-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-nonoctal-0_8-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-nonoctal-0_9-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-nzd-nsl-dd-one-of.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-nzd-nsl-dd.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-nzd-nsl-dds-dunder-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-nzd-nsl-dds-leading-zero-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-nzd-nsl-dds.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-oil-nsl-od-dunder-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-oil-nsl-od-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-oil-od-nsl-od-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-oil-od-nsl-od-one-of.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-oil-od-nsl-od.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-oil-od-nsl-ods.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-oil-ods-nsl-od.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-oil-ods-nsl-ods.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-sign-minus-dds-nsl-dd.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/numeric-separators/numeric-separator-literal-unicode-err.js": {
+      "verdict": "skip-feature"
+    },
+    "bigint/octal-invalid-digit.js": {
+      "verdict": "skip-feature"
+    },
+    "boolean/S7.8.2_A1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "boolean/S7.8.2_A1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "coerce-symbol-to-prim-err.js": {
+      "verdict": "skip-feature"
+    },
+    "coerce-symbol-to-prim-invocation.js": {
+      "verdict": "skip-feature"
+    },
+    "coerce-symbol-to-prim-return-obj.js": {
+      "verdict": "skip-feature"
+    },
+    "coerce-symbol-to-prim-return-prim.js": {
+      "verdict": "skip-feature"
+    },
+    "cptn-else-false-abrupt-empty.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "cptn-else-false-nrml.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "cptn-else-true-abrupt-empty.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "cptn-else-true-nrml.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "cptn-empty-statement.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "cptn-no-else-false.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "cptn-no-else-true-abrupt-empty.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "cptn-no-else-true-nrml.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "get-symbol-to-prim-err.js": {
+      "verdict": "skip-feature"
+    },
+    "if-async-fun-else-async-fun.js": {
+      "verdict": "skip-feature"
+    },
+    "if-async-fun-else-stmt.js": {
+      "verdict": "skip-feature"
+    },
+    "if-async-fun-no-else.js": {
+      "verdict": "skip-feature"
+    },
+    "if-async-gen-else-async-gen.js": {
+      "verdict": "skip-feature"
+    },
+    "if-async-gen-else-stmt.js": {
+      "verdict": "skip-feature"
+    },
+    "if-async-gen-no-else.js": {
+      "verdict": "skip-feature"
+    },
+    "if-decl-else-decl-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "if-decl-else-stmt-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "if-decl-no-else-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "if-fun-else-fun-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "if-fun-else-stmt-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "if-fun-no-else-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "if-gen-else-gen.js": {
+      "verdict": "skip-feature"
+    },
+    "if-gen-else-stmt.js": {
+      "verdict": "skip-feature"
+    },
+    "if-gen-no-else.js": {
+      "verdict": "skip-feature"
+    },
+    "if-stmt-else-async-fun.js": {
+      "verdict": "skip-feature"
+    },
+    "if-stmt-else-async-gen.js": {
+      "verdict": "skip-feature"
+    },
+    "if-stmt-else-decl-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "if-stmt-else-fun-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "if-stmt-else-gen.js": {
+      "verdict": "skip-feature"
+    },
+    "labeled-continue.js": {
+      "verdict": "fail"
+    },
+    "labelled-fn-stmt-first.js": {
+      "verdict": "fail"
+    },
+    "labelled-fn-stmt-lone.js": {
+      "verdict": "fail"
+    },
+    "labelled-fn-stmt-second.js": {
+      "verdict": "fail"
+    },
+    "let-array-with-newline.js": {
+      "verdict": "fail"
+    },
+    "let-identifier-with-newline.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "null/S7.8.1_A1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "null/S7.8.1_A1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/7.8.3-1gs.js": {
+      "verdict": "skip-flag"
+    },
+    "numeric/7.8.3-2gs.js": {
+      "verdict": "skip-flag"
+    },
+    "numeric/7.8.3-3gs.js": {
+      "verdict": "skip-flag"
+    },
+    "numeric/S7.8.3_A1.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A1.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A1.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A1.2_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A1.2_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A1.2_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A1.2_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A1.2_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A1.2_T7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A1.2_T8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A2.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A2.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A2.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A2.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A2.2_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A2.2_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A2.2_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A2.2_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A2.2_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A2.2_T7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A2.2_T8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.2_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.2_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.3_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.3_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.3_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.3_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.3_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.3_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.3_T7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.3_T8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.4_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.4_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.4_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.4_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.4_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.4_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.4_T7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A3.4_T8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.1_T1.js": {
+      "verdict": "fail"
+    },
+    "numeric/S7.8.3_A4.1_T2.js": {
+      "verdict": "fail"
+    },
+    "numeric/S7.8.3_A4.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.1_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.1_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.1_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.1_T7.js": {
+      "verdict": "fail"
+    },
+    "numeric/S7.8.3_A4.1_T8.js": {
+      "verdict": "fail"
+    },
+    "numeric/S7.8.3_A4.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.2_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.2_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.2_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.2_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.2_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.2_T7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A4.2_T8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A5.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A5.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A5.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A5.1_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A5.1_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A5.1_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A5.1_T7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/S7.8.3_A5.1_T8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/legacy-octal-integer-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "numeric/legacy-octal-integery-000-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "numeric/legacy-octal-integery-005-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "numeric/legacy-octal-integery-01-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "numeric/legacy-octal-integery-010-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "numeric/legacy-octal-integery-06-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "numeric/legacy-octal-integery-07-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "numeric/non-octal-decimal-integer-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-bil-bd-nsl-bd-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-bil-nsl-bd-dunder-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-bil-nsl-bd-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dd-dot-dd-ep-sign-minus-dd-nsl-dd.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dd-dot-dd-ep-sign-minus-dds-nsl-dd.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dd-dot-dd-ep-sign-plus-dd-nsl-dd.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dd-dot-dd-ep-sign-plus-dds-nsl-dd.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dd-nsl-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dds-dot-dd-nsl-dd-ep-dd.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dds-nsl-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dil-dot-dds-nsl-ep-dd-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dil-dot-nsl-ep-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dil-dot-nsl-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dot-dd-nsl-dds-ep.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dot-dds-nsl-dd-ep.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dot-dds-nsl-dds-ep.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-dot-dds-nsl-ep-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-hil-hd-nsl-hd-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-hil-nsl-hd-dunder-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-hil-nsl-hd-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-lol-00-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-lol-01-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-lol-07-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-lol-0_0-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-lol-0_1-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-lol-0_7-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-nonoctal-08-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-nonoctal-09-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-nonoctal-0_8-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-nonoctal-0_9-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-nzd-nsl-dds-dunder-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-nzd-nsl-dds-leading-zero-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-nzd-nsl-dds.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-oil-nsl-od-dunder-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-oil-nsl-od-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-oil-od-nsl-od-err.js": {
+      "verdict": "fail"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-sign-minus-dds-nsl-dd.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "numeric/numeric-separators/numeric-separator-literal-sign-plus-dds-nsl-dd.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/7.8.5-1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/7.8.5-2gs.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.2_T1.js": {
+      "verdict": "fail"
+    },
+    "regexp/S7.8.5_A1.3_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.3_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.3_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.3_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.4_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.4_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.5_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.5_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.5_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A1.5_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.3_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.3_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.3_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.3_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.4_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.4_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.5_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.5_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.5_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A2.5_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A3.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A3.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A3.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A3.1_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A3.1_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A3.1_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A4.1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/S7.8.5_A4.2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/inequality.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/lastIndex.js": {
+      "verdict": "skip-feature"
+    },
+    "regexp/mongolian-vowel-separator-eval.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/mongolian-vowel-separator.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/named-groups/forward-reference.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/named-groups/invalid-lone-surrogate-groupname.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/u-astral-char-class-invert.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/u-astral.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/u-case-mapping.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/u-null-character-escape.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/u-surrogate-pairs-atom-char-class.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/u-surrogate-pairs-atom-dot.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/u-surrogate-pairs-atom-escape-char-class.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/u-surrogate-pairs-atom-escape-decimal.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/u-surrogate-pairs.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/u-unicode-esc.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "regexp/y-assertion-start.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "scope-lex-close.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "scope-lex-open.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "scope-var-none.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A1.1_T2.js": {
+      "verdict": "fail"
+    },
+    "string/S7.8.4_A1.2_T2.js": {
+      "verdict": "fail"
+    },
+    "string/S7.8.4_A2.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A2.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A2.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A2.2_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A2.3_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A3.1_T1.js": {
+      "verdict": "fail"
+    },
+    "string/S7.8.4_A3.1_T2.js": {
+      "verdict": "fail"
+    },
+    "string/S7.8.4_A3.2_T1.js": {
+      "verdict": "fail"
+    },
+    "string/S7.8.4_A3.2_T2.js": {
+      "verdict": "fail"
+    },
+    "string/S7.8.4_A4.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A4.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A4.2_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A4.2_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A4.2_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A4.2_T4.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A4.2_T5.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A4.2_T6.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A4.2_T7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A4.2_T8.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A4.3_T1.js": {
+      "verdict": "skip-flag"
+    },
+    "string/S7.8.4_A4.3_T2.js": {
+      "verdict": "skip-flag"
+    },
+    "string/S7.8.4_A4.3_T7.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A5.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A5.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A5.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A6.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A6.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A6.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A6.3_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A7.1_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A7.1_T2.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A7.1_T3.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/S7.8.4_A7.3_T1.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/legacy-non-octal-escape-sequence-1-strict-explicit-pragma.js": {
+      "verdict": "fail"
+    },
+    "string/legacy-non-octal-escape-sequence-2-strict-explicit-pragma.js": {
+      "verdict": "fail"
+    },
+    "string/legacy-non-octal-escape-sequence-3-strict-explicit-pragma.js": {
+      "verdict": "fail"
+    },
+    "string/legacy-non-octal-escape-sequence-4-strict-explicit-pragma.js": {
+      "verdict": "fail"
+    },
+    "string/legacy-non-octal-escape-sequence-5-strict-explicit-pragma.js": {
+      "verdict": "fail"
+    },
+    "string/legacy-non-octal-escape-sequence-6-strict-explicit-pragma.js": {
+      "verdict": "fail"
+    },
+    "string/legacy-non-octal-escape-sequence-7-strict-explicit-pragma.js": {
+      "verdict": "fail"
+    },
+    "string/legacy-non-octal-escape-sequence-8-strict-explicit-pragma.js": {
+      "verdict": "fail"
+    },
+    "string/legacy-non-octal-escape-sequence-8-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "string/legacy-non-octal-escape-sequence-9-strict-explicit-pragma.js": {
+      "verdict": "fail"
+    },
+    "string/legacy-non-octal-escape-sequence-9-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "string/legacy-non-octal-escape-sequence-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "string/legacy-octal-escape-sequence-prologue-strict.js": {
+      "verdict": "fail"
+    },
+    "string/legacy-octal-escape-sequence-strict.js": {
+      "verdict": "skip-flag"
+    },
+    "string/line-separator-eval.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/mongolian-vowel-separator-eval.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/paragraph-separator-eval.js": {
+      "verdict": "skip-unsupported-frontend"
+    },
+    "string/unicode-escape-nls-err-double.js": {
+      "verdict": "fail"
+    },
+    "string/unicode-escape-nls-err-single.js": {
+      "verdict": "fail"
+    },
+    "symbol-abstract-equality-comparison.js": {
+      "verdict": "skip-feature"
+    },
+    "symbol-strict-equality-comparison.js": {
+      "verdict": "skip-feature"
+    },
+    "tco-else-body.js": {
+      "verdict": "skip-flag"
+    },
+    "tco-if-body.js": {
+      "verdict": "skip-flag"
+    },
+    "tco-stmt-list.js": {
+      "verdict": "skip-flag"
+    },
+    "tco-stmt.js": {
+      "verdict": "skip-flag"
+    },
+    "to-prim-hint.js": {
+      "verdict": "skip-feature"
+    }
+  }
 }

@@ -232,6 +232,12 @@ two consecutive runs, and the manifest's `unsupported` reasons match the runner'
 *Done when:* zero `differential-mismatch` verdicts on the Phase 1 subset across tiers 0/1/2,
 and each tier's pass rate equals row 1's.
 
+*Phase 2 note:* Tier 2's throughput on long straight-line tests depended on a quadratic in
+vendored jsaw-core's `TFunc -> Cfg` render (`TCfg::refs()`/`TCfg::def()` full-CFG scans per
+rendered identifier); fixed at the source in the `portal-co/jsaw-core` checkout (254s ->
+2.4s on `legacy-octal-escape-sequence.js`). The runner also carries a per-test tier-compile
+deadline as containment for any remaining blowup. Run multi-env shards in release mode.
+
 **Phase 3 — Rust-generated surfaces.** Rows 6–7: wasm interpreter in Node, then the
 native-Rust cell with `jade-tenant-rt` + `jade-primordial-rt` globals.
 *Done when:* the native-Rust cell's per-test verdicts match row 1's on the compilable subset

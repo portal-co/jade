@@ -1009,6 +1009,9 @@
     "if-stmt-else-gen.js": {
       "verdict": "skip-feature"
     },
+    "labeled-continue.js": {
+      "verdict": "fail"
+    },
     "labelled-fn-stmt-first.js": {
       "verdict": "fail"
     },

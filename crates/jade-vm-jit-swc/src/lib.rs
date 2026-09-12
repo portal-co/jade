@@ -757,8 +757,9 @@ mod tests {
             // regardless of body content — the `AsyncFunction` constructor is not a
             // global, but is reachable via any async function's own prototype chain.
             "const AsyncFunction = Object.getPrototypeOf(async function(){{}}).constructor;\n\
-             const fn = new AsyncFunction('tenant','nt','state', {body:?});\n\
-             (async () => {{ console.log(JSON.stringify(await fn(undefined,undefined,[]))); }})()\n\
+             const promiseRuntime = {{ awaitGuest: (v) => v, awaitHostTask: (v) => v }};\n\
+             const fn = new AsyncFunction('tenant','nt','state','promiseRuntime', {body:?});\n\
+             (async () => {{ console.log(JSON.stringify(await fn(undefined,undefined,[],promiseRuntime))); }})()\n\
              .catch(e => {{ console.error(e); process.exit(1); }});"
         );
         let output = std::process::Command::new("node")
@@ -791,7 +792,8 @@ mod tests {
         let shims = r#"
             const THROUGH = Symbol.for("jade.through");
             const GUEST_NEXT = Symbol.for("jade.guest.next");
-            function markGuestFn(f) { return f; }
+            const __guestFns = new WeakMap();
+            function markGuestFn(f, m) { __guestFns.set(f, m); return f; }
             function* createGuestGen(nativeGen) {
                 const obj = {};
                 const nextFn = function* (sent) {
@@ -820,7 +822,23 @@ mod tests {
             }
         "#;
         let script = format!(
-            "{shims}\n{prelude}\nconst tenant = {{ createGuestGen, unpackGuestGen, driveTenant: (v) => v }};\n\
+            "{shims}\n{prelude}\nfunction* tenantOp(value) {{ return value; }}
+             const tenant = {{
+               createGuestGen,
+               unpackGuestGen,
+               makeFunction: (f) => tenantOp(f),
+               driveTenant(gen, _addAsync, addGen) {{
+                 if (addGen) return gen;
+                 const result = gen.next();
+                 if (!result.done) throw new Error('unexpected suspension in sync tenant stub');
+                 return result.value;
+               }},
+               invoke(fn, inv) {{
+                 const meta = __guestFns.get(fn);
+                 const args = meta && meta.abi === 'leading-tenant-nt' ? [tenant, undefined, ...inv.args] : inv.args;
+                 return tenantOp(Reflect.apply(fn, inv.thisArg, args));
+               }},
+             }};\n\
              const GeneratorFunction = Object.getPrototypeOf(function*(){{}}).constructor;\n\
              const make = new GeneratorFunction('tenant','nt','state', {body:?});\n\
              // The top-level program is itself a generator under addGen; drive it to\n\
@@ -841,7 +859,7 @@ mod tests {
         assert!(
             output.status.success(),
             "node stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&output.stderr),
         );
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
@@ -1116,4 +1134,3 @@ mod tests {
         );
     }
 }
-
