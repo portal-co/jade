@@ -51,22 +51,34 @@ pub struct TierOut {
 /// Compile `bytes` through all three JIT tiers. Each tier is independent; a tier error
 /// is recorded as a string, not propagated, so one tier's gap doesn't mask another's.
 pub fn compile_tiers(bytes: &[u8]) -> BTreeMap<String, Result<TierOut, String>> {
+    compile_tier_selection(bytes, &[ENV_JIT_T0, ENV_JIT_T1, ENV_JIT_T2])
+}
+
+/// Compile only the named tiers (e.g. `[ENV_JIT_T2]`) — Tier 2's CFG/SSA round-trip is
+/// the runner's most expensive per-test step, so callers skip tiers they don't need.
+pub fn compile_tier_selection(
+    bytes: &[u8],
+    tiers: &[&str],
+) -> BTreeMap<String, Result<TierOut, String>> {
     let mut out = BTreeMap::new();
-
-    let t0 = portal_solutions_jade_vm_jit::compile(bytes, VecRegistry::new(), Config::default())
-        .map(|(body, reg)| TierOut { body, prelude: reg.prelude() });
-    out.insert(ENV_JIT_T0.to_string(), t0);
-
-    let mut cfg1 = Config::default();
-    cfg1.prefer_reloop = true;
-    let t1 = portal_solutions_jade_vm_jit::compile(bytes, VecRegistry::new(), cfg1)
-        .map(|(body, reg)| TierOut { body, prelude: reg.prelude() });
-    out.insert(ENV_JIT_T1.to_string(), t1);
-
-    let t2 = jit_swc::compile(bytes, Config::default())
-        .map(|(body, reg)| TierOut { body, prelude: reg.prelude() });
-    out.insert(ENV_JIT_T2.to_string(), t2);
-
+    for tier in tiers {
+        let r = match *tier {
+            ENV_JIT_T0 => {
+                portal_solutions_jade_vm_jit::compile(bytes, VecRegistry::new(), Config::default())
+                    .map(|(body, reg)| TierOut { body, prelude: reg.prelude() })
+            }
+            ENV_JIT_T1 => {
+                let mut cfg1 = Config::default();
+                cfg1.prefer_reloop = true;
+                portal_solutions_jade_vm_jit::compile(bytes, VecRegistry::new(), cfg1)
+                    .map(|(body, reg)| TierOut { body, prelude: reg.prelude() })
+            }
+            ENV_JIT_T2 => jit_swc::compile(bytes, Config::default())
+                .map(|(body, reg)| TierOut { body, prelude: reg.prelude() }),
+            other => Err(format!("unknown tier {other:?}")),
+        };
+        out.insert(tier.to_string(), r);
+    }
     out
 }
 
@@ -102,14 +114,29 @@ pub fn compile_artifact(src: &str) -> CompileArtifact {
         }
     };
     match compile_test(src) {
-        CompileVerdict::Bytecode(bytes) => CompileArtifact {
-            ok: true,
-            meta: Some(meta),
-            tiers: Some(compile_tiers(&bytes)),
-            bytecode: Some(bytes),
-            error_kind: None,
-            message: None,
-        },
+        CompileVerdict::Bytecode(bytes) => {
+            // Diagnostic escape hatch: JADE_T262_ONLY_TIERS=t0,t1 restricts which tiers
+            // the artifact compiles (empty = bytecode only). Used to isolate per-tier
+            // compile-time behavior.
+            let only: Option<Vec<String>> = std::env::var("JADE_T262_ONLY_TIERS")
+                .ok()
+                .map(|v| v.split(',').map(|s| format!("jit-{}", s.trim())).collect());
+            let tiers = match &only {
+                Some(keep) => compile_tier_selection(
+                    &bytes,
+                    &keep.iter().map(String::as_str).collect::<Vec<_>>(),
+                ),
+                None => compile_tiers(&bytes),
+            };
+            CompileArtifact {
+                ok: true,
+                meta: Some(meta),
+                tiers: Some(tiers),
+                bytecode: Some(bytes),
+                error_kind: None,
+                message: None,
+            }
+        }
         CompileVerdict::ParseError(m) => CompileArtifact {
             ok: false,
             meta: Some(meta),

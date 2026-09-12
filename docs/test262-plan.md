@@ -220,8 +220,10 @@ both emit schema-valid JSON reports in which every non-`pass` verdict is manifes
 
 **Phase 1 — TS interpreter baseline.** Hand-written harness primordials (`Test262Error`,
 `assert` core, `$DONE`, `$262.global`); run the compilable subset on row 1 with
-`MultiTenant`. Candidates: `language/literals`, `language/expressions/{equality,relational}`,
-`language/statements/{if,block}`, `built-ins/Object` basics.
+`MultiTenant`. Selected directories (the real test262 layout): `language/literals`,
+`language/expressions/{equals,does-not-equals,less-than,less-than-or-equal,greater-than,
+greater-than-or-equal}`, `language/statements/{if,block}`. (`built-ins/Object` waits for
+Phase 4's `propertyHelper`.)
 *Done when:* every compilable test in the selected directories has a stable verdict across
 two consecutive runs, and the manifest's `unsupported` reasons match the runner's observed
 `Unsupported` messages 1:1.

@@ -1,7 +1,57 @@
 {
   "version": 1,
-  "features": {},
-  "harnessIncludes": {},
+  "features": {
+    "BigInt": {
+      "status": "unsupported",
+      "note": "BigInt deliberately unavailable (AGENTS.md primordials boundary); no BigInt literal opcode"
+    },
+    "Symbol": {
+      "status": "unsupported",
+      "note": "no Symbol primordial in createPrimordialRealm yet"
+    },
+    "Symbol.iterator": {
+      "status": "unsupported",
+      "note": "depends on Symbol"
+    },
+    "Symbol.toPrimitive": {
+      "status": "unsupported",
+      "note": "depends on Symbol"
+    },
+    "RegExp": {
+      "status": "unsupported",
+      "note": "no RegExp primordial or regex literal opcode"
+    },
+    "generators": {
+      "status": "unsupported",
+      "note": "runs only on generator-capable cells (Phase 5); sync cells lack the driver path"
+    },
+    "async-functions": {
+      "status": "unsupported",
+      "note": "runs only on async-capable cells (Phase 5)"
+    },
+    "async-iteration": {
+      "status": "unsupported",
+      "note": "runs only on async-capable cells (Phase 5)"
+    },
+    "class": {
+      "status": "unsupported",
+      "note": "class syntax has no bytecode mapping (new expressions unsupported)"
+    },
+    "new.target": {
+      "status": "supported",
+      "note": "NEW_TARGET opcode exists"
+    }
+  },
+  "harnessIncludes": {
+    "sta.js": {
+      "status": "supported",
+      "note": "$ERROR + Test262Error primordials (packages/jade-js/test262/harness.ts)"
+    },
+    "assert.js": {
+      "status": "supported",
+      "note": "assert/sameValue/notSameValue/compareArray primordials (packages/jade-js/test262/harness.ts)"
+    }
+  },
   "flags": {
     "module": {
       "status": "unsupported",
@@ -24,5 +74,70 @@
       "note": "excluded from the expectation ratchet, still reported"
     }
   },
-  "unsupportedConstructs": {}
+  "unsupportedConstructs": {
+    "`throw` (Jade bytecode has no exception-handling opcode)": {
+      "status": "unsupported",
+      "note": "no exception opcodes; RET/AWAIT/YIELD/YIELDSTAR are the only loop-level exits"
+    },
+    "try/catch (Jade bytecode has no exception-handling opcode)": {
+      "status": "unsupported",
+      "note": "no exception opcodes"
+    },
+    "BigInt literal": {
+      "status": "unsupported",
+      "note": "no BigInt-producing opcode (BigInt deliberately unavailable per AGENTS.md)"
+    },
+    "regex literal": {
+      "status": "unsupported",
+      "note": "no RegExp primordial or opcode"
+    },
+    "tail call": {
+      "status": "unsupported",
+      "note": "TAC tail-call terminator has no Jade bytecode equivalent"
+    },
+    "call target other than a plain value or member call (`super`, `import()`, `eval`)": {
+      "status": "unsupported",
+      "note": "super/import()/direct-eval callees; plain and member calls are supported"
+    },
+    "getter/setter/method in an object literal": {
+      "status": "unsupported",
+      "note": "LITOBJ lowers data properties only"
+    },
+    "new expressions (no Jade opcode)": {
+      "status": "unsupported",
+      "note": "`new` needs a construct invocation; only apply-style CALL exists"
+    },
+    "unary operator \"-\" (no Jade opcode)": {
+      "status": "unsupported",
+      "note": "no arithmetic/unary opcodes (only the six comparisons)"
+    },
+    "unary operator \"+\" (no Jade opcode)": {
+      "status": "unsupported",
+      "note": "no arithmetic/unary opcodes (only the six comparisons)"
+    },
+    "binary operator \"+\" (only ===, !==, <, <=, >, >= have a Jade opcode)": {
+      "status": "unsupported",
+      "note": "no arithmetic opcodes"
+    },
+    "binary operator \"-\" (only ===, !==, <, <=, >, >= have a Jade opcode)": {
+      "status": "unsupported",
+      "note": "no arithmetic opcodes"
+    },
+    "binary operator \"==\" (only ===, !==, <, <=, >, >= have a Jade opcode)": {
+      "status": "unsupported",
+      "note": "abstract equality needs ToPrimitive coercion; only strict equality has an opcode"
+    },
+    "binary operator \"||\" (only ===, !==, <, <=, >, >= have a Jade opcode)": {
+      "status": "unsupported",
+      "note": "logical operators not yet lowered"
+    },
+    "numeric literal <value> (Jade's LIT32 only represents non-negative integers up to u32::MAX)": {
+      "status": "unsupported",
+      "note": "normalized family: any non-u32 numeric literal"
+    },
+    "closure capture (see docs/closure-capture-plan.md)": {
+      "status": "unsupported",
+      "note": "normalized family: nested function references enclosing-scope names; FN closure_args unwired"
+    }
+  }
 }

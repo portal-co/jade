@@ -14,6 +14,7 @@ swc_ecma_ast = { workspace = true }
 swc_ecma_codegen = { workspace = true }
 swc_ecma_parser = { workspace = true }
 swc_ecma_visit = { workspace = true }
+swc_atoms = { workspace = true }
 
 [dev-dependencies]
 portal-solutions-jade-vm-jit = { path = "../jade-vm-jit" }

@@ -11,7 +11,7 @@ export const opcodes: { [Op in Opcode]: OpcodeInfo } = freeze({
   STR:        freeze({ id: 8,  args: "array"    }),  // [raw len][LSB items…][raw dest]
   LITOBJ:     freeze({ id: 9,  args: "object"   }),  // [i32 c][spread?][pairs…][LSB key]
   NEW_TARGET: freeze({ id: 10, args: "dest"     }),  // [raw dest]
-  CALL:       freeze({ id: 11, args: "call"     }),  // [LSB fn][raw n][LSB args…][raw dest]
+  CALL:       freeze({ id: 11, args: "call"     }),  // [LSB fn][LSB this][raw n][LSB args…][raw dest]
   BOOL:       freeze({ id: 12, args: "bool"     }),  // [raw val (0/1)][raw dest]
   EQ:         freeze({ id: 13, args: "binop"    }),  // [LSB a][LSB b][raw dest]
   NE:         freeze({ id: 14, args: "binop"    }),  // [LSB a][LSB b][raw dest]
@@ -67,8 +67,12 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                 const effectiveVariant = declaredVariant | (addAsync ? 1 : 0) | (addGen ? 2 : 0);
                 const childDoubleGen = addGen && !!(declaredVariant & 2);
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][effectiveVariant]
-                    ,closureArgs:number[]=[...arg()]
-                    ,[spanner,...spans]=arg()??[(a:any)=>a];
+                    // closure_args/spanner are Operand::Literal(0) when unwired
+                    // (the only encoding the frontend emits today — see
+                    // docs/closure-capture-plan.md); a StateRef to an unwritten slot
+                    // also reads as undefined. Both mean "absent": tolerate falsy.
+                    ,closureArgs:number[]=[...(arg()||[])]
+                    ,[spanner,...spans]=(arg()||[(a:any)=>a]);
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=__DRIVE__tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
@@ -136,11 +140,12 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
   NEW_TARGET: `state[code().getUint32(ip,true)]=nt;ip += 4;break;`,
   CALL: `{
                 const fn = arg();
+                const thisArg = arg();
                 let n = code().getUint32(ip,true); ip += 4;
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
                 state[code().getUint32(ip,true)] = __DRIVE__tenant.driveTenant(
-                    tenant.invoke(fn, {kind:"apply", thisArg:undefined, args:callArgs}),
+                    tenant.invoke(fn, {kind:"apply", thisArg, args:callArgs}),
                     addAsync,
                     addGen,
                 );

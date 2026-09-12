@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::manifest::Manifest;
 use crate::meta::{self, TestMeta};
@@ -16,6 +17,8 @@ use crate::pipeline::{self, CompileVerdict, ENV_INTERP, NODE_ENVS};
 pub struct RunConfig {
     /// `smoke` (the synthetic fixtures) or `test262:<subdir>` (a vendored subtree).
     pub shard: String,
+    /// Run at most this many tests (discovery order) — for bisecting wedges.
+    pub limit: Option<usize>,
     pub tenant: String,
     pub envs: Vec<String>,
     pub report_path: PathBuf,
@@ -74,17 +77,38 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<(),
 
 pub fn run(cfg: &RunConfig) -> Result<Report, String> {
     let manifest = Manifest::load(&cfg.manifest_path)?;
-    let tests = discover(&cfg.shard)?;
+    let mut tests = discover(&cfg.shard)?;
+    if let Some(n) = cfg.limit {
+        tests.truncate(n);
+    }
     if tests.is_empty() {
         return Err(format!("shard {:?} discovered no tests", cfg.shard));
     }
 
-    let mut results = Vec::new();
+    // Phase A: plan every cell (metadata gates + compilation) without executing.
+    let mut planned = Vec::new();
     for (rel, abs) in &tests {
         let src = std::fs::read_to_string(abs)
             .map_err(|e| format!("read {}: {e}", abs.display()))?;
-        results.push(run_one(cfg, &manifest, rel, &src));
+        planned.push(plan_one(cfg, &manifest, rel, &src));
     }
+
+    // Phase B: batch-execute every cell that needs it, then assemble outcomes.
+    let mut job_refs: Vec<(usize, String)> = Vec::new();
+    let mut jobs: Vec<serde_json::Value> = Vec::new();
+    for (ti, t) in planned.iter().enumerate() {
+        for (env, cell) in &t.cells {
+            if let Planned::Exec(job) = cell {
+                job_refs.push((ti, env.clone()));
+                jobs.push(job.clone());
+            }
+        }
+    }
+    let verdicts = node::run_cells(&jobs, cfg.timeout);
+    for ((ti, env), verdict) in job_refs.into_iter().zip(verdicts) {
+        planned[ti].cells.insert(env, Planned::Done(verdict));
+    }
+    let results = planned.into_iter().map(assemble).collect();
 
     let report = Report {
         version: REPORT_VERSION,
@@ -122,7 +146,8 @@ pub fn run(cfg: &RunConfig) -> Result<Report, String> {
     if cfg.update_expectations {
         let dir = &cfg.expectations_dir;
         std::fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-        for (env, exp) in model::expectations_from_report(&report) {
+        let existing = load_expectations(dir)?;
+        for (env, exp) in model::expectations_from_report(&report, &existing) {
             write_json(&dir.join(format!("{env}.json")), &exp)?;
         }
     }
@@ -162,38 +187,66 @@ fn write_json<T: serde::Serialize>(path: &Path, v: &T) -> Result<(), String> {
     std::fs::write(path, text + "\n").map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-/// Run one test across all configured environment cells.
-fn run_one(cfg: &RunConfig, manifest: &Manifest, rel: &str, src: &str) -> TestOutcome {
+/// A cell that either already has a verdict (uniform gate / compile outcome) or is a
+/// job awaiting execution.
+enum Planned {
+    Done(CellVerdict),
+    Exec(serde_json::Value),
+}
+
+struct PlannedTest {
+    path: String,
+    meta: TestMeta,
+    cells: BTreeMap<String, Planned>,
+}
+
+/// Plan one test across all configured environment cells — everything except execution.
+fn plan_one(cfg: &RunConfig, manifest: &Manifest, rel: &str, src: &str) -> PlannedTest {
     let meta = match meta::parse_frontmatter(src) {
         Ok(m) => m,
         Err(e) => {
             // A test we cannot even read metadata from fails every cell uniformly.
             let mut cells = BTreeMap::new();
             for env in &cfg.envs {
-                cells.insert(env.clone(), CellVerdict::fail(format!("frontmatter: {e}")));
+                cells.insert(env.clone(), Planned::Done(CellVerdict::fail(format!("frontmatter: {e}"))));
             }
-            return TestOutcome { path: rel.to_string(), meta: TestMeta::default(), cells };
+            return PlannedTest { path: rel.to_string(), meta: TestMeta::default(), cells };
         }
     };
 
     // Pre-compilation gates, applied uniformly to every cell.
     let uniform_skip = uniform_skip(&meta, manifest, cfg);
     let state = if uniform_skip.is_none() {
-        Some(compile_state(&meta, src))
+        Some(compile_state(&meta, src, &cfg.envs))
     } else {
         None
     };
 
-    let mut cells: BTreeMap<String, CellVerdict> = BTreeMap::new();
-    let mut baseline: Option<(VerdictKind, Option<String>)> = None;
-
+    let mut cells: BTreeMap<String, Planned> = BTreeMap::new();
     for env in &cfg.envs {
         if let Some(skip) = &uniform_skip {
-            cells.insert(env.clone(), skip.clone());
+            cells.insert(env.clone(), Planned::Done(skip.clone()));
             continue;
         }
-        let cell = run_cell(cfg, state.as_ref().expect("state when not skipped"), rel, env);
-        // Differential check against the interpreter baseline (kind + completion value).
+        cells.insert(
+            env.clone(),
+            plan_cell(cfg, state.as_ref().expect("state when not skipped"), rel, env, &meta),
+        );
+    }
+
+    PlannedTest { path: rel.to_string(), meta, cells }
+}
+
+/// Assemble a planned test into its outcome, applying the differential check against
+/// the interpreter baseline (kind + completion value) across executed cells.
+fn assemble(t: PlannedTest) -> TestOutcome {
+    let PlannedTest { path, meta, cells } = t;
+    let mut baseline: Option<(VerdictKind, Option<String>)> = None;
+    let mut out: BTreeMap<String, CellVerdict> = BTreeMap::new();
+    for (env, planned) in cells {
+        let Planned::Done(cell) = planned else {
+            unreachable!("all cells executed before assemble")
+        };
         if env == ENV_INTERP {
             baseline = Some((cell.kind, cell.value.clone()));
         } else if let Some((bkind, bval)) = &baseline {
@@ -202,8 +255,8 @@ fn run_one(cfg: &RunConfig, manifest: &Manifest, rel: &str, src: &str) -> TestOu
                 && cell.value != *bval
             {
                 let got = cell.value.clone().unwrap_or_default();
-                cells.insert(
-                    env.clone(),
+                out.insert(
+                    env,
                     CellVerdict {
                         kind: VerdictKind::DifferentialMismatch,
                         reason: Some(format!(
@@ -218,10 +271,9 @@ fn run_one(cfg: &RunConfig, manifest: &Manifest, rel: &str, src: &str) -> TestOu
                 continue;
             }
         }
-        cells.insert(env.clone(), cell);
+        out.insert(env, cell);
     }
-
-    TestOutcome { path: rel.to_string(), meta, cells }
+    TestOutcome { path, meta, cells: out }
 }
 
 /// Skips that apply to every cell identically: manifest flags, harness includes with no
@@ -237,6 +289,17 @@ fn uniform_skip(meta: &TestMeta, manifest: &Manifest, cfg: &RunConfig) -> Option
             _ => return Some(CellVerdict::skip(VerdictKind::SkipFeature, inc.clone())),
         }
     }
+    // Capability-manifest feature gate: only features the manifest explicitly calls
+    // `unsupported` skip. Absent = not yet classified = run; if the test then fails,
+    // the failure is real signal the ratchet records (and a manifest entry can later
+    // turn a genuinely-missing feature into a clean skip).
+    for feat in &meta.features {
+        if let Some(s) = manifest.features.get(feat) {
+            if s.status == crate::manifest::Status::Unsupported {
+                return Some(CellVerdict::skip(VerdictKind::SkipFeature, feat.clone()));
+            }
+        }
+    }
     if let Some(neg) = &meta.negative {
         if neg.phase == "runtime" {
             return Some(CellVerdict::skip(
@@ -244,6 +307,12 @@ fn uniform_skip(meta: &TestMeta, manifest: &Manifest, cfg: &RunConfig) -> Option
                 "exceptions: no bytecode opcode for throw/try yet".to_string(),
             ));
         }
+    }
+    // Async tests need `$DONE` + an async-capable cell — Phase 5. Until then every
+    // current cell is sync and skips uniformly (justified by manifest.flags.async,
+    // which stays `partial` until async cells exist).
+    if meta.has_flag("async") {
+        return Some(CellVerdict::skip(VerdictKind::SkipFlag, "async"));
     }
     let _ = cfg;
     None
@@ -255,7 +324,13 @@ enum CompileState {
     Uniform(CellVerdict),
 }
 
-fn compile_state(meta: &TestMeta, src: &str) -> CompileState {
+/// Wall-clock budget for compiling *all* JIT tiers of one test. Tier 2's CFG/SSA
+/// round-trip has a known superlinear blowup on long straight-line tests (see
+/// `docs/test262-plan.md` and the `TFunc -> Function` relooper in vendored jsaw-core) —
+/// the deadline turns "shard hangs for minutes" into a visible per-test `timeout`.
+const TIER_COMPILE_DEADLINE: Duration = Duration::from_secs(60);
+
+fn compile_state(meta: &TestMeta, src: &str, envs: &[String]) -> CompileState {
     let compile_rejection = |msg: String, kind: VerdictKind| {
         // A `negative` test expecting a parse/early error PASSES when compilation
         // rejects it — that is the rejection it asked for.
@@ -266,7 +341,13 @@ fn compile_state(meta: &TestMeta, src: &str) -> CompileState {
                 return c;
             }
         }
-        CellVerdict::skip(kind, msg)
+        // Skip reasons are manifest keys: normalize parameterized message families to
+        // their stable form and keep the raw message for debugging.
+        let mut c = CellVerdict::skip(kind, crate::normalize::unsupported(&msg));
+        if c.reason.as_deref() != Some(msg.as_str()) {
+            c.error = Some(msg);
+        }
+        c
     };
     match pipeline::compile_test(src) {
         CompileVerdict::Unsupported(msg) => {
@@ -275,21 +356,66 @@ fn compile_state(meta: &TestMeta, src: &str) -> CompileState {
         CompileVerdict::ParseError(msg) => {
             CompileState::Uniform(compile_rejection(msg, VerdictKind::SkipParse))
         }
+        CompileVerdict::Bytecode(bytes)
+            if matches!(&meta.negative, Some(n) if n.phase == "parse" || n.phase == "early") =>
+        {
+            // A negative parse/early test that *compiles*: our parser is more lenient
+            // than the spec demands (e.g. SWC accepts some numeric-separator and
+            // Annex-B forms). Deterministic parser-strictness failure — no execution.
+            let _ = bytes;
+            CompileState::Uniform(CellVerdict::fail(
+                "compiled successfully but the test demands a parse/early rejection",
+            ))
+        }
         CompileVerdict::Bytecode(bytes) => {
-            let tiers = pipeline::compile_tiers(&bytes);
+            // Tier compilation (Tier 2's CFG/SSA round-trip in particular) is the
+            // runner's most expensive per-test step — only pay it when a JIT cell is
+            // actually configured for this run, and bound it by TIER_COMPILE_DEADLINE:
+            // an overrun yields per-tier `timeout` verdicts instead of hanging the
+            // shard. The worker thread is detached; the relooper blowup is CPU-bound
+            // and does terminate, so the leak is bounded in practice.
+            let jit_envs: Vec<&str> = envs
+                .iter()
+                .map(String::as_str)
+                .filter(|e| NODE_ENVS.contains(e))
+                .collect();
+            let tiers = if jit_envs.is_empty() {
+                BTreeMap::new()
+            } else {
+                let owned: Vec<String> = jit_envs.iter().map(|s| s.to_string()).collect();
+                let bytes_clone = bytes.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+                    let _ = tx.send(pipeline::compile_tier_selection(&bytes_clone, &refs));
+                });
+                match rx.recv_timeout(TIER_COMPILE_DEADLINE) {
+                    Ok(tiers) => tiers,
+                    Err(_) => jit_envs
+                        .into_iter()
+                        .map(|e| {
+                            (
+                                e.to_string(),
+                                Err("TIMEOUT: tier compile exceeded deadline".to_string()),
+                            )
+                        })
+                        .collect(),
+                }
+            };
             CompileState::Bytecode { bytes, tiers }
         }
     }
 }
 
-fn run_cell(
+fn plan_cell(
     cfg: &RunConfig,
     state: &CompileState,
     rel: &str,
     env: &str,
-) -> CellVerdict {
+    meta: &TestMeta,
+) -> Planned {
     let (bytes, tiers) = match state {
-        CompileState::Uniform(v) => return v.clone(),
+        CompileState::Uniform(v) => return Planned::Done(v.clone()),
         CompileState::Bytecode { bytes, tiers } => (bytes, tiers),
     };
 
@@ -297,6 +423,7 @@ fn run_cell(
         "test": rel,
         "env": env,
         "tenant": cfg.tenant,
+        "harness": !meta.has_flag("raw"),
     });
     if env == ENV_INTERP {
         job["bytecode"] = serde_json::json!(bytes);
@@ -307,15 +434,20 @@ fn run_cell(
                 job["prelude"] = serde_json::json!(t.prelude);
             }
             Some(Err(e)) => {
+                if let Some(msg) = e.strip_prefix("TIMEOUT: ") {
+                    let mut c = CellVerdict::new(VerdictKind::Timeout);
+                    c.error = Some(format!("JIT compile ({env}): {msg}"));
+                    return Planned::Done(c);
+                }
                 let mut c = CellVerdict::new(VerdictKind::Crash);
                 c.error = Some(format!("JIT compile ({env}): {e}"));
-                return c;
+                return Planned::Done(c);
             }
             None => unreachable!("NODE_ENVS contains env but tiers lacks it"),
         }
     } else {
-        return CellVerdict::fail(format!("unknown environment cell {env:?}"));
+        return Planned::Done(CellVerdict::fail(format!("unknown environment cell {env:?}")));
     }
 
-    node::run_cell(&job, cfg.timeout)
+    Planned::Exec(job)
 }

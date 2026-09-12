@@ -99,6 +99,7 @@ fn run_shard(args: &[String]) -> ExitCode {
         expectations_dir: run::default_expectations_dir(),
         check: args.iter().any(|a| a == "--check"),
         update_expectations: args.iter().any(|a| a == "--update-expectations"),
+        limit: opt_value(args, "--limit").and_then(|s| s.parse::<usize>().ok()),
         timeout: Duration::from_millis(timeout_ms),
     };
 

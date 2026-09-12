@@ -195,15 +195,24 @@ pub fn check_expectations(
 }
 
 /// Re-baseline: derive expectations from a report (used by `--update-expectations`).
-pub fn expectations_from_report(report: &Report) -> BTreeMap<String, Expectations> {
-    let mut out: BTreeMap<String, Expectations> = BTreeMap::new();
+/// `existing` (per env) is merged in: tests covered by this report take their new
+/// verdict (or drop out if they now pass); tests from *other* shards keep their entry,
+/// so successive per-shard updates don't clobber one another.
+pub fn expectations_from_report(
+    report: &Report,
+    existing: &BTreeMap<String, Expectations>,
+) -> BTreeMap<String, Expectations> {
+    let mut out: BTreeMap<String, Expectations> = existing.clone();
     for r in &report.results {
         for (env, cell) in &r.cells {
+            let env_exp = out.entry(env.clone()).or_default();
             if cell.kind != VerdictKind::Pass {
-                out.entry(env.clone()).or_default().tests.insert(
+                env_exp.tests.insert(
                     r.path.clone(),
                     Expectation { verdict: cell.kind, note: None },
                 );
+            } else {
+                env_exp.tests.remove(&r.path);
             }
         }
     }

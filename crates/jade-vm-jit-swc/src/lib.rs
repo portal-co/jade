@@ -898,6 +898,7 @@ mod tests {
         };
         let call_op = Operation::Call {
             fn_op: Operand::StateRef(0),
+            this_op: Operand::Literal(0),
             args: vec![],
             dest: 1,
         };
@@ -974,6 +975,7 @@ mod tests {
         };
         let call_op = Operation::Call {
             fn_op: Operand::StateRef(0),
+            this_op: Operand::Literal(0),
             args: vec![],
             dest: 1,
         };
@@ -1114,3 +1116,4 @@ mod tests {
         );
     }
 }
+

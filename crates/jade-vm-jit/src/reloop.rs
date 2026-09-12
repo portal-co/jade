@@ -725,8 +725,24 @@ mod tests {
     /// `run_js`, wraps `body` with a `markGuestFn` stub and `prelude` (nested function
     /// declarations from `VecRegistry::prelude()`) in scope.
     fn run_js_with_prelude(prelude: &str, body: &str) -> String {
+        // ABI-faithful tenant stub (driveTenant/makeFunction/invoke with the
+        // markGuestFn-registered calling convention) — `undefined` breaks against
+        // `tenant.driveTenant(...)` in the emitted code.
         let script = format!(
-            "function markGuestFn(f, m) {{ return f; }}\n{prelude}\nconst fn = new Function('tenant', 'nt', 'state', {body:?});\nconsole.log(JSON.stringify(fn(undefined, undefined, [])));",
+            "const __guestFns = new WeakMap();\n\
+             function markGuestFn(f, m) {{ __guestFns.set(f, m); return f; }}\n\
+             const tenant = {{\n\
+               makeFunction: (f) => f,\n\
+               driveTenant: (g) => g,\n\
+               invoke(fn, inv) {{\n\
+                 const meta = __guestFns.get(fn);\n\
+                 const args = meta && meta.abi === 'leading-tenant-nt' ? [tenant, undefined, ...inv.args] : inv.args;\n\
+                 return Reflect.apply(fn, inv.thisArg, args);\n\
+               }},\n\
+             }};\n\
+             {prelude}\n\
+             const fn = new Function('tenant', 'nt', 'state', {body:?});\n\
+             console.log(JSON.stringify(fn(tenant, undefined, [])));",
         );
         let output = std::process::Command::new("node")
             .arg("-e")
@@ -761,6 +777,7 @@ mod tests {
         };
         let call_op = Operation::Call {
             fn_op: Operand::StateRef(0),
+            this_op: Operand::Literal(0),
             args: vec![],
             dest: 1,
         };

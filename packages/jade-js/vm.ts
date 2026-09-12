@@ -30,8 +30,12 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 const effectiveVariant = declaredVariant | (addAsync ? 1 : 0) | (addGen ? 2 : 0);
                 const childDoubleGen = addGen && !!(declaredVariant & 2);
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][effectiveVariant]
-                    ,closureArgs:number[]=[...arg()]
-                    ,[spanner,...spans]=arg()??[(a:any)=>a];
+                    // closure_args/spanner are Operand::Literal(0) when unwired
+                    // (the only encoding the frontend emits today — see
+                    // docs/closure-capture-plan.md); a StateRef to an unwritten slot
+                    // also reads as undefined. Both mean "absent": tolerate falsy.
+                    ,closureArgs:number[]=[...(arg()||[])]
+                    ,[spanner,...spans]=(arg()||[(a:any)=>a]);
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=yield* tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
@@ -93,11 +97,12 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                 break;
             }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;case 11: {
                 const fn = arg();
+                const thisArg = arg();
                 let n = code().getUint32(ip,true); ip += 4;
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
                 state[code().getUint32(ip,true)] = yield* tenant.driveTenant(
-                    tenant.invoke(fn, {kind:"apply", thisArg:undefined, args:callArgs}),
+                    tenant.invoke(fn, {kind:"apply", thisArg, args:callArgs}),
                     addAsync,
                     addGen,
                 );
@@ -142,8 +147,12 @@ async function _runVirtualizedA(code: () => DataView, state: {[a: number]: any},
                 const effectiveVariant = declaredVariant | (addAsync ? 1 : 0) | (addGen ? 2 : 0);
                 const childDoubleGen = addGen && !!(declaredVariant & 2);
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][effectiveVariant]
-                    ,closureArgs:number[]=[...arg()]
-                    ,[spanner,...spans]=arg()??[(a:any)=>a];
+                    // closure_args/spanner are Operand::Literal(0) when unwired
+                    // (the only encoding the frontend emits today — see
+                    // docs/closure-capture-plan.md); a StateRef to an unwritten slot
+                    // also reads as undefined. Both mean "absent": tolerate falsy.
+                    ,closureArgs:number[]=[...(arg()||[])]
+                    ,[spanner,...spans]=(arg()||[(a:any)=>a]);
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=await tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
@@ -205,11 +214,12 @@ async function _runVirtualizedA(code: () => DataView, state: {[a: number]: any},
                 break;
             }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;case 11: {
                 const fn = arg();
+                const thisArg = arg();
                 let n = code().getUint32(ip,true); ip += 4;
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
                 state[code().getUint32(ip,true)] = await tenant.driveTenant(
-                    tenant.invoke(fn, {kind:"apply", thisArg:undefined, args:callArgs}),
+                    tenant.invoke(fn, {kind:"apply", thisArg, args:callArgs}),
                     addAsync,
                     addGen,
                 );
@@ -257,8 +267,12 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 const effectiveVariant = declaredVariant | (addAsync ? 1 : 0) | (addGen ? 2 : 0);
                 const childDoubleGen = addGen && !!(declaredVariant & 2);
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][effectiveVariant]
-                    ,closureArgs:number[]=[...arg()]
-                    ,[spanner,...spans]=arg()??[(a:any)=>a];
+                    // closure_args/spanner are Operand::Literal(0) when unwired
+                    // (the only encoding the frontend emits today — see
+                    // docs/closure-capture-plan.md); a StateRef to an unwritten slot
+                    // also reads as undefined. Both mean "absent": tolerate falsy.
+                    ,closureArgs:number[]=[...(arg()||[])]
+                    ,[spanner,...spans]=(arg()||[(a:any)=>a]);
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=yield* tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
@@ -320,11 +334,12 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                 break;
             }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;case 11: {
                 const fn = arg();
+                const thisArg = arg();
                 let n = code().getUint32(ip,true); ip += 4;
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
                 state[code().getUint32(ip,true)] = yield* tenant.driveTenant(
-                    tenant.invoke(fn, {kind:"apply", thisArg:undefined, args:callArgs}),
+                    tenant.invoke(fn, {kind:"apply", thisArg, args:callArgs}),
                     addAsync,
                     addGen,
                 );
@@ -369,8 +384,12 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 const effectiveVariant = declaredVariant | (addAsync ? 1 : 0) | (addGen ? 2 : 0);
                 const childDoubleGen = addGen && !!(declaredVariant & 2);
                 const val = [runVirtualized,runVirtualizedA,runVirtualizedG,runVirtualizedAG][effectiveVariant]
-                    ,closureArgs:number[]=[...arg()]
-                    ,[spanner,...spans]=arg()??[(a:any)=>a];
+                    // closure_args/spanner are Operand::Literal(0) when unwired
+                    // (the only encoding the frontend emits today — see
+                    // docs/closure-capture-plan.md); a StateRef to an unwritten slot
+                    // also reads as undefined. Both mean "absent": tolerate falsy.
+                    ,closureArgs:number[]=[...(arg()||[])]
+                    ,[spanner,...spans]=(arg()||[(a:any)=>a]);
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
@@ -432,11 +451,12 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                 break;
             }case 10: state[code().getUint32(ip,true)]=nt;ip += 4;break;case 11: {
                 const fn = arg();
+                const thisArg = arg();
                 let n = code().getUint32(ip,true); ip += 4;
                 const callArgs: any[] = [];
                 while(n--) callArgs.push(arg());
                 state[code().getUint32(ip,true)] = tenant.driveTenant(
-                    tenant.invoke(fn, {kind:"apply", thisArg:undefined, args:callArgs}),
+                    tenant.invoke(fn, {kind:"apply", thisArg, args:callArgs}),
                     addAsync,
                     addGen,
                 );

@@ -292,6 +292,18 @@ var x = true;
         assert_eq!(meta.required_includes(), vec!["sta.js", "assert.js"]);
     }
 
+
+    #[test]
+    fn time_octal_frontmatter() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../vendor/test262/test/language/literals/numeric/octal.js"),
+        )
+        .unwrap();
+        let t = std::time::Instant::now();
+        let m = parse_frontmatter(&src).unwrap();
+        eprintln!("meta: {:?} flags={:?}", t.elapsed(), m.flags);
+    }
     #[test]
     fn rejects_garbage() {
         assert!(parse_frontmatter("no frontmatter here").is_err());

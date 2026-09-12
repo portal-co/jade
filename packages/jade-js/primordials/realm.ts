@@ -50,6 +50,12 @@ export function* createPrimordialRealm(
     Object: realm.Object, Function: realm.Function, Reflect: realm.Reflect, Proxy: realm.Proxy,
     Promise: realm.Promise,
   })) yield tenant.yieldTenant(defineData(tenant, globalThis, key, value));
+  // A real global object has a `globalThis` self-reference, plus the standard
+  // well-known value globals (all non-writable/non-configurable on a real global).
+  yield tenant.yieldTenant(defineData(tenant, globalThis, "globalThis", globalThis));
+  yield tenant.yieldTenant(defineData(tenant, globalThis, "undefined", undefined));
+  yield tenant.yieldTenant(defineData(tenant, globalThis, "NaN", NaN));
+  yield tenant.yieldTenant(defineData(tenant, globalThis, "Infinity", Infinity));
   if (options.buffers) {
     const buffers = yield tenant.yieldTenant(bufferPrimordial(tenant, options.buffers));
     realm.ArrayBuffer = buffers.ArrayBuffer;

@@ -65,6 +65,7 @@ pub trait Ops {
         &mut self,
         code: &[u8],
         fn_val: Self::Value,
+        this_val: Self::Value,
         args: Vec<Self::Value>,
     ) -> Result<Self::Value, Self::Error>;
     fn op_bool(&self, val: bool) -> Self::Value;
@@ -173,10 +174,16 @@ where
             platform.set(dest, val);
             Ok(())
         }
-        Operation::Call { fn_op, args, dest } => {
+        Operation::Call {
+            fn_op,
+            this_op,
+            args,
+            dest,
+        } => {
             let fn_val = resolve(fn_op, platform);
+            let this_val = resolve(this_op, platform);
             let args: Vec<_> = args.into_iter().map(|op| resolve(op, platform)).collect();
-            let result = platform.op_call(code, fn_val, args)?;
+            let result = platform.op_call(code, fn_val, this_val, args)?;
             platform.set(dest, result);
             Ok(())
         }

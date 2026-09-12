@@ -11,5 +11,6 @@ pub mod manifest;
 pub mod meta;
 pub mod model;
 pub mod node;
+pub mod normalize;
 pub mod pipeline;
 pub mod run;

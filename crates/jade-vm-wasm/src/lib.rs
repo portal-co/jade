@@ -512,6 +512,7 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         &mut self,
         code: &[u8],
         fn_val: JsValue,
+        this_val: JsValue,
         args: Vec<JsValue>,
     ) -> Result<JsValue, JsValue> {
         let call_args = Array::new_with_length(args.len() as u32);
@@ -522,6 +523,11 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         if let Some((variant_idx, j, closure_slots)) = registry_get(&fn_val) {
             if variant_idx == 0 {
                 // Sync jade-to-jade: dispatch directly in Rust, no state flush.
+                // `this_val` is deliberately not threaded: no opcode lets a guest
+                // body observe `this` (GLOBAL/NEW_TARGET cover the reachable
+                // surface), so dropping it here is unobservable today. If a THIS
+                // opcode ever lands, thread it through `run_sync` here.
+                let _ = &this_val;
                 let child = build_child_state_fast(&closure_slots, &mut self.cache);
                 let res = run_sync(
                     code,
@@ -549,11 +555,7 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
             &JsValue::from_str("kind"),
             &JsValue::from_str("apply"),
         );
-        let _ = Reflect::set(
-            &invocation,
-            &JsValue::from_str("thisArg"),
-            &JsValue::UNDEFINED,
-        );
+        let _ = Reflect::set(&invocation, &JsValue::from_str("thisArg"), &this_val);
         let _ = Reflect::set(&invocation, &JsValue::from_str("args"), &call_args);
         Ok(tenant_drive(
             self.tenant,

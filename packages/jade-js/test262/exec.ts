@@ -20,6 +20,7 @@ import {
   type Tenant,
   type PrimordialRealm,
 } from "../index.ts";
+import { Test262Error, installHarness } from "./harness.ts";
 
 export interface Job {
   test: string;
@@ -29,6 +30,8 @@ export interface Job {
   bytecode?: number[];
   body?: string;
   prelude?: string;
+  /** Install the test262 harness primordials (harness.ts) before running. */
+  harness?: boolean;
 }
 
 export interface CellVerdict {
@@ -123,6 +126,9 @@ export async function execute(job: Job): Promise<CellVerdict> {
   let ctx: CellContext;
   try {
     ctx = freshContext(job.tenant);
+    if (job.harness) {
+      installHarness(ctx);
+    }
   } catch (error) {
     return { kind: "crash", error: `context setup: ${String(error)}` };
   }
@@ -132,7 +138,7 @@ export async function execute(job: Job): Promise<CellVerdict> {
   } catch (error) {
     return {
       kind: "fail",
-      reason: "threw during execution",
+      reason: error instanceof Test262Error ? "assertion failed" : "threw during execution",
       error: error instanceof Error ? (error.stack ?? error.message) : String(error),
     };
   }

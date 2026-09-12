@@ -111,6 +111,7 @@ pub enum Operation {
     #[cfg(feature = "alloc")]
     Call {
         fn_op: crate::Operand,
+        this_op: crate::Operand,
         args: Vec<crate::Operand>,
         dest: u32,
     },
@@ -361,6 +362,8 @@ impl Operation {
             11 => {
                 let (fn_r, no) = read_u32_le(buf, off)?;
                 off = no;
+                let (this_r, no) = read_u32_le(buf, off)?;
+                off = no;
                 let (len, no) = read_u32_le(buf, off)?;
                 off = no;
                 let mut args = Vec::with_capacity(len as usize);
@@ -374,6 +377,7 @@ impl Operation {
                 Some((
                     Operation::Call {
                         fn_op: crate::Operand::decode(fn_r),
+                        this_op: crate::Operand::decode(this_r),
                         args,
                         dest,
                     },
@@ -616,7 +620,7 @@ impl Operation {
                 Operation::Litobj{..} => { /* alloc disabled: cannot emit */ },
                 Operation::NewTarget(dest) => { yield_!(10 as u8); yield_!((10>>8) as u8); for b in dest.to_le_bytes() { yield_! b; } },
                 #[cfg(feature = "alloc")]
-                Operation::Call{fn_op, args, dest} => { yield_!(11 as u8); yield_!((11>>8) as u8); for b in fn_op.encode().to_le_bytes() { yield_! b; } for b in (args.len() as u32).to_le_bytes() { yield_! b; } for x in args { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.to_le_bytes() { yield_! b; } },
+                Operation::Call{fn_op, this_op, args, dest} => { yield_!(11 as u8); yield_!((11>>8) as u8); for b in fn_op.encode().to_le_bytes() { yield_! b; } for b in this_op.encode().to_le_bytes() { yield_! b; } for b in (args.len() as u32).to_le_bytes() { yield_! b; } for x in args { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.to_le_bytes() { yield_! b; } },
                 #[cfg(not(feature = "alloc"))]
                 Operation::Call{..} => { /* alloc disabled: cannot emit */ },
                 Operation::Bool{val, dest} => { yield_!(12 as u8); yield_!((12>>8) as u8); for b in (if val { 1u32 } else { 0u32 }).to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },
@@ -735,10 +739,16 @@ impl Operation {
                 wtr.extend_from_slice(&dest.to_le_bytes());
             }
             #[cfg(feature = "alloc")]
-            Operation::Call { fn_op, args, dest } => {
+            Operation::Call {
+                fn_op,
+                this_op,
+                args,
+                dest,
+            } => {
                 wtr.push(11 as u8);
                 wtr.push((11 >> 8) as u8);
                 wtr.extend_from_slice(&fn_op.encode().to_le_bytes());
+                wtr.extend_from_slice(&this_op.encode().to_le_bytes());
                 wtr.extend_from_slice(&(args.len() as u32).to_le_bytes());
                 for x in args {
                     wtr.extend_from_slice(&x.encode().to_le_bytes());

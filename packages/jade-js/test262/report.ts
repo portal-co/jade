@@ -97,13 +97,20 @@ export function writeJson(path: string, value: unknown): void {
   writeFileSync(path, JSON.stringify(value, null, 2) + "\n");
 }
 
-/** Re-baseline: expectations from a report (only non-pass verdicts are named). */
-export function expectationsFromReport(report: Report): Record<string, Expectations> {
-  const out: Record<string, Expectations> = {};
+/** Re-baseline: expectations from a report, merged into `existing` so successive
+ *  per-shard updates don't clobber each other (only non-pass verdicts are named). */
+export function expectationsFromReport(
+  report: Report,
+  existing: Record<string, Expectations> = {},
+): Record<string, Expectations> {
+  const out: Record<string, Expectations> = structuredClone(existing);
   for (const r of report.results) {
     for (const [env, cell] of Object.entries(r.cells)) {
+      const envExp = (out[env] ??= { version: 1, tests: {} });
       if (cell.kind !== "pass") {
-        (out[env] ??= { version: 1, tests: {} }).tests[r.path] = { verdict: cell.kind };
+        envExp.tests[r.path] = { verdict: cell.kind };
+      } else {
+        delete envExp.tests[r.path];
       }
     }
   }

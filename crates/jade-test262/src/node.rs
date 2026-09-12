@@ -3,7 +3,13 @@
 //! All JS execution — interpreter and every JIT tier — goes through that one TS driver,
 //! so the Rust orchestrator and the TS orchestrator observe identical semantics. This
 //! module owns the subprocess mechanics: job JSON to a temp file, `node
-//! --experimental-strip-types` with a wall-clock timeout, verdict JSON from stdout.
+//! --experimental-strip-types` with a wall-clock timeout, verdict JSON from
+//! marker-prefixed stdout lines.
+//!
+//! Execution is **batched**: process+import startup dwarfs per-test runtime, so jobs go
+//! out in chunks (`BATCH_SIZE`) with a per-chunk deadline derived from the per-cell
+//! timeout. A chunk that can't complete (timeout, crash, short output) falls back to
+//! single-job runs so one wedged test can't take its chunk-mates down with it.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -24,42 +30,90 @@ pub fn repo_root() -> PathBuf {
 }
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Jobs per driver process. Sized so a fully-passing chunk is one import cost + N fast
+/// executions, and a pathological chunk costs at most `batch deadline` + N single-job
+/// fallbacks.
+pub const BATCH_SIZE: usize = 32;
+const VERDICT_PREFIX: &str = "__JADE_T262_VERDICT__ ";
 
-/// Run one test × one environment cell. `job` is the driver job JSON (see
-/// `packages/jade-js/test262/exec.ts` for the shape). Never fails to return a verdict:
-/// process/IO trouble becomes `crash`, exceeding `timeout` becomes `timeout`.
+/// Run a batch of jobs; returns one verdict per job, in order.
+pub fn run_cells(jobs: &[serde_json::Value], per_cell: Duration) -> Vec<CellVerdict> {
+    let mut out = Vec::with_capacity(jobs.len());
+    for chunk in jobs.chunks(BATCH_SIZE.max(1)) {
+        run_chunk(chunk, per_cell, &mut out);
+    }
+    out
+}
+
+fn run_chunk(chunk: &[serde_json::Value], per_cell: Duration, out: &mut Vec<CellVerdict>) {
+    if chunk.len() == 1 {
+        out.push(run_cell(&chunk[0], per_cell));
+        return;
+    }
+    // A chunk's deadline: every cell could individually time out, plus startup.
+    let deadline = per_cell * chunk.len() as u32 + Duration::from_secs(15);
+    let payload = serde_json::json!({ "jobs": chunk });
+    match spawn_and_collect(&payload, deadline) {
+        Ok(lines) if lines.len() == chunk.len() => {
+            out.extend(lines.into_iter().map(|l| parse_verdict(&l)));
+        }
+        _ => {
+            // Fallback: isolate each cell so one bad test doesn't sink the chunk.
+            out.extend(chunk.iter().map(|job| run_cell(job, per_cell)));
+        }
+    }
+}
+
+/// Run one job in its own driver process. Never fails to return a verdict: IO trouble
+/// becomes `crash`, exceeding `timeout` becomes `timeout`.
 pub fn run_cell(job: &serde_json::Value, timeout: Duration) -> CellVerdict {
     let started = Instant::now();
-    let tmp = tempfile_path("job");
-    let mut f = match std::fs::File::create(&tmp) {
-        Ok(f) => f,
-        Err(e) => return crash(format!("create job file: {e}"), started),
-    };
-    if let Err(e) = f.write_all(job.to_string().as_bytes()) {
-        return crash(format!("write job file: {e}"), started);
+    match spawn_and_collect(job, timeout) {
+        Ok(lines) if !lines.is_empty() => {
+            let mut cell = parse_verdict(lines.last().unwrap());
+            cell.duration_ms = started.elapsed().as_millis() as u64;
+            cell
+        }
+        Ok(_) => {
+            let mut c = CellVerdict::new(VerdictKind::Crash);
+            c.error = Some("driver exited without a verdict line".into());
+            c
+        }
+        Err(kind) => kind,
     }
-    drop(f);
+}
 
-    let child = Command::new("node")
+type SpawnResult = Result<Vec<String>, CellVerdict>;
+
+fn spawn_and_collect(payload: &serde_json::Value, deadline: Duration) -> SpawnResult {
+    let started = Instant::now();
+    let tmp = tempfile_path("job");
+    let write = std::fs::File::create(&tmp)
+        .and_then(|mut f| f.write_all(payload.to_string().as_bytes()));
+    if let Err(e) = write {
+        return Err(crash(format!("write job file: {e}")));
+    }
+    let mut child = match Command::new("node")
         .arg("--experimental-strip-types")
         .arg(driver_path())
         .arg(&tmp)
         .current_dir(repo_root())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
+        .spawn()
+    {
         Ok(c) => c,
-        Err(e) => return crash(format!("spawn node: {e}"), started),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(crash(format!("spawn node: {e}")));
+        }
     };
-
-    let mut cell = poll(&mut child, timeout, started);
-    cell.duration_ms = started.elapsed().as_millis() as u64;
+    let result = poll(&mut child, deadline, started);
     let _ = std::fs::remove_file(&tmp);
-    cell
+    result
 }
 
-fn poll(child: &mut Child, timeout: Duration, started: Instant) -> CellVerdict {
+fn poll(child: &mut Child, deadline: Duration, started: Instant) -> SpawnResult {
     use std::io::Read;
     loop {
         match child.try_wait() {
@@ -72,42 +126,44 @@ fn poll(child: &mut Child, timeout: Duration, started: Instant) -> CellVerdict {
                 if let Some(mut h) = child.stderr.take() {
                     let _ = h.read_to_string(&mut stderr);
                 }
-                return finish(status.success(), &stdout, &stderr);
+                let lines: Vec<String> = stdout
+                    .lines()
+                    .filter_map(|l| l.strip_prefix(VERDICT_PREFIX).map(str::to_string))
+                    .collect();
+                if lines.is_empty() && !status.success() {
+                    return Err(crash(format!(
+                        "driver exited {status} with no verdicts: {}",
+                        stderr.trim()
+                    )));
+                }
+                return Ok(lines);
             }
             Ok(None) => {
-                if started.elapsed() > timeout {
+                if started.elapsed() > deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return CellVerdict::new(VerdictKind::Timeout);
+                    let mut c = CellVerdict::new(VerdictKind::Timeout);
+                    c.error = Some(format!("exceeded {deadline:?}"));
+                    return Err(c);
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            Err(e) => return crash(format!("wait: {e}"), started),
+            Err(e) => return Err(crash(format!("wait: {e}"))),
         }
     }
 }
 
-/// The driver prints its verdict as the last non-empty stdout line; anything before it
-/// is test `print` output. A nonzero exit without a parseable verdict is a crash.
-fn finish(success: bool, stdout: &str, stderr: &str) -> CellVerdict {
-    if let Some(line) = stdout.lines().rev().find(|l| !l.trim().is_empty()) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(kind) = v.get("kind").and_then(|k| k.as_str()) {
-                let mut cell = CellVerdict::new(parse_kind(kind).unwrap_or(VerdictKind::Crash));
-                cell.reason = v.get("reason").and_then(|r| r.as_str()).map(String::from);
-                cell.value = v.get("value").and_then(|r| r.as_str()).map(String::from);
-                cell.error = v.get("error").and_then(|r| r.as_str()).map(String::from);
-                if cell.kind == VerdictKind::Crash && cell.error.is_none() && !success {
-                    cell.error = Some(stderr.trim().to_string());
-                }
-                return cell;
-            }
+fn parse_verdict(line: &str) -> CellVerdict {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+        if let Some(kind) = v.get("kind").and_then(|k| k.as_str()) {
+            let mut cell = CellVerdict::new(parse_kind(kind).unwrap_or(VerdictKind::Crash));
+            cell.reason = v.get("reason").and_then(|r| r.as_str()).map(String::from);
+            cell.value = v.get("value").and_then(|r| r.as_str()).map(String::from);
+            cell.error = v.get("error").and_then(|r| r.as_str()).map(String::from);
+            return cell;
         }
     }
-    crash(format!(
-        "driver produced no verdict line (exit ok={success}): {}",
-        stderr.trim()
-    ), Instant::now())
+    crash(format!("unparseable verdict line: {line:?}"))
 }
 
 fn parse_kind(s: &str) -> Option<VerdictKind> {
@@ -125,7 +181,7 @@ fn parse_kind(s: &str) -> Option<VerdictKind> {
     })
 }
 
-fn crash(msg: String, _started: Instant) -> CellVerdict {
+fn crash(msg: String) -> CellVerdict {
     let mut c = CellVerdict::new(VerdictKind::Crash);
     c.error = Some(msg);
     c

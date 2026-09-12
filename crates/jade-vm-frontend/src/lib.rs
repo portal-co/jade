@@ -31,6 +31,7 @@ use swc_ecma_parser::{Parser, StringInput, Syntax};
 
 type Ident = swc_ecma_ast::Id;
 
+mod globals;
 pub mod tenant_inline;
 
 /// A JS construct with no direct Jade bytecode equivalent (yet). Carries a short
@@ -96,7 +97,10 @@ pub fn compile_to_bytecode_with_variant(
     is_async: bool,
 ) -> Result<Vec<u8>, FrontendError> {
     swc_common::GLOBALS.set(&swc_common::Globals::new(), || {
-        let stmts = parse_script(src)?;
+        let mut stmts = parse_script(src)?;
+        // Resolve free-identifier reads into realm-global member reads *before* TAC
+        // conversion — afterwards, names are gone (see globals.rs).
+        let global_ctxt = globals::resolve_globals(&mut stmts).map(|g| g.ctxt);
         let synthetic = Function {
             params: vec![],
             decorators: vec![],
@@ -114,12 +118,16 @@ pub fn compile_to_bytecode_with_variant(
         };
         let tfunc =
             TFunc::try_from(&synthetic).map_err(|e| FrontendError::Tac(format!("{e:?}")))?;
+        // Reject closure captures while names and decls are still accurate — after
+        // `optimize_tfunc`'s SSA round-trip, its `$k…p…` block-param materializations
+        // look identical to real captures.
+        check_no_captures(&tfunc, global_ctxt)?;
         // Shared TAC canonicalizer + SSA constant-fold/DCE pass (see
         // `docs/bytecode-cfg-plan.md`); the same `jade-cfg-opt::optimize_tfunc` an
         // optional JIT plugin (Tier 2) can also apply to its own reconstructed CFG.
         let tfunc = portal_solutions_jade_cfg_opt::optimize_tfunc(&tfunc)
             .map_err(|e| FrontendError::Opt(format!("{e:?}")))?;
-        compile_program(tfunc)
+        compile_program(tfunc, global_ctxt)
     })
 }
 
@@ -148,7 +156,10 @@ pub fn compile_to_bytecode_with_variant(
 /// 3. **Emit for real**: re-lower every function, now that every function's region start
 ///    is known, so both its own block offsets (region start + local block offset) and any
 ///    nested `Fn` op's `j` (the referenced function's region start) resolve correctly.
-fn compile_program(entry: TFunc) -> Result<Vec<u8>, FrontendError> {
+fn compile_program(
+    entry: TFunc,
+    global_ctxt: Option<swc_common::SyntaxContext>,
+) -> Result<Vec<u8>, FrontendError> {
     let mut funcs: Vec<TFunc> = vec![entry];
     let mut region_lens: Vec<u32> = Vec::new();
     let mut children_base: Vec<u32> = Vec::new();
@@ -158,7 +169,7 @@ fn compile_program(entry: TFunc) -> Result<Vec<u8>, FrontendError> {
     // global index the first of function `k`'s own (immediate) nested functions lands at.
     let mut i = 0;
     while i < funcs.len() {
-        let mut lowering = FnLowering::new(&funcs[i].cfg);
+        let mut lowering = FnLowering::new(&funcs[i].cfg, &funcs[i].params, global_ctxt);
         let mut discovered = Vec::new();
         let mut phase = FnPhase::Measure {
             discovered: &mut discovered,
@@ -183,7 +194,7 @@ fn compile_program(entry: TFunc) -> Result<Vec<u8>, FrontendError> {
     // Phase 3: emit for real.
     let mut out = vec![0u8; cursor as usize];
     for (k, tfunc) in funcs.iter().enumerate() {
-        let mut lowering = FnLowering::new(&tfunc.cfg);
+        let mut lowering = FnLowering::new(&tfunc.cfg, &tfunc.params, global_ctxt);
         let mut phase = FnPhase::Emit {
             children_base: children_base[k],
             region_offsets: &region_offsets,
@@ -220,6 +231,51 @@ fn parse_script(src: &str) -> Result<Vec<swc_ecma_ast::Stmt>, FrontendError> {
     Ok(script.body)
 }
 
+/// Reject (transitively) nested functions that reference enclosing-scope names.
+///
+/// A nested function may only see its own declarations and parameters (plus the marked
+/// global object ident — global reads are member ops after `globals::resolve_globals`,
+/// not captures). Anything else is an upvalue the `FN` opcode's not-yet-wired
+/// `closure_args` would have to supply, and compiling it would silently produce
+/// `undefined` where JS has a shared binding — an explicit `Unsupported` instead.
+fn check_no_captures(
+    tfunc: &TFunc,
+    global_ctxt: Option<swc_common::SyntaxContext>,
+) -> Result<(), FrontendError> {
+    fn walk(func: &TFunc, global_ctxt: Option<swc_common::SyntaxContext>) -> Result<(), FrontendError> {
+        let mut names = Vec::new();
+        for id in func.cfg.refs() {
+            if Some(id.1) == global_ctxt || func.cfg.decls.contains(&id) || func.params.contains(&id) {
+                continue;
+            }
+            if !names.contains(&id) {
+                names.push(id);
+            }
+        }
+        if !names.is_empty() {
+            let shown: Vec<String> = names
+                .iter()
+                .take(3)
+                .map(|id| format!("`{}`", id.0))
+                .collect();
+            return unsupported(format!(
+                "closure capture of {}{} (see docs/closure-capture-plan.md)",
+                shown.join(", "),
+                if names.len() > 3 { ", …" } else { "" },
+            ));
+        }
+        for block in func.cfg.blocks.iter() {
+            for stmt in &block.1.stmts {
+                if let Item::Func { func: nested, .. } = &stmt.right {
+                    walk(nested, global_ctxt)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(tfunc, global_ctxt)
+}
+
 /// Which phase of [`compile_program`]'s two-phase (measure-then-emit) nested-function
 /// offset resolution scheme is driving a `lower_item` call. See `compile_program`'s doc
 /// comment for the full scheme; this only concerns the `Item::Func` arm of `lower_item`.
@@ -240,6 +296,15 @@ enum FnPhase<'a> {
 
 struct FnLowering<'a> {
     tcfg: &'a TCfg,
+    /// The function's declared parameters — not globals, even though the bytecode has
+    /// no parameter-binding opcode yet (their slots stay unwritten for now).
+    params: &'a [Ident],
+    /// The mark `globals::resolve_globals` put on "the realm global object" idents, if
+    /// the program references the global at all. Survives the SSA name mangle.
+    global_ctxt: Option<swc_common::SyntaxContext>,
+    /// The slot holding this region's `GLOBAL` result. Allocated up-front (slot 0)
+    /// whenever `global_ctxt` is set, so the measure and emit phases agree.
+    global_slot: Option<u32>,
     slots: HashMap<Ident, u32>,
     next_slot: u32,
     /// Lazily-allocated slot holding a value that is never written — reading it
@@ -252,14 +317,27 @@ struct FnLowering<'a> {
 }
 
 impl<'a> FnLowering<'a> {
-    fn new(tcfg: &'a TCfg) -> Self {
-        Self {
+    fn new(
+        tcfg: &'a TCfg,
+        params: &'a [Ident],
+        global_ctxt: Option<swc_common::SyntaxContext>,
+    ) -> Self {
+        let mut lowering = Self {
             tcfg,
+            params,
+            global_ctxt,
+            global_slot: None,
             slots: HashMap::new(),
             next_slot: 0,
             undefined_slot: None,
             nested_fn_counter: 0,
+        };
+        if global_ctxt.is_some() {
+            // Reserve this region's global slot deterministically (always the first
+            // slot), and make `compile_blocks` emit `GLOBAL` into it at the entry.
+            lowering.global_slot = Some(lowering.fresh_slot());
         }
+        lowering
     }
 }
 
@@ -290,9 +368,16 @@ impl<'a> FnLowering<'a> {
     ) -> Result<Vec<u8>, FrontendError> {
         let order = self.discover_reachable(entry)?;
         let mut lowered: Vec<(TBlockId, LoweredBlock)> = Vec::with_capacity(order.len());
-        for id in &order {
+        for (position, id) in order.iter().enumerate() {
             let block: &TBlock = &self.tcfg.blocks[*id];
             let mut ops_bytes = Vec::new();
+            if position == 0 {
+                if let Some(slot) = self.global_slot {
+                    // The entry block initializes the realm-global slot ahead of any
+                    // member reads against it (see globals.rs).
+                    ops_bytes.extend(Operation::Global(slot).emit());
+                }
+            }
             for stmt in &block.stmts {
                 self.lower_stmt(stmt, phase, &mut ops_bytes)?;
             }
@@ -367,7 +452,11 @@ impl<'a> FnLowering<'a> {
                 return unsupported("`throw` (Jade bytecode has no exception-handling opcode)");
             }
             TTerm::Tail { .. } => return unsupported("tail call"),
-            TTerm::Default => return unsupported("internal invariant: unreachable TAC terminator"),
+            // Reachable `Default` = falls off the end of the program/function. It's a
+            // valid final terminator; only *unreachable* Default blocks (placeholder
+            // artifacts of AST/TAC lowering) are garbage, and `discover_reachable`'s BFS
+            // never visits those.
+            TTerm::Default => vec![],
         })
     }
 
@@ -405,7 +494,10 @@ impl<'a> FnLowering<'a> {
                 .emit()
                 .collect()
             }
-            TTerm::Switch { .. } | TTerm::Throw(_) | TTerm::Tail { .. } | TTerm::Default => {
+            // Reachable `Default` = falls off the end: complete with `undefined`,
+            // exactly like `return;` with no value (JS completion semantics).
+            TTerm::Default => Operation::Ret(self.undefined_operand()).emit().collect(),
+            TTerm::Switch { .. } | TTerm::Throw(_) | TTerm::Tail { .. } => {
                 // `discover_reachable` already rejects these before we ever get here.
                 return unsupported(
                     "internal invariant: unreachable TAC terminator reached emit_terminator",
@@ -415,6 +507,12 @@ impl<'a> FnLowering<'a> {
     }
 
     fn slot_for(&mut self, id: &Ident) -> u32 {
+        // An ident carrying the global-resolution mark is the realm global object
+        // itself — read the reserved slot, never an ordinary (unwritten) one. Compare
+        // by full SyntaxContext, not text: the mark is the binding's identity.
+        if Some(id.1) == self.global_ctxt {
+            return self.global_slot.expect("allocated in FnLowering::new");
+        }
         if let Some(&s) = self.slots.get(id) {
             return s;
         }
@@ -551,11 +649,6 @@ impl<'a> FnLowering<'a> {
                 Ok(())
             }
             Item::Call { callee, args } => {
-                let TCallee::Val(f) = callee else {
-                    return unsupported(
-                        "call target other than a plain value (method calls, `super`, `import()`, `eval`)",
-                    );
-                };
                 let mut arg_ops = Vec::with_capacity(args.len());
                 for a in args {
                     if a.is_spread {
@@ -563,10 +656,35 @@ impl<'a> FnLowering<'a> {
                     }
                     arg_ops.push(self.operand_for(&a.value));
                 }
-                let fn_op = self.operand_for(f);
+                let (fn_op, this_op) = match callee {
+                    TCallee::Val(f) => (self.operand_for(f), self.undefined_operand()),
+                    // `obj.member(...)`: resolve the callee through the tenant (GET)
+                    // and keep the receiver as the call's `this` — the CALL opcode's
+                    // dedicated operand preserves member-call `this` semantics.
+                    TCallee::Member { func, member } => {
+                        let this_op = self.operand_for(func);
+                        let key_op = self.operand_for(member);
+                        let fn_slot = self.fresh_slot();
+                        out.extend(
+                            Operation::Get {
+                                obj: this_op,
+                                key: key_op,
+                                dest: fn_slot,
+                            }
+                            .emit(),
+                        );
+                        (Operand::StateRef(fn_slot), this_op)
+                    }
+                    _ => {
+                        return unsupported(
+                            "call target other than a plain value or member call (`super`, `import()`, `eval`)",
+                        );
+                    }
+                };
                 out.extend(
                     Operation::Call {
                         fn_op,
+                        this_op,
                         args: arg_ops,
                         dest,
                     }
@@ -884,8 +1002,24 @@ mod tests {
         let bytecode = compile_to_bytecode(src).expect("frontend compile failed");
         let (body, reg) =
             compile(&bytecode, VecRegistry::new(), Config::default()).expect("JIT compile failed");
+        // The emitted code drives the real tenant ABI (`tenant.driveTenant(...)`,
+        // `tenant.makeFunction(...)`, `tenant.invoke(...)` with the markGuestFn-registered
+        // calling convention), so the stub must be ABI-faithful, not `undefined`.
         let script = format!(
-            "function markGuestFn(f, m) {{ return f; }}\n{prelude}\nconst fn = new Function('tenant', 'nt', 'state', {body});\nconsole.log(JSON.stringify(fn(undefined, undefined, [])));",
+            "const __guestFns = new WeakMap();\n\
+             function markGuestFn(f, m) {{ __guestFns.set(f, m); return f; }}\n\
+             const tenant = {{\n\
+               makeFunction: (f) => f,\n\
+               driveTenant: (g) => g,\n\
+               invoke(fn, inv) {{\n\
+                 const meta = __guestFns.get(fn);\n\
+                 const args = meta && meta.abi === 'leading-tenant-nt' ? [tenant, undefined, ...inv.args] : inv.args;\n\
+                 return Reflect.apply(fn, inv.thisArg, args);\n\
+               }},\n\
+             }};\n\
+             {prelude}\n\
+             const fn = new Function('tenant', 'nt', 'state', {body});\n\
+             console.log(JSON.stringify(fn(tenant, undefined, [])));",
             prelude = reg.prelude(),
             body = serde_json_escape(&body),
         );
@@ -987,5 +1121,63 @@ mod tests {
             "expected the untaken branch to be folded away, got:\n{js}"
         );
         assert!(js.contains("222"), "got:\n{js}");
+    }
+}
+
+
+
+#[cfg(test)]
+mod capture_probe2 {
+    #[test]
+    fn scope_lex_close_refs() {
+        let src = "var probe;\n{ let x = 'inside'; probe = function() { return x; }; }\nlet x = 'outside';\nassert.sameValue(probe(), 'inside');";
+        let (mut stmts, g) = swc_common::GLOBALS.set(&swc_common::Globals::new(), || {
+            let mut s = crate::parse_script(src).unwrap();
+            let g = crate::globals::resolve_globals(&mut s).map(|r| r.ctxt);
+            (s, g)
+        });
+        let synthetic = swc_ecma_ast::Function {
+            params: vec![], decorators: vec![], span: swc_common::DUMMY_SP,
+            ctxt: Default::default(),
+            body: Some(swc_ecma_ast::BlockStmt { span: swc_common::DUMMY_SP, ctxt: Default::default(), stmts }),
+            is_generator: false, is_async: false, type_params: None, return_type: None,
+        };
+        swc_common::GLOBALS.set(&swc_common::Globals::new(), || {
+            let tfunc = portal_jsc_swc_tac::TFunc::try_from(&synthetic).unwrap();
+            fn walk(f: &portal_jsc_swc_tac::TFunc, d: usize) {
+                eprintln!("{}refs: {:?}", " ".repeat(d), f.cfg.refs().collect::<Vec<_>>());
+                eprintln!("{}decls: {:?}", " ".repeat(d), f.cfg.decls);
+                for b in f.cfg.blocks.iter() {
+                    for s in &b.1.stmts {
+                        if let portal_jsc_swc_tac::Item::Func { func, .. } = &s.right {
+                            walk(func, d + 2);
+                        }
+                    }
+                }
+            }
+            walk(&tfunc, 0);
+        });
+    }
+}
+
+#[cfg(test)]
+mod capture_check_test {
+    #[test]
+    fn rejects_let_capture() {
+        let err = crate::compile_to_bytecode(
+            "var probe;\n{ let x = 'inside'; probe = function() { return x; }; }\nlet x = 'outside';",
+        );
+        assert!(matches!(err, Err(crate::FrontendError::Unsupported(_))), "got: {err:?}");
+    }
+
+    #[test]
+    fn rejects_real_scope_lex_close_body() {
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../vendor/test262/test/language/statements/block/scope-lex-close.js"),
+        )
+        .unwrap();
+        let err = crate::compile_to_bytecode(&src);
+        assert!(matches!(err, Err(crate::FrontendError::Unsupported(_))), "got: {err:?}");
     }
 }

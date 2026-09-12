@@ -686,12 +686,15 @@ impl<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>> Ops for JsJit<R, N> {
         JsVar::Expr("nt".to_string())
     }
 
-    fn op_call(&mut self, _code: &[u8], fn_val: JsVar, args: Vec<JsVar>) -> Result<JsVar, String> {
+    fn op_call(&mut self, _code: &[u8], fn_val: JsVar, this_val: JsVar, args: Vec<JsVar>) -> Result<JsVar, String> {
         // Calls are tenant-owned: ordinary apply always has `nt === undefined`.
-        // `invoke` chooses guest vs host ABI and callable-exotic dispatch, then
-        // its generator result is driven once under the ambient capability bits.
+        // `this_val` is the call's receiver — the CALL opcode's dedicated `this`
+        // operand (`undefined` for plain function calls, the receiver object for
+        // member calls). `invoke` chooses guest vs host ABI and callable-exotic
+        // dispatch, then its generator result is driven once under the ambient
+        // capability bits.
         let invocation = format!(
-            "{{kind: \"apply\", thisArg: undefined, args: [{}]}}",
+            "{{kind: \"apply\", thisArg: {this_val}, args: [{}]}}",
             args.iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
@@ -1350,6 +1353,7 @@ mod tests {
         let code = chunk(&[
             Operation::Call {
                 fn_op: Operand::StateRef(0),
+                this_op: Operand::Literal(0),
                 args: alloc::vec![Operand::StateRef(2)],
                 dest: 1,
             },
@@ -1357,7 +1361,7 @@ mod tests {
         ]);
         let (js, _reg) = compile(&code, VecRegistry::new(), Config::default()).unwrap();
         assert!(
-            js.contains("tenant.driveTenant(tenant.invoke(state[0], {kind: \"apply\", thisArg: undefined, args: [state[2]]}), false, false)"),
+            js.contains("tenant.driveTenant(tenant.invoke(state[0], {kind: \"apply\", thisArg: 0, args: [state[2]]}), false, false)"),
             "got:\n{js}"
         );
         assert!(!js.contains("Reflect.apply(state[0]"), "got:\n{js}");
@@ -1648,3 +1652,4 @@ mod tests {
         assert_eq!(result, "false", "js:\n{js}");
     }
 }
+

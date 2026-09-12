@@ -148,10 +148,49 @@ async function main(): Promise<void> {
     const artifact = compile(file);
     const cells: Record<string, CellVerdict> = {};
 
+    // Uniform pre-compilation gates — mirror of run.rs::uniform_skip.
+    const flags = artifact.meta?.flags ?? [];
+    const includes = artifact.meta?.includes ?? [];
+    const requiredIncludes = [...(flags.includes("raw") ? [] : ["sta.js", "assert.js"]), ...includes];
+    let uniform: CellVerdict | undefined;
+    for (const f of flags) {
+      if (manifest.flags[f]?.status === "unsupported") {
+        uniform = { kind: "skip-flag", reason: f };
+        break;
+      }
+    }
+    if (!uniform) {
+      for (const inc of requiredIncludes) {
+        if (manifest.harnessIncludes[inc]?.status !== "supported") {
+          uniform = { kind: "skip-feature", reason: inc };
+          break;
+        }
+      }
+    }
+    if (!uniform) {
+      for (const feat of (artifact.meta as { features?: string[] } | undefined)?.features ?? []) {
+        if (manifest.features[feat]?.status === "unsupported") {
+          uniform = { kind: "skip-feature", reason: feat };
+          break;
+        }
+      }
+    }
+    if (!uniform && artifact.meta?.negative?.phase === "runtime") {
+      uniform = {
+        kind: "skip-unsupported-frontend",
+        reason: "exceptions: no bytecode opcode for throw/try yet",
+      };
+    }
+    if (!uniform && flags.includes("async")) {
+      uniform = { kind: "skip-flag", reason: "async" };
+    }
+
     let baseline: CellVerdict | undefined;
     for (const env of envs) {
       let cell: CellVerdict;
-      if (!artifact.ok) {
+      if (uniform) {
+        cell = uniform;
+      } else if (!artifact.ok) {
         const neg = artifact.meta?.negative;
         const compileRejectionExpected = neg && (neg.phase === "parse" || neg.phase === "early");
         if (compileRejectionExpected) {
@@ -163,8 +202,11 @@ async function main(): Promise<void> {
         } else {
           cell = { kind: "fail", reason: `compile: ${artifact.error_kind}: ${artifact.message}` };
         }
+      } else if (artifact.meta?.negative && ["parse", "early"].includes(artifact.meta.negative.phase)) {
+        // Compiled but demands a parse/early rejection: parser-strictness failure.
+        cell = { kind: "fail", reason: "compiled successfully but the test demands a parse/early rejection" };
       } else if (env === "interp") {
-        cell = await execute({ test: path, env, tenant, bytecode: artifact.bytecode });
+        cell = await execute({ test: path, env, tenant, bytecode: artifact.bytecode, harness: !flags.includes("raw") });
       } else {
         const tier = artifact.tiers?.[env] as
           | { Ok?: { body: string; prelude: string }; Err?: string }
@@ -173,7 +215,7 @@ async function main(): Promise<void> {
         const out = tier && ("Ok" in tier ? tier.Ok : tier as { body: string; prelude: string });
         const err = tier && "Err" in tier ? tier.Err : undefined;
         if (out?.body !== undefined) {
-          cell = await execute({ test: path, env, tenant, body: out.body, prelude: out.prelude });
+          cell = await execute({ test: path, env, tenant, body: out.body, prelude: out.prelude, harness: !flags.includes("raw") });
         } else {
           cell = { kind: "crash", error: `JIT compile (${env}): ${err ?? "no tier output"}` };
         }
@@ -212,7 +254,7 @@ async function main(): Promise<void> {
 
   const expectationsDir = join(T262_DIR, "expectations");
   if (update) {
-    const exps = expectationsFromReport(report);
+    const exps = expectationsFromReport(report, loadExpectations(expectationsDir));
     for (const [env, exp] of Object.entries(exps)) {
       writeJson(join(expectationsDir, `${env}.json`), exp);
     }

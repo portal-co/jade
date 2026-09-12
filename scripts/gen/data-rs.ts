@@ -33,7 +33,7 @@ function enumVariant(name: string, info: any): string {
     case "object":
       return `    #[cfg(feature = "alloc")]\n    ${v}{ c: crate::SignedOperand, pairs: Vec<(crate::Operand, crate::Operand)>, key: crate::Operand },`;
     case "call":
-      return `    #[cfg(feature = "alloc")]\n    ${v}{ fn_op: crate::Operand, args: Vec<crate::Operand>, dest: u32 },`;
+      return `    #[cfg(feature = "alloc")]\n    ${v}{ fn_op: crate::Operand, this_op: crate::Operand, args: Vec<crate::Operand>, dest: u32 },`;
     case "jmp":
       return `    ${v} { target: u32 },`;
     case "condjmp":
@@ -81,7 +81,7 @@ function parseArm(name: string, info: any): string {
             ${id} => { return None },`;
     case "call":
       return `            #[cfg(feature = "alloc")]
-            ${id} => { let (fn_r,no)=read_u32_le(buf,off)?; off=no; let (len,no)=read_u32_le(buf,off)?; off=no; let mut args=Vec::with_capacity(len as usize); for _ in 0..len { let (x,no2)=read_u32_le(buf,off)?; off=no2; args.push(crate::Operand::decode(x)); } let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::${v}{ fn_op: crate::Operand::decode(fn_r), args, dest }, &buf[off..])) },
+            ${id} => { let (fn_r,no)=read_u32_le(buf,off)?; off=no; let (this_r,no)=read_u32_le(buf,off)?; off=no; let (len,no)=read_u32_le(buf,off)?; off=no; let mut args=Vec::with_capacity(len as usize); for _ in 0..len { let (x,no2)=read_u32_le(buf,off)?; off=no2; args.push(crate::Operand::decode(x)); } let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::${v}{ fn_op: crate::Operand::decode(fn_r), this_op: crate::Operand::decode(this_r), args, dest }, &buf[off..])) },
             #[cfg(not(feature = "alloc"))]
             ${id} => { return None },`;
     case "jmp":
@@ -135,7 +135,7 @@ function emitArm(name: string, info: any): string {
             Operation::${v}{..} => { /* alloc disabled: cannot emit */ },`;
     case "call":
       return `            #[cfg(feature = "alloc")]
-            Operation::${v}{fn_op, args, dest} => { ${hdr} wtr.extend_from_slice(&fn_op.encode().to_le_bytes()); wtr.extend_from_slice(&(args.len() as u32).to_le_bytes()); for x in args { wtr.extend_from_slice(&x.encode().to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },
+            Operation::${v}{fn_op, this_op, args, dest} => { ${hdr} wtr.extend_from_slice(&fn_op.encode().to_le_bytes()); wtr.extend_from_slice(&this_op.encode().to_le_bytes()); wtr.extend_from_slice(&(args.len() as u32).to_le_bytes()); for x in args { wtr.extend_from_slice(&x.encode().to_le_bytes()); } wtr.extend_from_slice(&dest.to_le_bytes()); },
             #[cfg(not(feature = "alloc"))]
             Operation::${v}{..} => { /* alloc disabled: cannot emit */ },`;
     case "jmp":
@@ -189,7 +189,7 @@ function genArm(name: string, info: any): string {
             Operation::${v}{..} => { /* alloc disabled: cannot emit */ },`;
     case "call":
       return `            #[cfg(feature = "alloc")]
-            Operation::${v}{fn_op, args, dest} => { ${hdr} for b in fn_op.encode().to_le_bytes() { yield_! b; } for b in (args.len() as u32).to_le_bytes() { yield_! b; } for x in args { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.to_le_bytes() { yield_! b; } },
+            Operation::${v}{fn_op, this_op, args, dest} => { ${hdr} for b in fn_op.encode().to_le_bytes() { yield_! b; } for b in this_op.encode().to_le_bytes() { yield_! b; } for b in (args.len() as u32).to_le_bytes() { yield_! b; } for x in args { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.to_le_bytes() { yield_! b; } },
             #[cfg(not(feature = "alloc"))]
             Operation::${v}{..} => { /* alloc disabled: cannot emit */ },`;
     case "jmp":
