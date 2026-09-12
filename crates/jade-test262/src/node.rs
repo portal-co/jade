@@ -30,6 +30,46 @@ pub fn repo_root() -> PathBuf {
 }
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The wasm-bindgen bundle the `wasm-interp` cell executes (`wasm-pack build --target
+/// nodejs`). Built on demand (and gitignored) rather than checked in, exactly like the
+/// Rust binary itself.
+pub fn wasm_bundle_marker() -> PathBuf {
+    repo_root().join("packages/jade-js/test262/pkg/jade_vm_wasm.js")
+}
+
+/// Build `crates/jade-vm-wasm` into the Node-consumable bundle the TS driver imports,
+/// if the marker file is missing. Kept deliberately simple: freshness is Cargo's own
+/// business once the bundle exists, and `--update-wasm` forces a rebuild.
+pub fn ensure_wasm_bundle() -> Result<(), String> {
+    if wasm_bundle_marker().is_file() {
+        return Ok(());
+    }
+    rebuild_wasm_bundle()
+}
+
+pub fn rebuild_wasm_bundle() -> Result<(), String> {
+    let status = Command::new("wasm-pack")
+        .args([
+            "build",
+            "--target",
+            "nodejs",
+            "--out-dir",
+            "../../packages/jade-js/test262/pkg",
+            "--out-name",
+            "jade_vm_wasm",
+            "--no-typescript",
+            "crates/jade-vm-wasm",
+        ])
+        .current_dir(repo_root())
+        .status()
+        .map_err(|e| format!("spawn wasm-pack: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("wasm-pack build exited {status}"))
+    }
+}
 /// Jobs per driver process. Sized so a fully-passing chunk is one import cost + N fast
 /// executions, and a pathological chunk costs at most `batch deadline` + N single-job
 /// fallbacks.

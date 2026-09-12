@@ -2,7 +2,7 @@
  * TS test262 orchestrator:
  *
  *   node --experimental-strip-types packages/jade-js/test262/run.ts \
- *     --shard smoke [--tenant multi] [--env interp,jit-t0,jit-t1,jit-t2] \
+ *     --shard smoke [--tenant multi] [--env interp,wasm-interp,jit-t0,jit-t1,jit-t2] \
  *     [--report <path>] [--check] [--update-expectations]
  *
  * Uses the Rust CLI (`jade-test262 compile --file`) as the compile oracle, executes each
@@ -30,7 +30,22 @@ import {
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const T262_DIR = fileURLToPath(new URL(".", import.meta.url));
 const RUST_BIN = join(ROOT, "target/debug/jade-test262");
+const WASM_PKG = join(T262_DIR, "pkg", "jade_vm_wasm.js");
 const NODE_ENVS = ["interp", "jit-t0", "jit-t1", "jit-t2"];
+const INTERP_ENVS = new Set(["interp", "wasm-interp"]);
+
+function ensureWasmBundle(): void {
+  if (existsSync(WASM_PKG)) return;
+  console.error("run: building jade-vm-wasm bundle (wasm-pack build)…");
+  execFileSync("wasm-pack", [
+    "build",
+    "--target", "nodejs",
+    "--out-dir", "../../packages/jade-js/test262/pkg",
+    "--out-name", "jade_vm_wasm",
+    "--no-typescript",
+    "crates/jade-vm-wasm",
+  ], { cwd: ROOT, stdio: "inherit" });
+}
 
 interface Manifest {
   version: number;
@@ -137,6 +152,7 @@ async function main(): Promise<void> {
   const manifest = JSON.parse(readFileSync(join(T262_DIR, "manifest.json"), "utf8")) as Manifest;
 
   ensureRustBin();
+  if (envs.includes("wasm-interp")) ensureWasmBundle();
   const files = discover(shard);
   if (files.length === 0) die(`shard ${shard} discovered no tests`);
 
@@ -205,7 +221,7 @@ async function main(): Promise<void> {
       } else if (artifact.meta?.negative && ["parse", "early"].includes(artifact.meta.negative.phase)) {
         // Compiled but demands a parse/early rejection: parser-strictness failure.
         cell = { kind: "fail", reason: "compiled successfully but the test demands a parse/early rejection" };
-      } else if (env === "interp") {
+      } else if (INTERP_ENVS.has(env)) {
         cell = await execute({ test: path, env, tenant, bytecode: artifact.bytecode, harness: !flags.includes("raw") });
       } else {
         const tier = artifact.tiers?.[env] as

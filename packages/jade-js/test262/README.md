@@ -42,8 +42,20 @@ target/debug/jade-test262 validate-report packages/jade-js/test262/reports/smoke
 ```
 
 Shards: `smoke` (the fixtures) or `test262:<subdir>` (a vendored subtree under
-`vendor/test262/test/`). Environments: `interp`, `jit-t0`, `jit-t1`, `jit-t2`
-(`--env a,b` to subset). Tenants: `--tenant multi` (default) or `single`.
+`vendor/test262/test/`). Environments: `interp`, `wasm-interp`, `jit-t0`, `jit-t1`,
+`jit-t2` (`--env a,b` to subset). Tenants: `--tenant multi` (default) or `single`.
+
+`wasm-interp` (Phase 3) executes the same bytecode through `jade-vm-wasm`'s generated
+`run_virtualized` inside Node, against the same TS tenant + primordial realm as
+`interp`. Its wasm-bindgen bundle lives at `pkg/jade_vm_wasm.js` (gitignored); the
+runners build it on demand via `wasm-pack build --target nodejs crates/jade-vm-wasm`
+when a run names the cell, and `--update-wasm` forces a rebuild after editing
+`jade-vm-wasm`. Its ratchet file (`expectations/wasm-interp.json`) is seeded from the
+Phase-1/2 subset; current known deltas from `interp` are the four
+`language/literals/numeric/S7.8.3_A4.1_T{1,2,7,8}.js` tests (they call
+`assert.throws`, which `harness.ts` deliberately omits until exception opcodes exist —
+the TS interpreter correctly fails them while the WASM interpreter's `Fn`/call path
+silently treats the missing member as inert, a genuine backend gap to fix, not mask).
 
 ## Invariants
 

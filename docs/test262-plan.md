@@ -243,6 +243,17 @@ native-Rust cell with `jade-tenant-rt` + `jade-primordial-rt` globals.
 *Done when:* the native-Rust cell's per-test verdicts match row 1's on the compilable subset
 except where the manifest names a genuine Rust/TS primordial gap.
 
+*Phase 3 progress:* row 6 (`wasm-interp`) is landed and ratcheted — same bytecode through
+`jade-vm-wasm`'s generated `run_virtualized` in Node, its bundle built on demand (gitignored,
+`--update-wasm` to force), matching `interp` verdict-for-verdict on 8 of the 9 Phase-1
+directories. The 4 remaining deltas (`language/literals/numeric/S7.8.3_A4.1_T{1,2,7,8}.js`)
+are a real WASM-backend `Fn`/call-path gap around the deliberately-absent `assert.throws`
+(see `packages/jade-js/test262/README.md`), recorded in `expectations/wasm-interp.json`.
+Row 7 (native Rust) is still open: it needs a first-class `jade-tenant-rt` object-manager
+tenant (the current `TestTenant` is test-only and can't run bytecode — no FN-op closures)
+and the Rust equivalent of `createPrimordialRealm` + the test262 harness primordials before
+it can execute the Phase-1 subset.
+
 **Phase 4 — Globals and built-ins.** Grow realm coverage toward `built-ins/{Object,Function,
 Reflect,Proxy,Promise}` and (with `BufferHooks`) `ArrayBuffer`/typed arrays; tenant-matrix
 sweep (single/merged/narrow/rewrite wrappers) on the growing subset; SES mode on one row.

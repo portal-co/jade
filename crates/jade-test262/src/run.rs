@@ -12,7 +12,7 @@ use crate::model::{
     self, CellVerdict, Expectations, Report, TestOutcome, VerdictKind, REPORT_VERSION,
 };
 use crate::node;
-use crate::pipeline::{self, CompileVerdict, ENV_INTERP, NODE_ENVS};
+use crate::pipeline::{self, CompileVerdict, ENV_INTERP, INTERP_ENVS, NODE_ENVS};
 
 pub struct RunConfig {
     /// `smoke` (the synthetic fixtures) or `test262:<subdir>` (a vendored subtree).
@@ -103,6 +103,11 @@ pub fn run(cfg: &RunConfig) -> Result<Report, String> {
                 jobs.push(job.clone());
             }
         }
+    }
+    // `wasm-interp` needs the Node-side WASM bundle (`packages/jade-js/test262/pkg`);
+    // build it once per run that requests the cell rather than checking artifacts in.
+    if cfg.envs.iter().any(|e| e == pipeline::ENV_WASM_INTERP) {
+        node::ensure_wasm_bundle()?;
     }
     let verdicts = node::run_cells(&jobs, cfg.timeout);
     for ((ti, env), verdict) in job_refs.into_iter().zip(verdicts) {
@@ -377,7 +382,7 @@ fn compile_state(meta: &TestMeta, src: &str, envs: &[String]) -> CompileState {
             let jit_envs: Vec<&str> = envs
                 .iter()
                 .map(String::as_str)
-                .filter(|e| NODE_ENVS.contains(e))
+                .filter(|e| NODE_ENVS.contains(e) && *e != ENV_INTERP)
                 .collect();
             let tiers = if jit_envs.is_empty() {
                 BTreeMap::new()
@@ -425,7 +430,7 @@ fn plan_cell(
         "tenant": cfg.tenant,
         "harness": !meta.has_flag("raw"),
     });
-    if env == ENV_INTERP {
+    if INTERP_ENVS.contains(&env) {
         job["bytecode"] = serde_json::json!(bytes);
     } else if NODE_ENVS.contains(&env) {
         match tiers.get(env) {

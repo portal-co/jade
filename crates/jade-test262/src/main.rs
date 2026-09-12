@@ -90,6 +90,13 @@ fn run_shard(args: &[String]) -> ExitCode {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(node_timeout_default());
 
+    if args.iter().any(|a| a == "--update-wasm") {
+        if let Err(e) = portal_solutions_jade_test262::node::rebuild_wasm_bundle() {
+            eprintln!("run failed:\n{e}");
+            return ExitCode::FAILURE;
+        }
+    }
+
     let cfg = run::RunConfig {
         shard: shard.clone(),
         tenant: opt_value(args, "--tenant").unwrap_or_else(|| "multi".into()),
