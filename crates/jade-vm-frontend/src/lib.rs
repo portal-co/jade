@@ -242,9 +242,50 @@ fn check_no_captures(
     tfunc: &TFunc,
     global_ctxt: Option<swc_common::SyntaxContext>,
 ) -> Result<(), FrontendError> {
+    /// The function's *own* references — everything `TCfg::refs()` yields except the
+    /// transitive `Item::Func` externs it also folds in. Those externs can't be used
+    /// here: `TCfg::externs()` filters only by the nested cfg's `decls` (its `params`
+    /// live on `TFunc`, which `TCfg` can't see), so a nested function's *parameter*
+    /// would show up in this function's `refs()` as a false "capture". The walk
+    /// recurses into nested functions itself, checking each against its own
+    /// decls ∪ params, so descending here would also double-report.
+    fn own_refs(func: &TFunc) -> Vec<Ident> {
+        let mut out: Vec<Ident> = Vec::new();
+        for block in func.cfg.blocks.iter() {
+            for stmt in &block.1.stmts {
+                out.extend(stmt.left.as_ref().refs().cloned());
+                // `Item::refs()`'s `Func` arm is empty — nested bodies never leak here.
+                out.extend(stmt.right.refs().cloned());
+            }
+            match &block.1.post.term {
+                TTerm::Return(r) => out.extend(r.iter().cloned()),
+                TTerm::Throw(t) => out.push(t.clone()),
+                TTerm::Jmp(_) | TTerm::Default => {}
+                TTerm::CondJmp { cond, .. } => out.push(cond.clone()),
+                TTerm::Switch { x, blocks, .. } => {
+                    out.push(x.clone());
+                    out.extend(blocks.iter().map(|case| case.0.clone()));
+                }
+                TTerm::Tail { callee, args } => {
+                    match callee {
+                        TCallee::Val(f) | TCallee::PrivateMember { func: f, .. } => out.push(f.clone()),
+                        TCallee::Member { func, member } => {
+                            out.push(func.clone());
+                            out.push(member.clone());
+                        }
+                        TCallee::Import | TCallee::Super | TCallee::SuperMember { .. } | TCallee::Eval => {}
+                        _ => {}
+                    }
+                    out.extend(args.iter().map(|a| a.value.clone()));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
     fn walk(func: &TFunc, global_ctxt: Option<swc_common::SyntaxContext>) -> Result<(), FrontendError> {
         let mut names = Vec::new();
-        for id in func.cfg.refs() {
+        for id in own_refs(func) {
             if Some(id.1) == global_ctxt || func.cfg.decls.contains(&id) || func.params.contains(&id) {
                 continue;
             }
@@ -296,9 +337,6 @@ enum FnPhase<'a> {
 
 struct FnLowering<'a> {
     tcfg: &'a TCfg,
-    /// The function's declared parameters — not globals, even though the bytecode has
-    /// no parameter-binding opcode yet (their slots stay unwritten for now).
-    params: &'a [Ident],
     /// The mark `globals::resolve_globals` put on "the realm global object" idents, if
     /// the program references the global at all. Survives the SSA name mangle.
     global_ctxt: Option<swc_common::SyntaxContext>,
@@ -324,7 +362,6 @@ impl<'a> FnLowering<'a> {
     ) -> Self {
         let mut lowering = Self {
             tcfg,
-            params,
             global_ctxt,
             global_slot: None,
             slots: HashMap::new(),
@@ -337,7 +374,40 @@ impl<'a> FnLowering<'a> {
             // slot), and make `compile_blocks` emit `GLOBAL` into it at the entry.
             lowering.global_slot = Some(lowering.fresh_slot());
         }
+        // Reserve one slot per declared parameter, deterministically and before any
+        // local. The enclosing function's `Item::Func` arm advertises exactly this
+        // list (via `param_slot_ids`, the same deterministic assignment) in the `FN`
+        // op's `params` operand, and every backend's closure binds `args[i]` into
+        // `state[param_slots[i]]` at call time.
+        for param in params {
+            lowering.slot_for(param);
+        }
         lowering
+    }
+
+    /// The slot ids `FnLowering::new` assigns to `params`, in argument order —
+    /// deterministic per (`params`, `global_ctxt`) so the measure and emit phases (and
+    /// the *enclosing* function's `FN` emission, which never builds the nested
+    /// function's own `FnLowering`) all agree on it byte-for-byte.
+    fn param_slot_ids(
+        params: &[Ident],
+        global_ctxt: Option<swc_common::SyntaxContext>,
+    ) -> Vec<u32> {
+        let mut next = if global_ctxt.is_some() { 1 } else { 0 };
+        let mut seen: HashMap<Ident, u32> = HashMap::new();
+        params
+            .iter()
+            .map(|p| {
+                if let Some(&s) = seen.get(p) {
+                    s
+                } else {
+                    let s = next;
+                    next += 1;
+                    seen.insert(p.clone(), s);
+                    s
+                }
+            })
+            .collect()
     }
 }
 
@@ -775,6 +845,30 @@ impl<'a> FnLowering<'a> {
                 // 0=sync, 1=async, 2=sync generator, 3=async generator — the same 2-bit
                 // encoding every JIT tier's `fn_variant`/`effectiveVariant` decodes.
                 let variant_val = (func.is_async as u32) | ((func.is_generator as u32) << 1);
+                // The nested function's declared-parameter slots (its own state space),
+                // advertised as an array value so every backend's closure binds
+                // `args[i]` into `state[param_slots[i]]` at call time. Literal(0) for
+                // a parameterless function keeps the common case op-free.
+                let param_slots = Self::param_slot_ids(&func.params, self.global_ctxt);
+                let params_op = if param_slots.is_empty() {
+                    Operand::Literal(0)
+                } else {
+                    let mut item_slots = Vec::with_capacity(param_slots.len());
+                    for slot_id in param_slots {
+                        let tmp = self.fresh_slot();
+                        out.extend(
+                            Operation::Lit32 {
+                                dest: tmp,
+                                val: slot_id,
+                            }
+                            .emit(),
+                        );
+                        item_slots.push(Operand::StateRef(tmp));
+                    }
+                    let arr_slot = self.fresh_slot();
+                    out.extend(Operation::Arr(item_slots, arr_slot).emit());
+                    Operand::StateRef(arr_slot)
+                };
                 out.extend(
                     Operation::Fn {
                         variant: Operand::Literal(variant_val),
@@ -782,6 +876,7 @@ impl<'a> FnLowering<'a> {
                         // (`spanner`) aren't wired up yet — see `docs/closure-capture-plan.md`.
                         closure_args: Operand::Literal(0),
                         spanner: Operand::Literal(0),
+                        params: params_op,
                         j,
                         dest,
                     }
@@ -1044,6 +1139,65 @@ mod tests {
         assert_eq!(
             run_js_with_tenant("var inner = function () { return 42; }; return inner();"),
             "42"
+        );
+    }
+
+    /// Declared parameters bind call arguments: the FN op's `params` operand advertises
+    /// the nested function's parameter slots and every backend's closure writes
+    /// `args[i]` into `state[params[i]]` at call time.
+    #[test]
+    fn nested_closure_parameter_receives_its_argument() {
+        assert_eq!(
+            run_js_with_tenant("var id = function (x) { return x; }; return id(42);"),
+            "42"
+        );
+    }
+
+    #[test]
+    fn nested_closure_two_parameters_bind_in_order() {
+        assert_eq!(
+            run_js_with_tenant(
+                "var eq = function (a, b) { return a === b; }; return eq(7, 7);"
+            ),
+            "true"
+        );
+        assert_eq!(
+            run_js_with_tenant(
+                "var eq = function (a, b) { return a === b; }; return eq(7, 8);"
+            ),
+            "false"
+        );
+    }
+
+    /// A missing argument binds `undefined`; extras are dropped — ordinary JS
+    /// parameter semantics.
+    #[test]
+    fn nested_closure_missing_and_extra_arguments() {
+        assert_eq!(
+            run_js_with_tenant("var second = function (a, b) { return b; }; return second(1);"),
+            "undefined"
+        );
+        assert_eq!(
+            run_js_with_tenant("var id = function (x) { return x; }; return id(11, 22, 33);"),
+            "11"
+        );
+    }
+
+    /// Parameters are per-function slots: two calls see their own arguments, and a
+    /// parameterless callee's encoding stays `Literal(0)` (no binding work at all).
+    #[test]
+    fn nested_closure_parameters_do_not_leak_across_calls() {
+        assert_eq!(
+            run_js_with_tenant(
+                "var id = function (x) { return x; }; var a = id(1); var b = id(2); return a === b;"
+            ),
+            "false"
+        );
+        assert_eq!(
+            run_js_with_tenant(
+                "var id = function (x) { return x; }; id(5); return id(6);"
+            ),
+            "6"
         );
     }
 

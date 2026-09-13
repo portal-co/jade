@@ -15,7 +15,7 @@ function enumVariant(name: string, info: any): string {
     case "dest":
       return `    ${v}(u32),`;
     case "fn":
-      return `    Fn { variant: crate::Operand, closure_args: crate::Operand, spanner: crate::Operand, j: u32, dest: u32 },`;
+      return `    Fn { variant: crate::Operand, closure_args: crate::Operand, spanner: crate::Operand, params: crate::Operand, j: u32, dest: u32 },`;
     case "lit32":
       return `    Lit32 { dest: u32, val: u32 },`;
     case "bool":
@@ -56,7 +56,7 @@ function parseArm(name: string, info: any): string {
     case "dest":
       return `            ${id} => { let (dest,no) = read_u32_le(buf, off)?; off = no; Some((Operation::${v}(dest), &buf[off..])) },`;
     case "fn":
-      return `            ${id} => { let (var_r,no)=read_u32_le(buf,off)?; off=no; let (clos_r,no)=read_u32_le(buf,off)?; off=no; let (span_r,no)=read_u32_le(buf,off)?; off=no; let (j,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Fn{ variant: crate::Operand::decode(var_r), closure_args: crate::Operand::decode(clos_r), spanner: crate::Operand::decode(span_r), j, dest }, &buf[off..])) },`;
+      return `            ${id} => { let (var_r,no)=read_u32_le(buf,off)?; off=no; let (clos_r,no)=read_u32_le(buf,off)?; off=no; let (span_r,no)=read_u32_le(buf,off)?; off=no; let (par_r,no)=read_u32_le(buf,off)?; off=no; let (j,no)=read_u32_le(buf,off)?; off=no; let (dest,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Fn{ variant: crate::Operand::decode(var_r), closure_args: crate::Operand::decode(clos_r), spanner: crate::Operand::decode(span_r), params: crate::Operand::decode(par_r), j, dest }, &buf[off..])) },`;
     case "lit32":
       return `            ${id} => { let (dest,no)=read_u32_le(buf,off)?; off=no; let (val,no)=read_u32_le(buf,off)?; off=no; Some((Operation::Lit32{ dest, val }, &buf[off..])) },`;
     case "bool":
@@ -110,7 +110,7 @@ function emitArm(name: string, info: any): string {
     case "dest":
       return `            Operation::${v}(dest) => { ${hdr} wtr.extend_from_slice(&dest.to_le_bytes()); },`;
     case "fn":
-      return `            Operation::Fn{variant, closure_args, spanner, j, dest} => { ${hdr} wtr.extend_from_slice(&variant.encode().to_le_bytes()); wtr.extend_from_slice(&closure_args.encode().to_le_bytes()); wtr.extend_from_slice(&spanner.encode().to_le_bytes()); wtr.extend_from_slice(&j.to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },`;
+      return `            Operation::Fn{variant, closure_args, spanner, params, j, dest} => { ${hdr} wtr.extend_from_slice(&variant.encode().to_le_bytes()); wtr.extend_from_slice(&closure_args.encode().to_le_bytes()); wtr.extend_from_slice(&spanner.encode().to_le_bytes()); wtr.extend_from_slice(&params.encode().to_le_bytes()); wtr.extend_from_slice(&j.to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },`;
     case "lit32":
       return `            Operation::Lit32{dest, val} => { ${hdr} wtr.extend_from_slice(&dest.to_le_bytes()); wtr.extend_from_slice(&val.to_le_bytes()); },`;
     case "bool":
@@ -164,7 +164,7 @@ function genArm(name: string, info: any): string {
     case "dest":
       return `            Operation::${v}(dest) => { ${hdr} for b in dest.to_le_bytes() { yield_! b; } },`;
     case "fn":
-      return `            Operation::Fn{variant, closure_args, spanner, j, dest} => { ${hdr} for b in variant.encode().to_le_bytes() { yield_! b; } for b in closure_args.encode().to_le_bytes() { yield_! b; } for b in spanner.encode().to_le_bytes() { yield_! b; } for b in j.to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },`;
+      return `            Operation::Fn{variant, closure_args, spanner, params, j, dest} => { ${hdr} for b in variant.encode().to_le_bytes() { yield_! b; } for b in closure_args.encode().to_le_bytes() { yield_! b; } for b in spanner.encode().to_le_bytes() { yield_! b; } for b in params.encode().to_le_bytes() { yield_! b; } for b in j.to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },`;
     case "lit32":
       return `            Operation::Lit32{dest, val} => { ${hdr} for b in dest.to_le_bytes() { yield_! b; } for b in val.to_le_bytes() { yield_! b; } },`;
     case "bool":

@@ -90,6 +90,7 @@ pub enum Operation {
         variant: crate::Operand,
         closure_args: crate::Operand,
         spanner: crate::Operand,
+        params: crate::Operand,
         j: u32,
         dest: u32,
     },
@@ -267,6 +268,8 @@ impl Operation {
                 off = no;
                 let (span_r, no) = read_u32_le(buf, off)?;
                 off = no;
+                let (par_r, no) = read_u32_le(buf, off)?;
+                off = no;
                 let (j, no) = read_u32_le(buf, off)?;
                 off = no;
                 let (dest, no) = read_u32_le(buf, off)?;
@@ -276,6 +279,7 @@ impl Operation {
                         variant: crate::Operand::decode(var_r),
                         closure_args: crate::Operand::decode(clos_r),
                         spanner: crate::Operand::decode(span_r),
+                        params: crate::Operand::decode(par_r),
                         j,
                         dest,
                     },
@@ -604,7 +608,7 @@ impl Operation {
                 Operation::Yield{val, dest} => { yield_!(2 as u8); yield_!((2>>8) as u8); for b in val.encode().to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },
                 Operation::Yieldstar{val, dest} => { yield_!(3 as u8); yield_!((3>>8) as u8); for b in val.encode().to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },
                 Operation::Global(dest) => { yield_!(4 as u8); yield_!((4>>8) as u8); for b in dest.to_le_bytes() { yield_! b; } },
-                Operation::Fn{variant, closure_args, spanner, j, dest} => { yield_!(5 as u8); yield_!((5>>8) as u8); for b in variant.encode().to_le_bytes() { yield_! b; } for b in closure_args.encode().to_le_bytes() { yield_! b; } for b in spanner.encode().to_le_bytes() { yield_! b; } for b in j.to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },
+                Operation::Fn{variant, closure_args, spanner, params, j, dest} => { yield_!(5 as u8); yield_!((5>>8) as u8); for b in variant.encode().to_le_bytes() { yield_! b; } for b in closure_args.encode().to_le_bytes() { yield_! b; } for b in spanner.encode().to_le_bytes() { yield_! b; } for b in params.encode().to_le_bytes() { yield_! b; } for b in j.to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },
                 Operation::Lit32{dest, val} => { yield_!(6 as u8); yield_!((6>>8) as u8); for b in dest.to_le_bytes() { yield_! b; } for b in val.to_le_bytes() { yield_! b; } },
                 #[cfg(feature = "alloc")]
                 Operation::Arr(items, dest) => { yield_!(7 as u8); yield_!((7>>8) as u8); for b in (items.len() as u32).to_le_bytes() { yield_! b; } for x in items { for b in x.encode().to_le_bytes() { yield_! b; } } for b in dest.to_le_bytes() { yield_! b; } },
@@ -679,6 +683,7 @@ impl Operation {
                 variant,
                 closure_args,
                 spanner,
+                params,
                 j,
                 dest,
             } => {
@@ -687,6 +692,7 @@ impl Operation {
                 wtr.extend_from_slice(&variant.encode().to_le_bytes());
                 wtr.extend_from_slice(&closure_args.encode().to_le_bytes());
                 wtr.extend_from_slice(&spanner.encode().to_le_bytes());
+                wtr.extend_from_slice(&params.encode().to_le_bytes());
                 wtr.extend_from_slice(&j.to_le_bytes());
                 wtr.extend_from_slice(&dest.to_le_bytes());
             }

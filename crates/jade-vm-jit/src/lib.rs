@@ -358,15 +358,32 @@ impl VecRegistry {
     pub fn new() -> Self {
         Self { decls: Vec::new() }
     }
-    /// The accumulated `const __fnN = …;` declarations, newline-joined.
+    /// The accumulated `const __fnN = …;` declarations, newline-joined, preceded by the
+    /// shared `__mkfn` closure factory whenever any function was registered. `op_fn`
+    /// emits only a plain `__mkfn(__fnN, params)` call at the FN site — never a nested
+    /// function *expression* — because Tier 2's TFunc/SSA round-trip reconstructs the
+    /// enclosing body and mangles rest/spread-bearing nested closures; prelude text is
+    /// never round-tripped.
     pub fn prelude(&self) -> String {
-        self.decls.join("\n")
+        if self.decls.is_empty() {
+            return String::new();
+        }
+        format!("{MKFN_HELPER}\n{}", self.decls.join("\n"))
     }
     /// The raw declaration list.
     pub fn decls(&self) -> &[String] {
         &self.decls
     }
 }
+
+/// The shared closure factory every `op_fn` site calls: builds the guest-visible
+/// function that creates the child `state`, binds call arguments into the nested
+/// function's declared-parameter slots (`paramSlots[i]` gets `args[i]`; a missing
+/// argument writes `undefined`, extras are dropped — ordinary JS parameter
+/// semantics), and forwards into the registered body. Plain pass-through for the
+/// registered body's variant (calling a generator/async function returns its
+/// generator/promise either way).
+const MKFN_HELPER: &str = "const __mkfn = (reference, paramSlots) => { const w = function (tenant, nt, ...args) { const state = Object.create(null); for (let i = 0; i < paramSlots.length; i++) state[paramSlots[i]] = args[i]; return reference(tenant, nt, state, ...args); }; markGuestFn(w, {abi: \"leading-tenant-nt\"}); return w; };";
 
 impl FnRegistry for VecRegistry {
     fn register(&mut self, variant: FnVariant, params: &[&str], body: &str) -> String {
@@ -544,6 +561,7 @@ impl<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>> Ops for JsJit<R, N> {
         variant: JsVar,
         _closure_args: JsVar,
         _spanner: JsVar,
+        params: JsVar,
         j: u32,
         _parent_state: JsVar,
     ) -> Result<JsVar, String> {
@@ -564,13 +582,13 @@ impl<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>> Ops for JsJit<R, N> {
         // silently downgrading every nested closure to Tier 0's block-dispatch loop; fall
         // back to Tier 0/1 (this crate's own `emit_program`/`emit_reloop_program`, chosen
         // via `prefer_reloop`) only when no override is set.
-        // An override (Tier 2) is responsible for its own `state` initialization — its
-        // TFunc/SSA round-trip hoists a `var` for every referenced free identifier it
-        // sees, including `state` itself, so an *external* `const state = ...;` prefix
-        // here would collide with that hoisted `var` (`const`/`var` for the same name in
-        // one scope is a hard `SyntaxError`, unlike the harmless `var`/`var` or
-        // parameter/`var` pairs the Tier 0/1 fallback produces) — see
-        // `jade-vm-jit-swc`'s `with_nested_body_compiler`.
+        // The registered function receives its child `state` as an argument (after
+        // `tenant`/`nt`), created and populated by the per-site wrapper below — a
+        // nested body never initializes `state` itself, so an override (Tier 2)
+        // returns bare statements too. Its TFunc/SSA round-trip's hoisted `var state;`
+        // against the `state` *parameter* is a harmless parameter/`var` pair (a
+        // `const` prefix here would instead collide with that hoisted `var` — see
+        // `jade-vm-jit-swc`'s `with_nested_body_compiler`).
         let body = if let Some(f) = self.cfg.nested_body_compiler.clone() {
             f(
                 code,
@@ -597,20 +615,27 @@ impl<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>> Ops for JsJit<R, N> {
             } else {
                 emit_program(&mut nested, code, j as usize)?;
             }
-            format!(
-                "const state = Object.create(null);\n{}",
-                nested.emit.into_inner().buf
-            )
+            nested.emit.into_inner().buf
         };
         // NOTE: closure-slot capture and decorator (`spanner`) application are
         // not yet wired in this first backend — see `docs/closure-capture-plan.md`.
         let reference = self
             .reg
             .borrow_mut()
-            .register(eff, &["tenant", "nt", "...args"], &body);
+            .register(eff, &["tenant", "nt", "state", "...args"], &body);
+        // The guest-visible function comes from the prelude's `__mkfn` factory (see
+        // `VecRegistry::prelude`): a plain call at the FN site, never a nested
+        // function expression. `params` is the FN op's operand — an array of slot
+        // ids, or falsy for a parameterless function.
+        let p = self.fresh();
+        self.line(format!("const v{p} = {params} || [];"));
         let adopted = tenant_drive(
             &self.cfg.names,
-            tenant_call(&self.cfg.names, JadeTenantMethod::MakeFunction, &reference),
+            tenant_call(
+                &self.cfg.names,
+                JadeTenantMethod::MakeFunction,
+                &format!("__mkfn({reference}, v{p})"),
+            ),
             self.cfg.add_async,
             self.cfg.add_gen,
         );
@@ -1231,6 +1256,7 @@ mod tests {
             variant,
             closure_args: Operand::Literal(0),
             spanner: Operand::Literal(0),
+            params: Operand::Literal(0),
             j,
             dest: 5,
         };
@@ -1254,7 +1280,7 @@ mod tests {
         .unwrap();
         let prelude = reg.prelude();
         assert!(
-            prelude.contains("function(tenant, nt, ...args)"),
+            prelude.contains("function(tenant, nt, state, ...args)"),
             "got:\n{prelude}"
         );
         assert!(js.contains("__fn0"), "got:\n{js}");
@@ -1289,17 +1315,17 @@ mod tests {
             reg.prelude()
         };
         assert!(
-            kw(1).contains("async function(tenant, nt, ...args)"),
+            kw(1).contains("async function(tenant, nt, state, ...args)"),
             "async: {}",
             kw(1)
         );
         assert!(
-            kw(2).contains("function*(tenant, nt, ...args)"),
+            kw(2).contains("function*(tenant, nt, state, ...args)"),
             "gen: {}",
             kw(2)
         );
         assert!(
-            kw(3).contains("async function*(tenant, nt, ...args)"),
+            kw(3).contains("async function*(tenant, nt, state, ...args)"),
             "asyncgen: {}",
             kw(3)
         );

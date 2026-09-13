@@ -184,7 +184,7 @@ thread_local! {
     static FN_REGISTRY: WeakMap = WeakMap::new();
 }
 
-fn registry_set(fn_val: &JsValue, variant: u32, j: u32, closure_slots: &[u32]) {
+fn registry_set(fn_val: &JsValue, variant: u32, j: u32, closure_slots: &[u32], param_slots: &[u32]) {
     FN_REGISTRY.with(|wm| {
         let entry = create_null_obj();
         let _ = Reflect::set(
@@ -202,11 +202,16 @@ fn registry_set(fn_val: &JsValue, variant: u32, j: u32, closure_slots: &[u32]) {
             arr.set_index(i as u32, s);
         }
         let _ = Reflect::set(&entry, &JsValue::from_str("s"), &arr);
+        let parr = Uint32Array::new_with_length(param_slots.len() as u32);
+        for (i, &s) in param_slots.iter().enumerate() {
+            parr.set_index(i as u32, s);
+        }
+        let _ = Reflect::set(&entry, &JsValue::from_str("p"), &parr);
         wm.set(fn_val.unchecked_ref::<Object>(), &entry);
     });
 }
 
-fn registry_get(fn_val: &JsValue) -> Option<(u32, u32, Vec<u32>)> {
+fn registry_get(fn_val: &JsValue) -> Option<(u32, u32, Vec<u32>, Vec<u32>)> {
     FN_REGISTRY.with(|wm| {
         let entry = wm.get(fn_val.unchecked_ref::<Object>());
         if entry.is_undefined() {
@@ -221,8 +226,25 @@ fn registry_get(fn_val: &JsValue) -> Option<(u32, u32, Vec<u32>)> {
         let s_val = Reflect::get(&entry, &JsValue::from_str("s")).ok()?;
         let s_arr: Uint32Array = s_val.unchecked_into();
         let slots: Vec<u32> = (0..s_arr.length()).map(|i| s_arr.get_index(i)).collect();
-        Some((v, j, slots))
+        // Entries predate the params field only in stale caches; tolerate absence.
+        let p_val = Reflect::get(&entry, &JsValue::from_str("p")).ok()?;
+        let params: Vec<u32> = if p_val.is_undefined() {
+            Vec::new()
+        } else {
+            let p_arr: Uint32Array = p_val.unchecked_into();
+            (0..p_arr.length()).map(|i| p_arr.get_index(i)).collect()
+        };
+        Some((v, j, slots, params))
     })
+}
+
+/// Bind call arguments into a child state's declared-parameter slots: `args[i]` goes to
+/// slot `param_slots[i]`, a missing argument writes `undefined` (same as an unwritten
+/// slot), and extras are dropped — ordinary JS parameter semantics.
+fn bind_params(child: &JsValue, param_slots: &[u32], args: &Array) {
+    for (i, &slot) in param_slots.iter().enumerate() {
+        s_set(child, slot, args.get(i as u32));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +396,7 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         variant: JsValue,
         closure_args: JsValue,
         spanner: JsValue,
+        params: JsValue,
         j: u32,
         parent_state: JsValue,
     ) -> Result<JsValue, JsValue> {
@@ -383,13 +406,22 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         // doubleGen: addGen applied on top of a declared generator → YIELD tagging
         let child_double_gen = self.add_gen && (declared_variant & 2 != 0);
 
-        let closure_slots: Vec<u32> = {
-            let arr: Array = closure_args.unchecked_into();
+        // `closure_args`/`params` are `Operand::Literal(0)` when absent (see the FN
+        // handler in packages/jade-data) — falsy means an empty slot list, anything
+        // else is an array of slot ids.
+        let slot_list = |v: JsValue| -> Vec<u32> {
+            if v.is_null() || v.is_undefined() || v.as_f64() == Some(0.0) {
+                return Vec::new();
+            }
+            let arr: Array = v.unchecked_into();
             (0..arr.length())
                 .map(|i| arr.get(i).as_f64().unwrap_or(0.0) as u32)
                 .collect()
         };
+        let closure_slots: Vec<u32> = slot_list(closure_args);
+        let param_slots: Vec<u32> = slot_list(params);
         let closure_slots_reg = closure_slots.clone();
+        let param_slots_reg = param_slots.clone();
 
         let (spanner_fn, spans): (JsValue, Vec<JsValue>) =
             if spanner.is_null() || spanner.is_undefined() {
@@ -410,6 +442,7 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         let inner = Closure::<dyn Fn(JsValue, Array) -> JsValue>::new(
             move |js_this: JsValue, js_args: Array| {
                 let child = build_child_state(&parent_state, &closure_slots);
+                bind_params(&child, &param_slots, &js_args);
                 dispatch_variant(
                     effective_variant,
                     &code_c,
@@ -445,7 +478,7 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         // Register with the effective variant for backend-local bookkeeping. The
         // public callable is adopted through makeFunction below, so ownership
         // and tenant-side function properties are established uniformly.
-        registry_set(&spanned, effective_variant, j, &closure_slots_reg);
+        registry_set(&spanned, effective_variant, j, &closure_slots_reg, &param_slots_reg);
         Ok(tenant_drive(
             self.tenant,
             "makeFunction",
@@ -520,7 +553,7 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
             call_args.set(i as u32, a);
         }
 
-        if let Some((variant_idx, j, closure_slots)) = registry_get(&fn_val) {
+        if let Some((variant_idx, j, closure_slots, param_slots)) = registry_get(&fn_val) {
             if variant_idx == 0 {
                 // Sync jade-to-jade: dispatch directly in Rust, no state flush.
                 // `this_val` is deliberately not threaded: no opcode lets a guest
@@ -529,6 +562,7 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
                 // opcode ever lands, thread it through `run_sync` here.
                 let _ = &this_val;
                 let child = build_child_state_fast(&closure_slots, &mut self.cache);
+                bind_params(&child, &param_slots, &call_args);
                 let res = run_sync(
                     code,
                     &child,

@@ -121,13 +121,12 @@ where
 ///
 /// Unlike Tier 0/1's raw per-op emission, Tier 2's `TFunc`/SSA round-trip *hoists a `var`
 /// declaration for every referenced free identifier it sees* — including `state` itself
-/// (and `tenant`, `nt`, ...), not just Jade's own `v{n}` temporaries. `op_fn`'s normal
-/// nested-body wrapping (`const state = Object.create(null);\n{stmts}`) would collide with
-/// that hoisted `var state;` (mixing `const`/`var` for the same name in the same scope is
-/// a hard `SyntaxError`, unlike `var`/`var` or a parameter/`var` pair, both of which are
-/// harmless redeclarations) — so this closure's own output initializes the *already
-/// var-hoisted* `state` via a plain assignment instead, and `op_fn` skips its usual const
-/// prefix whenever `nested_body_compiler` is in use (see `op_fn`'s doc comment).
+/// (and `tenant`, `nt`, ...), not just Jade's own `v{n}` temporaries. `op_fn` threads the
+/// child `state` in as a *parameter* of the registered function (its per-site wrapper
+/// creates and populates it, including parameter-slot binding), so a nested body never
+/// initializes `state` at all: this closure returns bare statements, and the hoisted
+/// `var state;` against the `state` parameter is a harmless parameter/`var` pair (an
+/// initializing `const state = ...;` prefix would instead be a hard `SyntaxError`).
 fn with_nested_body_compiler<N>(mut cfg: Config<N>, reg: Rc<RefCell<VecRegistry>>) -> Config<N>
 where
     N: HostMethodNames<JadeTenantMethod>,
@@ -136,10 +135,9 @@ where
     cfg.nested_body_compiler = Some(Rc::new(
         move |code: &[u8], start_ip: usize, is_gen: bool, is_async: bool, double_gen: bool| {
             let inner_cfg = with_nested_body_compiler(base_cfg.clone(), reg.clone());
-            let stmts = compile_body(
+            compile_body(
                 code, start_ip, &inner_cfg, is_gen, is_async, double_gen, &reg,
-            )?;
-            Ok(format!("state = Object.create(null);\n{stmts}"))
+            )
         },
     ));
     cfg
@@ -911,6 +909,7 @@ mod tests {
             variant: Operand::Literal(2), // declared sync generator
             closure_args: Operand::Literal(0),
             spanner: Operand::Literal(0),
+            params: Operand::Literal(0),
             j,
             dest: 0,
         };
@@ -988,6 +987,7 @@ mod tests {
             variant: Operand::Literal(2),
             closure_args: Operand::Literal(0),
             spanner: Operand::Literal(0),
+            params: Operand::Literal(0),
             j,
             dest: 0,
         };

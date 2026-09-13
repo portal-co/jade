@@ -18,7 +18,7 @@ function opsMethod(name: string, args: string): string | null {
     case "member_set":
       return `    fn op_set(&self, obj: Self::Value, key: Self::Value, val: Self::Value) -> Self::Value;`;
     case "fn":
-      return `    fn op_fn(&mut self, code: &[u8], variant: Self::Value, closure_args: Self::Value, spanner: Self::Value, j: u32, parent_state: Self::Value) -> Result<Self::Value, Self::Error>;`;
+      return `    fn op_fn(&mut self, code: &[u8], variant: Self::Value, closure_args: Self::Value, spanner: Self::Value, params: Self::Value, j: u32, parent_state: Self::Value) -> Result<Self::Value, Self::Error>;`;
     case "array":
       return `    fn ${mn}(&self, items: Vec<Self::Value>) -> Self::Value;`;
     case "object":
@@ -87,13 +87,14 @@ function execArm(name: string, args: string): string | null {
             Ok(())
         }`;
     case "fn":
-      return `        Operation::Fn { variant, closure_args, spanner, j, dest } => {
+      return `        Operation::Fn { variant, closure_args, spanner, params, j, dest } => {
             platform.flush();
             let parent = platform.state_ref();
             let r0 = resolve(variant, platform);
             let r1 = resolve(closure_args, platform);
             let r2 = resolve(spanner, platform);
-            let fn_val = platform.op_fn(code, r0, r1, r2, j, parent)?;
+            let r3 = resolve(params, platform);
+            let fn_val = platform.op_fn(code, r0, r1, r2, r3, j, parent)?;
             platform.set(dest, fn_val);
             Ok(())
         }`;

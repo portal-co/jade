@@ -49,6 +49,7 @@ pub trait Ops {
         variant: Self::Value,
         closure_args: Self::Value,
         spanner: Self::Value,
+        params: Self::Value,
         j: u32,
         parent_state: Self::Value,
     ) -> Result<Self::Value, Self::Error>;
@@ -116,6 +117,7 @@ where
             variant,
             closure_args,
             spanner,
+            params,
             j,
             dest,
         } => {
@@ -124,7 +126,8 @@ where
             let r0 = resolve(variant, platform);
             let r1 = resolve(closure_args, platform);
             let r2 = resolve(spanner, platform);
-            let fn_val = platform.op_fn(code, r0, r1, r2, j, parent)?;
+            let r3 = resolve(params, platform);
+            let fn_val = platform.op_fn(code, r0, r1, r2, r3, j, parent)?;
             platform.set(dest, fn_val);
             Ok(())
         }

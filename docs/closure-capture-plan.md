@@ -1,5 +1,15 @@
 # Plan: free-variable capture analysis for nested closures
 
+> **Update (parameters wired):** the `FN` opcode now carries a fourth LSB operand,
+> `params` (`[LSB variant][LSB closure_args][LSB spanner][LSB params][raw j][raw dest]`):
+> `Operand::Literal(0)` for a parameterless function, else a `StateRef` to an array of
+> the nested function's own parameter slot ids (assigned deterministically by
+> `FnLowering::new`, right after the optional global slot). Every backend's closure
+> binds `args[i]` into `state[params[i]]` at call time (missing → `undefined`, extras
+> dropped). `closure_args`/`spanner` remain `Literal(0)` — the capture design below is
+> unchanged; parameter binding deliberately does *not* alias the enclosing state, so it
+> shares no machinery with (and does not block) by-reference capture.
+
 ## Current state
 
 `crates/jade-vm-frontend` now lowers nested function/closure literals

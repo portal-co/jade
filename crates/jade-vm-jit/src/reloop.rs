@@ -772,6 +772,7 @@ mod tests {
             variant: Operand::Literal(0),
             closure_args: Operand::Literal(0),
             spanner: Operand::Literal(0),
+            params: Operand::Literal(0),
             j,
             dest: 0,
         };

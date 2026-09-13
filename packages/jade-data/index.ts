@@ -5,7 +5,7 @@ export const opcodes: { [Op in Opcode]: OpcodeInfo } = freeze({
   YIELD:      freeze({ id: 2,  args: "src_dest" }),  // [LSB val] [raw dest]
   YIELDSTAR:  freeze({ id: 3,  args: "src_dest" }),  // [LSB val] [raw dest]
   GLOBAL:     freeze({ id: 4,  args: "dest"     }),  // [raw dest]
-  FN:         freeze({ id: 5,  args: "fn"       }),  // [LSB variant][LSB closure_args][LSB spanner][raw j][raw dest]
+  FN:         freeze({ id: 5,  args: "fn"       }),  // [LSB variant][LSB closure_args][LSB spanner][LSB params][raw j][raw dest]
   LIT32:      freeze({ id: 6,  args: "lit32"    }),  // [raw dest][raw val]
   ARR:        freeze({ id: 7,  args: "array"    }),  // [raw len][LSB items…][raw dest]
   STR:        freeze({ id: 8,  args: "array"    }),  // [raw len][LSB items…][raw dest]
@@ -72,7 +72,11 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                     // docs/closure-capture-plan.md); a StateRef to an unwritten slot
                     // also reads as undefined. Both mean "absent": tolerate falsy.
                     ,closureArgs:number[]=[...(arg()||[])]
-                    ,[spanner,...spans]=(arg()||[(a:any)=>a]);
+                    ,[spanner,...spans]=(arg()||[(a:any)=>a])
+                    // params is Operand::Literal(0) for a parameterless function,
+                    // else a StateRef to an array of the nested function's own state
+                    // slot ids (one per declared parameter, in argument order).
+                    ,paramSlots:number[]=[...(arg()||[])];
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=__DRIVE__tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
@@ -84,6 +88,10 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                         configurable:false
                     };
                     const s=create(null);
+                    // Bind call arguments into the child's parameter slots; a missing
+                    // argument writes undefined (same as an unwritten slot), extras are
+                    // dropped — ordinary JS parameter semantics.
+                    for(let i=0;i<paramSlots.length;i++)s[paramSlots[i]]=args[i];
                     return apply(val,this,[
                         code,
                         (defineProperties(s,o),s),

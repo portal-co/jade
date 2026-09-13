@@ -35,7 +35,11 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                     // docs/closure-capture-plan.md); a StateRef to an unwritten slot
                     // also reads as undefined. Both mean "absent": tolerate falsy.
                     ,closureArgs:number[]=[...(arg()||[])]
-                    ,[spanner,...spans]=(arg()||[(a:any)=>a]);
+                    ,[spanner,...spans]=(arg()||[(a:any)=>a])
+                    // params is Operand::Literal(0) for a parameterless function,
+                    // else a StateRef to an array of the nested function's own state
+                    // slot ids (one per declared parameter, in argument order).
+                    ,paramSlots:number[]=[...(arg()||[])];
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=yield* tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
@@ -47,6 +51,10 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                         configurable:false
                     };
                     const s=create(null);
+                    // Bind call arguments into the child's parameter slots; a missing
+                    // argument writes undefined (same as an unwritten slot), extras are
+                    // dropped — ordinary JS parameter semantics.
+                    for(let i=0;i<paramSlots.length;i++)s[paramSlots[i]]=args[i];
                     return apply(val,this,[
                         code,
                         (defineProperties(s,o),s),
@@ -152,7 +160,11 @@ async function _runVirtualizedA(code: () => DataView, state: {[a: number]: any},
                     // docs/closure-capture-plan.md); a StateRef to an unwritten slot
                     // also reads as undefined. Both mean "absent": tolerate falsy.
                     ,closureArgs:number[]=[...(arg()||[])]
-                    ,[spanner,...spans]=(arg()||[(a:any)=>a]);
+                    ,[spanner,...spans]=(arg()||[(a:any)=>a])
+                    // params is Operand::Literal(0) for a parameterless function,
+                    // else a StateRef to an array of the nested function's own state
+                    // slot ids (one per declared parameter, in argument order).
+                    ,paramSlots:number[]=[...(arg()||[])];
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=await tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
@@ -164,6 +176,10 @@ async function _runVirtualizedA(code: () => DataView, state: {[a: number]: any},
                         configurable:false
                     };
                     const s=create(null);
+                    // Bind call arguments into the child's parameter slots; a missing
+                    // argument writes undefined (same as an unwritten slot), extras are
+                    // dropped — ordinary JS parameter semantics.
+                    for(let i=0;i<paramSlots.length;i++)s[paramSlots[i]]=args[i];
                     return apply(val,this,[
                         code,
                         (defineProperties(s,o),s),
@@ -272,7 +288,11 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                     // docs/closure-capture-plan.md); a StateRef to an unwritten slot
                     // also reads as undefined. Both mean "absent": tolerate falsy.
                     ,closureArgs:number[]=[...(arg()||[])]
-                    ,[spanner,...spans]=(arg()||[(a:any)=>a]);
+                    ,[spanner,...spans]=(arg()||[(a:any)=>a])
+                    // params is Operand::Literal(0) for a parameterless function,
+                    // else a StateRef to an array of the nested function's own state
+                    // slot ids (one per declared parameter, in argument order).
+                    ,paramSlots:number[]=[...(arg()||[])];
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=yield* tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
@@ -284,6 +304,10 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                         configurable:false
                     };
                     const s=create(null);
+                    // Bind call arguments into the child's parameter slots; a missing
+                    // argument writes undefined (same as an unwritten slot), extras are
+                    // dropped — ordinary JS parameter semantics.
+                    for(let i=0;i<paramSlots.length;i++)s[paramSlots[i]]=args[i];
                     return apply(val,this,[
                         code,
                         (defineProperties(s,o),s),
@@ -389,7 +413,11 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                     // docs/closure-capture-plan.md); a StateRef to an unwritten slot
                     // also reads as undefined. Both mean "absent": tolerate falsy.
                     ,closureArgs:number[]=[...(arg()||[])]
-                    ,[spanner,...spans]=(arg()||[(a:any)=>a]);
+                    ,[spanner,...spans]=(arg()||[(a:any)=>a])
+                    // params is Operand::Literal(0) for a parameterless function,
+                    // else a StateRef to an array of the nested function's own state
+                    // slot ids (one per declared parameter, in argument order).
+                    ,paramSlots:number[]=[...(arg()||[])];
                 const j = code().getUint32(ip,true);
                 ip+=4;
                 state[code().getUint32(ip,true)]=tenant.driveTenant(tenant.makeFunction(markGuestFn(spanner(function(this: any,...args: any[]): any{
@@ -401,6 +429,10 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                         configurable:false
                     };
                     const s=create(null);
+                    // Bind call arguments into the child's parameter slots; a missing
+                    // argument writes undefined (same as an unwritten slot), extras are
+                    // dropped — ordinary JS parameter semantics.
+                    for(let i=0;i<paramSlots.length;i++)s[paramSlots[i]]=args[i];
                     return apply(val,this,[
                         code,
                         (defineProperties(s,o),s),
