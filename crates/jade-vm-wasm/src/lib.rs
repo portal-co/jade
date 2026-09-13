@@ -76,19 +76,20 @@ fn make_iter_result(value: JsValue, done: bool) -> JsValue {
 }
 
 /// Invoke a raw tenant method (`make`/`get`/`set`/`define`/`assign`/…) on the
-/// tenant, with `tenant` as the `this` receiver. Returns `undefined` if the
-/// method is missing or throws. The returned value is a *generator* for every
-/// tenant operation post the generator-driver refactor.
-fn tenant_call(tenant: &JsValue, method: &str, args: &[JsValue]) -> JsValue {
+/// tenant, with `tenant` as the `this` receiver. `Ok(undefined)` if the method is
+/// missing; a method that *throws* surfaces as `Err` carrying the exception value
+/// — callers route it into the guest's exception regions (docs/exceptions-plan.md),
+/// never silently swallow it.
+fn tenant_call(tenant: &JsValue, method: &str, args: &[JsValue]) -> Result<JsValue, JsValue> {
     match Reflect::get(tenant, &JsValue::from_str(method)) {
         Ok(f) if f.is_function() => {
             let a = Array::new();
             for arg in args {
                 a.push(arg);
             }
-            Reflect::apply(f.unchecked_ref::<Function>(), tenant, &a).unwrap_or(JsValue::UNDEFINED)
+            Reflect::apply(f.unchecked_ref::<Function>(), tenant, &a)
         }
-        _ => JsValue::UNDEFINED,
+        _ => Ok(JsValue::UNDEFINED),
     }
 }
 
@@ -101,17 +102,17 @@ fn tenant_drive(
     args: &[JsValue],
     add_async: bool,
     add_gen: bool,
-) -> JsValue {
-    let generator = tenant_call(tenant, method, args);
+) -> Result<JsValue, JsValue> {
+    let generator = tenant_call(tenant, method, args)?;
     match Reflect::get(tenant, &JsValue::from_str("driveTenant")) {
         Ok(f) if f.is_function() => {
             let a = Array::new();
             a.push(&generator);
             a.push(&JsValue::from_bool(add_async));
             a.push(&JsValue::from_bool(add_gen));
-            Reflect::apply(f.unchecked_ref::<Function>(), tenant, &a).unwrap_or(JsValue::UNDEFINED)
+            Reflect::apply(f.unchecked_ref::<Function>(), tenant, &a)
         }
-        _ => generator,
+        _ => Ok(generator),
     }
 }
 
@@ -317,6 +318,24 @@ struct WasmPlatform<'a> {
     tenant: &'a JsValue,
     add_async: bool,
     add_gen: bool,
+    /// A tenant exception raised inside an infallible-signature `Ops` method
+    /// (`op_get`/`op_set`/…); the driving loop drains it after every `exec_op`
+    /// and routes it into the guest's exception regions.
+    pending: core::cell::RefCell<Option<JsValue>>,
+}
+
+impl<'a> WasmPlatform<'a> {
+    /// Drive a tenant op; an exception goes into `pending` and `undefined` is
+    /// returned (the driving loop will re-route before the value is observed).
+    fn drive_or_pending(&self, method: &str, args: &[JsValue]) -> JsValue {
+        match tenant_drive(self.tenant, method, args, self.add_async, self.add_gen) {
+            Ok(v) => v,
+            Err(e) => {
+                *self.pending.borrow_mut() = Some(e);
+                JsValue::UNDEFINED
+            }
+        }
+    }
 }
 
 impl<'a> WasmPlatform<'a> {
@@ -335,6 +354,7 @@ impl<'a> WasmPlatform<'a> {
             tenant,
             add_async,
             add_gen,
+            pending: core::cell::RefCell::new(None),
         }
     }
 }
@@ -377,13 +397,7 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
     }
 
     fn define_properties(&self, target: &JsValue, props: JsValue) {
-        tenant_drive(
-            self.tenant,
-            "define",
-            &[target.clone(), props],
-            self.add_async,
-            self.add_gen,
-        );
+        self.drive_or_pending("define", &[target.clone(), props]);
     }
 
     fn op_global(&self) -> JsValue {
@@ -479,13 +493,13 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         // public callable is adopted through makeFunction below, so ownership
         // and tenant-side function properties are established uniformly.
         registry_set(&spanned, effective_variant, j, &closure_slots_reg, &param_slots_reg);
-        Ok(tenant_drive(
+        tenant_drive(
             self.tenant,
             "makeFunction",
             &[spanned],
             self.add_async,
             self.add_gen,
-        ))
+        )
     }
 
     fn op_lit32(&self, val: u32) -> JsValue {
@@ -509,30 +523,12 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
     }
 
     fn op_litobj(&self, spread: Option<JsValue>, pairs: Vec<(JsValue, JsValue)>) -> JsValue {
-        let obj = tenant_drive(
-            self.tenant,
-            "make",
-            &[JsValue::NULL],
-            self.add_async,
-            self.add_gen,
-        );
+        let obj = self.drive_or_pending("make", &[JsValue::NULL]);
         if let Some(src) = spread {
-            tenant_drive(
-                self.tenant,
-                "assign",
-                &[obj.clone(), src],
-                self.add_async,
-                self.add_gen,
-            );
+            self.drive_or_pending("assign", &[obj.clone(), src]);
         }
         for (k, v) in pairs {
-            tenant_drive(
-                self.tenant,
-                "set",
-                &[obj.clone(), k, v],
-                self.add_async,
-                self.add_gen,
-            );
+            self.drive_or_pending("set", &[obj.clone(), k, v]);
         }
         obj
     }
@@ -573,8 +569,7 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
                     &call_args,
                     self.add_async,
                     self.add_gen,
-                )
-                .unwrap_or(JsValue::UNDEFINED);
+                )?;
                 for &slot in &closure_slots {
                     self.cache.set(slot, s_get(&child, slot));
                 }
@@ -591,13 +586,13 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
         );
         let _ = Reflect::set(&invocation, &JsValue::from_str("thisArg"), &this_val);
         let _ = Reflect::set(&invocation, &JsValue::from_str("args"), &call_args);
-        Ok(tenant_drive(
+        tenant_drive(
             self.tenant,
             "invoke",
             &[fn_val, invocation],
             self.add_async,
             self.add_gen,
-        ))
+        )
     }
 
     fn op_bool(&self, val: bool) -> JsValue {
@@ -628,23 +623,11 @@ impl jade_vm_core::Ops for WasmPlatform<'_> {
     }
 
     fn op_get(&self, obj: JsValue, key: JsValue) -> JsValue {
-        tenant_drive(
-            self.tenant,
-            "get",
-            &[obj, key],
-            self.add_async,
-            self.add_gen,
-        )
+        self.drive_or_pending("get", &[obj, key])
     }
 
     fn op_set(&self, obj: JsValue, key: JsValue, val: JsValue) -> JsValue {
-        tenant_drive(
-            self.tenant,
-            "set",
-            &[obj, key, val.clone()],
-            self.add_async,
-            self.add_gen,
-        );
+        self.drive_or_pending("set", &[obj, key, val.clone()]);
         val
     }
 }
@@ -783,6 +766,25 @@ fn run_sync(
 ) -> Result<JsValue, JsValue> {
     let mut ip = start_ip;
     let mut platform = WasmPlatform::new(state, global_this, nt, tenant, add_async, add_gen);
+    // Per-frame exception-handler stack (docs/exceptions-plan.md): TRYPUSH pushes
+    // (catch_slot, handler_ip), TRYPOP exits a region normally, and any raising op
+    // dispatches to the innermost handler — or, on an empty stack, leaves the frame
+    // as `Err`, propagating to the guest caller through `op_call`.
+    let mut handlers: Vec<(u32, u32)> = Vec::new();
+    macro_rules! dispatch_exc {
+        ($e:expr) => {
+            match handlers.pop() {
+                Some((slot, h)) => {
+                    platform.set(slot, $e);
+                    ip = h as usize;
+                }
+                None => {
+                    platform.flush();
+                    return Err($e);
+                }
+            }
+        };
+    }
     loop {
         let old_ip = ip;
         let (op, rest) =
@@ -854,7 +856,26 @@ fn run_sync(
                 let val_v = jade_vm_core::resolve(val, &mut platform);
                 ip = switch_target(&val_v, &cases, default_target) as usize;
             }
-            _ => jade_vm_core::exec_op(op, code, &mut platform)?,
+            Operation::Throw(val_op) => {
+                let v = jade_vm_core::resolve(val_op, &mut platform);
+                dispatch_exc!(v);
+            }
+            Operation::Trypush {
+                catch_slot,
+                handler_ip,
+            } => handlers.push((catch_slot, handler_ip)),
+            Operation::Trypop => {
+                handlers.pop();
+            }
+            other => {
+                if let Err(e) = jade_vm_core::exec_op(other, code, &mut platform) {
+                    dispatch_exc!(e);
+                }
+                let pending = platform.pending.borrow_mut().take();
+                if let Some(e) = pending {
+                    dispatch_exc!(e);
+                }
+            }
         }
     }
 }

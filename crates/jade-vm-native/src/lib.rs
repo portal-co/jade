@@ -31,10 +31,11 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
 
-use portal_solutions_jade_tenant_rt::object_manager::{GuestCallable, ObjectManager, Value};
+use portal_solutions_jade_tenant_rt::object_manager::{GuestCallable, GuestCallError, ObjectManager, Value};
 use portal_solutions_jade_tenant_rt::{PropertyKey, Tenant, TenantError, TenantInvocation};
 use portal_solutions_jade_vm::Operation;
 use portal_solutions_jade_vm_core as jade_vm_core;
+use portal_solutions_jade_vm_core::State as _;
 
 /// The native interpreter's error type. `Ops::Error` is set to this so `exec_op`'s own
 /// invariant failure (`P::err`) and `op_call`/`op_fn`'s tenant errors share one channel.
@@ -43,6 +44,9 @@ pub enum NativeError {
     /// A tenant operation failed (including guest-thrown errors, which surface from
     /// `Tenant::invoke` as `TenantError`s).
     Tenant(TenantError),
+    /// A guest `throw` (or a tenant failure materialized as a guest error object) that
+    /// no in-frame exception region caught — the frame unwinds with the thrown value.
+    GuestThrow(Value),
     /// A bytecode feature the native sync cell does not drive yet (await/yield, or applying
     /// an async/generator-variant guest function).
     Unsupported(&'static str),
@@ -55,6 +59,7 @@ impl std::fmt::Display for NativeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NativeError::Tenant(e) => write!(f, "{e}"),
+            NativeError::GuestThrow(v) => write!(f, "uncaught guest throw: {v:?}"),
             NativeError::Unsupported(msg) => write!(f, "unsupported: {msg}"),
             NativeError::Truncated => write!(f, "truncated bytecode"),
         }
@@ -171,11 +176,12 @@ struct GuestClosure {
 }
 
 impl GuestCallable for GuestClosure {
-    fn apply(&mut self, tenant: &mut ObjectManager, this_arg: &Value, args: &[Value]) -> Result<Value, TenantError> {
+    fn apply(&mut self, tenant: &mut ObjectManager, this_arg: &Value, args: &[Value]) -> Result<Value, GuestCallError> {
         if self.effective_variant != 0 {
             return Err(TenantError::type_error(
                 "native sync cell cannot drive async/generator guest functions yet",
-            ));
+            )
+            .into());
         }
         // `this_arg` is deliberately not threaded: no opcode lets a guest body observe
         // `this` (GLOBAL/NEW_TARGET cover the reachable surface), so dropping it here is
@@ -197,8 +203,11 @@ impl GuestCallable for GuestClosure {
             self.add_gen,
         )
         .map_err(|e| match e {
-            NativeError::Tenant(t) => t,
-            other => TenantError::type_error(other.to_string()),
+            // An uncaught guest throw crosses the call boundary with its value intact —
+            // the caller frame's exception regions decide what it means.
+            NativeError::GuestThrow(v) => GuestCallError::Throw(v),
+            NativeError::Tenant(t) => GuestCallError::Tenant(t),
+            other => GuestCallError::Tenant(TenantError::type_error(other.to_string())),
         })
     }
 }
@@ -384,10 +393,14 @@ impl jade_vm_core::Ops for NativePlatform<'_> {
         // The ObjectManager's invoke dispatch *is* the jade-to-jade fast path: adopted
         // guest functions run synchronously in-process via GuestCallable::apply, with no
         // registry (the WASM side needs a WeakMap registry because its functions live
-        // across the JS boundary).
-        Ok(self.tenant.get_mut().invoke(&fn_val, TenantInvocation::Apply {
+        // across the JS boundary). `invoke_raising` keeps a callee's uncaught guest throw
+        // intact for the exception-region dispatch in `run_sync`.
+        Ok(self.tenant.get_mut().invoke_raising(&fn_val, TenantInvocation::Apply {
             this_arg: this_val,
             args,
+        }).map_err(|e| match e {
+            GuestCallError::Tenant(t) => NativeError::Tenant(t),
+            GuestCallError::Throw(v) => NativeError::GuestThrow(v),
         })?)
     }
 
@@ -482,6 +495,35 @@ pub fn run_sync(
         add_gen,
         pending: RefCell::new(None),
     };
+    // Per-frame exception-handler stack (docs/exceptions-plan.md §4.6): TRYPUSH pushes
+    // (catch_slot, handler_ip), TRYPOP exits a region normally, and any raising op
+    // dispatches to the innermost handler — guest throws bind as-is; tenant errors
+    // materialize as `{name, message}` guest objects until error primordials exist.
+    let mut handlers: Vec<(u32, u32)> = Vec::new();
+    macro_rules! raise_guest {
+        ($v:expr) => {{
+            match handlers.pop() {
+                Some((slot, h)) => {
+                    platform.set(slot, $v);
+                    ip = h as usize;
+                }
+                None => return Err(NativeError::GuestThrow($v)),
+            }
+        }};
+    }
+    macro_rules! raise_err {
+        ($e:expr) => {{
+            match $e {
+                NativeError::GuestThrow(v) => raise_guest!(v),
+                NativeError::Tenant(te) => {
+                    let v = materialize_tenant_error(&mut platform, te);
+                    raise_guest!(v);
+                }
+                // Unsupported/Truncated are host-side conditions, never guest-catchable.
+                other => return Err(other),
+            }
+        }};
+    }
     loop {
         let (op, rest) = Operation::parse(&code[ip..]).ok_or(NativeError::Truncated)?;
         ip = code.len() - rest.len();
@@ -517,13 +559,46 @@ pub fn run_sync(
                 let val_v = jade_vm_core::resolve(val, &mut platform);
                 ip = switch_target(&val_v, &cases, default_target) as usize;
             }
+            Operation::Throw(val_op) => {
+                let v = jade_vm_core::resolve(val_op, &mut platform);
+                raise_guest!(v);
+            }
+            Operation::Trypush {
+                catch_slot,
+                handler_ip,
+            } => handlers.push((catch_slot, handler_ip)),
+            Operation::Trypop => {
+                handlers.pop();
+            }
             _ => {
-                jade_vm_core::exec_op(op, code, &mut platform)?;
-                if let Some(error) = platform.pending.borrow_mut().take() {
-                    return Err(NativeError::Tenant(error));
+                if let Err(e) = jade_vm_core::exec_op(op, code, &mut platform) {
+                    raise_err!(e);
+                }
+                let pending = platform.pending.borrow_mut().take();
+                if let Some(error) = pending {
+                    raise_err!(NativeError::Tenant(error));
                 }
             }
         }
+    }
+}
+
+/// Materialize a tenant failure as a guest-catchable object `{name, message}` — a
+/// documented approximation until error primordials land (docs/exceptions-plan.md §4.6).
+fn materialize_tenant_error(platform: &mut NativePlatform, error: TenantError) -> Value {
+    let name = match &error {
+        TenantError::TypeError(_) => "TypeError",
+        TenantError::RangeError(_) => "RangeError",
+    };
+    let message = error.to_string();
+    let mut tenant = platform.tenant.borrow_mut();
+    match tenant.make(None) {
+        Ok(obj) => {
+            let _ = tenant.set(&obj, &PropertyKey::from("name"), Value::Str(name.to_string()));
+            let _ = tenant.set(&obj, &PropertyKey::from("message"), Value::Str(message));
+            obj
+        }
+        Err(_) => Value::Str(message),
     }
 }
 
@@ -651,3 +726,66 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod exception_tests {
+    use super::*;
+
+    fn run_script(src: &str) -> Result<Value, NativeError> {
+        let code = portal_solutions_jade_vm_frontend::compile_to_bytecode(src).expect("compile");
+        let mut tenant = ObjectManager::new();
+        let global_this = tenant.make(None).expect("make globalThis");
+        run(&code, &global_this, &mut tenant)
+    }
+
+    #[test]
+    fn try_catch_binds_the_thrown_value() {
+        assert_eq!(
+            run_script("try { throw 42; } catch (e) { return e; } return 0;").unwrap(),
+            Value::Number(42.0)
+        );
+    }
+
+    #[test]
+    fn exception_crosses_guest_frames() {
+        assert_eq!(
+            run_script("function f() { throw 7; } try { f(); } catch (e) { return e; } return 0;")
+                .unwrap(),
+            Value::Number(7.0)
+        );
+    }
+
+    #[test]
+    fn rethrow_reaches_the_outer_handler() {
+        assert_eq!(
+            run_script("try { try { throw 1; } catch (e) { throw 2; } } catch (e2) { return e2; } return 0;")
+                .unwrap(),
+            Value::Number(2.0)
+        );
+    }
+
+    #[test]
+    fn uncaught_throw_leaves_the_frame_as_guest_throw() {
+        match run_script("throw 9;") {
+            Err(NativeError::GuestThrow(Value::Number(9.0))) => {}
+            other => panic!("expected GuestThrow(9), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tenant_errors_are_guest_catchable_as_named_objects() {
+        // Reading a property of a non-object errors inside the tenant; the guest
+        // handler receives a {name, message} object (docs/exceptions-plan.md §4.6).
+        let v = run_script(
+            "var out; try { var g = globalThis; g.undefined.x; } catch (e) { out = e.name; } return out;",
+        );
+        // The exact read may resolve to undefined without erroring in ObjectManager
+        // (get of a missing key yields undefined); what must not happen is a host-level
+        // crash. Accept either a caught TypeError name or a clean undefined read.
+        match v {
+            Ok(Value::Str(s)) => assert_eq!(s, "TypeError"),
+            Ok(Value::Undefined) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+}

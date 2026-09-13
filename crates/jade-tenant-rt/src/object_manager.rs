@@ -182,10 +182,40 @@ fn merge_descriptor(current: Option<&Descriptor>, partial: TenantPropertyDescrip
 ///
 /// The native interpreter's `op_fn` boxes a closure over the callee's bytecode/variant/param
 /// slots as a `GuestCallable`; `ObjectManager::invoke` drives it.
+/// The richer error channel for guest-callable invocations (docs/exceptions-plan.md
+/// §4.6): a guest `throw` carries an arbitrary guest *value*, which `TenantError`
+/// cannot hold. `Tenant::invoke`/`invoke_trap` squash `Throw(v)` into a
+/// `TenantError` (consumers that only speak the generic trait); the inherent
+/// [`ObjectManager::invoke_raising`] preserves it for the native interpreter's
+/// exception-region dispatch.
+#[derive(Debug)]
+pub enum GuestCallError {
+    Tenant(TenantError),
+    Throw(Value),
+}
+
+impl From<TenantError> for GuestCallError {
+    fn from(e: TenantError) -> Self {
+        GuestCallError::Tenant(e)
+    }
+}
+
+impl GuestCallError {
+    /// Collapse into the generic channel (a guest value becomes a TypeError naming it).
+    pub fn into_tenant_error(self) -> TenantError {
+        match self {
+            GuestCallError::Tenant(e) => e,
+            GuestCallError::Throw(v) => {
+                TenantError::type_error(format!("uncaught guest throw: {}", crate::object_manager::js_to_string(&v)))
+            }
+        }
+    }
+}
+
 pub trait GuestCallable {
-    fn apply(&mut self, tenant: &mut ObjectManager, this_arg: &Value, args: &[Value]) -> Result<Value, TenantError>;
-    fn construct(&mut self, _tenant: &mut ObjectManager, _new_target: &Value, _args: &[Value]) -> Result<Value, TenantError> {
-        Err(TenantError::type_error("guest function is not a constructor"))
+    fn apply(&mut self, tenant: &mut ObjectManager, this_arg: &Value, args: &[Value]) -> Result<Value, GuestCallError>;
+    fn construct(&mut self, _tenant: &mut ObjectManager, _new_target: &Value, _args: &[Value]) -> Result<Value, GuestCallError> {
+        Err(TenantError::type_error("guest function is not a constructor").into())
     }
 }
 
@@ -307,6 +337,42 @@ impl ObjectManager {
     /// the TS surface, where adoption is the same `makeFunction` the VM's `FN` op already
     /// calls; on the native side the `FN` op constructs the callable itself and adopts it
     /// here.
+    /// Invoke `callee` preserving guest-thrown values (see [`GuestCallError`]).
+    /// The generic `Tenant::invoke` wraps this and squashes `Throw(v)` into a
+    /// `TenantError`; jade-vm-native uses this so an uncaught exception inside a
+    /// guest callee reaches the caller frame's exception regions intact.
+    pub fn invoke_raising(&mut self, callee: &Value, invocation: TenantInvocation<Value>) -> Result<Value, GuestCallError> {
+        let idx = require_object(callee).map_err(GuestCallError::Tenant)?;
+        let callee = callee.clone();
+        if self.exotics.contains_key(&idx) {
+            return self
+                .with_exotic(idx, |tenant, meta| match meta.callable() {
+                    None => Err(GuestCallError::Tenant(TenantError::type_error("tenant exotic has no call trap"))),
+                    Some(callable) => match invocation {
+                        TenantInvocation::Apply { this_arg, args } => {
+                            callable.apply(tenant, &callee, &this_arg, &args).map_err(GuestCallError::Tenant)
+                        }
+                        TenantInvocation::Construct { args, new_target } => {
+                            callable.construct(tenant, &callee, &new_target, &args).map_err(GuestCallError::Tenant)
+                        }
+                    },
+                })
+                .unwrap();
+        }
+        if self.guest_fns.contains_key(&idx) {
+            return self
+                .with_guest_fn(idx, |tenant, callable| match invocation {
+                    TenantInvocation::Apply { this_arg, args } => callable.apply(tenant, &this_arg, &args),
+                    TenantInvocation::Construct { args, new_target } => callable.construct(tenant, &new_target, &args),
+                })
+                .unwrap();
+        }
+        Err(GuestCallError::Tenant(TenantError::type_error(format!(
+            "{} is not a function",
+            js_to_string(&callee)
+        ))))
+    }
+
     pub fn adopt_guest_fn(&mut self, proto: Option<Value>, callable: Box<dyn GuestCallable>) -> Value {
         let idx = self.alloc_record(proto);
         self.guest_fns.insert(idx, callable);
@@ -858,33 +924,8 @@ impl Tenant for ObjectManager {
     }
 
     fn invoke(&mut self, callee: &Self::Value, invocation: TenantInvocation<Self::Value>) -> Result<Self::Value, TenantError> {
-        let idx = require_object(callee)?;
-        let callee = callee.clone();
-        if self.exotics.contains_key(&idx) {
-            return self
-                .with_exotic(idx, |tenant, meta| match meta.callable() {
-                    None => Err(TenantError::type_error("tenant exotic has no call trap")),
-                    Some(callable) => match invocation {
-                        TenantInvocation::Apply { this_arg, args } => callable.apply(tenant, &callee, &this_arg, &args),
-                        TenantInvocation::Construct { args, new_target } => {
-                            callable.construct(tenant, &callee, &new_target, &args)
-                        }
-                    },
-                })
-                .unwrap();
-        }
-        if self.guest_fns.contains_key(&idx) {
-            return self
-                .with_guest_fn(idx, |tenant, callable| match invocation {
-                    TenantInvocation::Apply { this_arg, args } => callable.apply(tenant, &this_arg, &args),
-                    TenantInvocation::Construct { args, new_target } => callable.construct(tenant, &new_target, &args),
-                })
-                .unwrap();
-        }
-        Err(TenantError::type_error(format!(
-            "{} is not a function",
-            js_to_string(&callee)
-        )))
+        self.invoke_raising(callee, invocation)
+            .map_err(GuestCallError::into_tenant_error)
     }
 
     fn invoke_trap(&mut self, f: &Self::Value, receiver: &Self::Value, args: &[Self::Value]) -> Result<Self::Value, TenantError> {
@@ -919,7 +960,7 @@ mod tests {
 
     struct ConstFn(Value);
     impl GuestCallable for ConstFn {
-        fn apply(&mut self, _tenant: &mut ObjectManager, _this: &Value, _args: &[Value]) -> Result<Value, TenantError> {
+        fn apply(&mut self, _tenant: &mut ObjectManager, _this: &Value, _args: &[Value]) -> Result<Value, GuestCallError> {
             Ok(self.0.clone())
         }
     }

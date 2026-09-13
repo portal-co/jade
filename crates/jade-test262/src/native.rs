@@ -19,7 +19,9 @@
 use portal_solutions_jade_primordial_rt::function::{FunctionPrimordialCache, function_primordial};
 use portal_solutions_jade_primordial_rt::object::{ObjectPrimordialCache, object_primordial};
 use portal_solutions_jade_primordial_rt::types_shim::define_data;
-use portal_solutions_jade_tenant_rt::object_manager::{GuestCallable, ObjectManager, Value};
+use portal_solutions_jade_tenant_rt::object_manager::{
+    GuestCallError, GuestCallable, ObjectManager, Value,
+};
 use portal_solutions_jade_tenant_rt::{
     PropertyKey, Tenant, TenantError, TenantPropertyDescriptor,
 };
@@ -113,8 +115,8 @@ where
         tenant: &mut ObjectManager,
         this_arg: &Value,
         args: &[Value],
-    ) -> Result<Value, TenantError> {
-        (self.0)(tenant, this_arg.clone(), args.to_vec())
+    ) -> Result<Value, GuestCallError> {
+        (self.0)(tenant, this_arg.clone(), args.to_vec()).map_err(GuestCallError::Tenant)
     }
 }
 
@@ -317,9 +319,13 @@ fn snapshot(tenant: &mut ObjectManager, v: &Value) -> String {
             Value::Bool(b) => b.to_string(),
             Value::Number(n) => {
                 if n.is_finite() {
-                    // serde_json prints f64 the way JSON.stringify does for the values
-                    // test262 completes with (integers print without a fraction).
-                    serde_json::to_string(n).unwrap_or_else(|_| "null".to_string())
+                    // Match JSON.stringify (the interp/wasm cells' snapshot): integral
+                    // f64s print without a fraction, everything else like serde/ryu.
+                    if n.fract() == 0.0 && n.abs() < 9.007_199_254_740_992e15 {
+                        format!("{:.0}", n)
+                    } else {
+                        serde_json::to_string(n).unwrap_or_else(|_| "null".to_string())
+                    }
                 } else {
                     "null".to_string()
                 }

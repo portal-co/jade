@@ -246,9 +246,9 @@ except where the manifest names a genuine Rust/TS primordial gap.
 *Phase 3 progress:* row 6 (`wasm-interp`) is landed and ratcheted — same bytecode through
 `jade-vm-wasm`'s generated `run_virtualized` in Node, its bundle built on demand (gitignored,
 `--update-wasm` to force), matching `interp` verdict-for-verdict on 8 of the 9 Phase-1
-directories. The 4 remaining deltas (`language/literals/numeric/S7.8.3_A4.1_T{1,2,7,8}.js`)
-are a real WASM-backend `Fn`/call-path gap around the deliberately-absent `assert.throws`
-(see `packages/jade-js/test262/README.md`), recorded in `expectations/wasm-interp.json`.
+directories. The exception-opcode phase-3 work (`docs/exceptions-plan.md`) then made wasm
+tenant calls catch-aware, closing the remaining 4-test delta (`S7.8.3_A4.1_T{1,2,7,8}.js`):
+wasm-interp now matches `interp` on the whole subset.
 Row 7 (native Rust) is landed and ratcheted: `env = native` runs the same bytecode
 in-process via `jade-vm-native` driving `jade-tenant-rt`'s ObjectManager with the
 `jade-primordial-rt` primordials (no Node/JS engine), with `crates/jade-test262/src/native.rs`
