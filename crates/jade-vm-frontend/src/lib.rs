@@ -1105,6 +1105,11 @@ mod tests {
              function markGuestFn(f, m) {{ __guestFns.set(f, m); return f; }}\n\
              const tenant = {{\n\
                makeFunction: (f) => f,\n\
+               make: (proto) => Object.create(proto ?? null),\n\
+               set: (o, k, v) => {{ o[k] = v; }},\n\
+               get: (o, k) => o[k],\n\
+               assign: (dst, src) => Object.assign(dst, src),\n\
+               define: (t, d) => {{}},\n\
                driveTenant: (g) => g,\n\
                invoke(fn, inv) {{\n\
                  const meta = __guestFns.get(fn);\n\
@@ -1211,6 +1216,19 @@ mod tests {
                 "var inner = function () { if (true) { return 1; } else { return 2; } }; return inner();"
             ),
             "1"
+        );
+    }
+
+    /// Static member *writes* (`o.x = v`): swc-tac's assignment-target lowering used to
+    /// leak the key as a synthetic variable reference (rejected here as a bogus "closure
+    /// capture of `x`"); fixed upstream in jsaw-core's conv.rs, this pins the jade-side
+    /// end-to-end behavior.
+    #[test]
+    fn static_member_assignment_executes_correctly() {
+        assert_eq!(run_js_with_tenant("var o = {}; o.x = 5; return o.x;"), "5");
+        assert_eq!(
+            run_js_with_tenant("var o = {}; o.x = 1; o.y = 2; return o.x === 1 ? o.y : 4;"),
+            "2"
         );
     }
 
