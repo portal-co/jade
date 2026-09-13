@@ -21,8 +21,10 @@ use std::hash::{Hash, Hasher};
 
 pub mod buffer;
 pub mod intrinsics;
+pub mod object_manager;
 
 pub use buffer::{BufferHooks, BufferKind};
+pub use object_manager::{GuestCallable, ObjectManager, Value as ObjectManagerValue};
 
 /// Opaque per-realm symbol identity. The embedder is responsible for allocating distinct ids;
 /// this crate never inspects a symbol's description.
