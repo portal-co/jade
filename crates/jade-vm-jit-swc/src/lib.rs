@@ -65,8 +65,10 @@ use portal_solutions_jade_vm_jit::{
 use swc_common::sync::Lrc;
 use swc_common::{DUMMY_SP, FileName, SourceMap};
 use swc_ecma_ast::{
-    ComputedPropName, Expr, Ident, Lit, MemberExpr, MemberProp, Number, Script, Stmt,
+    BindingIdent, ComputedPropName, Expr, Ident, Lit, MemberExpr, MemberProp, Number, Pat,
+    Script, Stmt,
 };
+use swc_atoms::Atom;
 use swc_ecma_parser::lexer::Lexer;
 use swc_ecma_parser::{Parser, StringInput, Syntax};
 
@@ -161,6 +163,33 @@ fn compile_body<N>(
 where
     N: HostMethodNames<JadeTenantMethod>,
 {
+    // Exception regions: fall back to Tier 0's dispatch shape for this function
+    // (nested bodies recurse through `with_nested_body_compiler` and decide
+    // independently). The catch-edge lifting below works for minimal regions, but
+    // swc-ssa's catch shim carries the function's *entire* ident set as block
+    // params across every region edge (`conv.rs`'s disabled `safe_to_carry`
+    // filter), which blows up superlinearly with region count and loses the
+    // handler binding in the phi storm — see docs/exceptions-plan.md §4.4/§8.
+    // Until the upstream prune lands (phase 5), the Tier 0 shape keeps semantics
+    // correct; the markers are consumed structurally there, and per-op emission
+    // never sees them in the lifted path either.
+    let has_regions = discover_blocks(code, start_ip)?
+        .values()
+        .any(|b| b.ops.iter().any(|op| matches!(op, Operation::Trypush { .. })));
+    if has_regions {
+        // `prefer_reloop` defaults off (and only exists with jade-vm-jit's `reloop`
+        // feature, not enabled here) — `compile_from_variant` is Tier 0 as called.
+        let t0_cfg = with_nested_body_compiler(cfg.clone(), reg.clone());
+        let (body, _) = portal_solutions_jade_vm_jit::compile_from_variant(
+            code,
+            start_ip,
+            reg.clone(),
+            t0_cfg,
+            is_gen,
+            is_async,
+        )?;
+        return Ok(body);
+    }
     let cfg_func = build_cfg_func(code, start_ip, cfg, is_gen, is_async, double_gen, reg)?;
     let tfunc = TFunc::try_from(&cfg_func).map_err(|e| format!("jit-swc: Func -> TFunc: {e:?}"))?;
     let tfunc = portal_solutions_jade_cfg_opt::optimize_tfunc(&tfunc)
@@ -339,7 +368,16 @@ where
 
     for (offset, block) in &blocks {
         let id = offset_to_id[offset];
-        let stmts = ops_to_stmts(reg, cfg, is_gen, is_async, double_gen, &block.ops, code)?;
+        // Exception regions never reach here: `compile_body` falls back to Tier 0's
+        // dispatch shape for any function containing TRYPUSH (docs/exceptions-plan.md).
+        // Strip markers defensively; a region-free function has none anyway.
+        let clean_ops: Vec<Operation> = block
+            .ops
+            .iter()
+            .filter(|op| !matches!(op, Operation::Trypush { .. } | Operation::Trypop))
+            .cloned()
+            .collect();
+        let stmts = ops_to_stmts(reg, cfg, is_gen, is_async, double_gen, &clean_ops, code)?;
         let term = lower_terminator(&block.term, &offset_to_id)?;
         cfg_out.blocks[id] = CBlock {
             stmts,
@@ -358,6 +396,7 @@ where
         is_async,
     })
 }
+
 
 /// Emit `ops`' JS text (via `jade-vm-jit`'s own per-op emission) and re-parse it into real
 /// `Stmt`s.
@@ -471,6 +510,7 @@ fn lower_terminator(
     };
     Ok(match op {
         Operation::Ret(val) => Term::Return(Some(operand_expr(*val))),
+        Operation::Throw(val) => Term::Throw(operand_expr(*val)),
         Operation::Jmp { target: t } => Term::Jmp(target(*t)?),
         Operation::CondJmp {
             cond,
@@ -1132,5 +1172,74 @@ mod tests {
             "\"a:b\"",
             "js:\n{js}"
         );
+    }
+}
+
+
+#[cfg(test)]
+mod exception_tests {
+    use super::*;
+    use portal_solutions_jade_vm::Operand;
+
+    fn chunk2(ops: &[Operation]) -> Vec<u8> {
+        ops.iter()
+            .flat_map(|o| o.emit().collect::<Vec<u8>>())
+            .collect()
+    }
+
+    // TRYPUSH(0, 26) @0; LIT32 7 -> s1 @10; THROW s1 @20; handler @26: RET s0.
+    fn try_region_code() -> Vec<u8> {
+        chunk2(&[
+            Operation::Trypush {
+                catch_slot: 0,
+                handler_ip: 26,
+            },
+            Operation::Lit32 { dest: 1, val: 7 },
+            Operation::Throw(Operand::StateRef(1)),
+            Operation::Ret(Operand::StateRef(0)),
+        ])
+    }
+
+    fn run_js2(body: &str) -> String {
+        let script = format!(
+            "const fn = new Function('tenant','nt','state', {:?}); console.log(JSON.stringify(fn(undefined,undefined,[])));",
+            body
+        );
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .expect("node failed");
+        assert!(
+            output.status.success(),
+            "node stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn throw_without_regions_is_a_native_js_throw() {
+        let code = chunk2(&[
+            Operation::Lit32 { dest: 0, val: 9 },
+            Operation::Throw(Operand::StateRef(0)),
+        ]);
+        let (js, _reg) = compile(&code, Config::default()).unwrap();
+        // The value flows through SSA temps (`state[0] = 9; ...; throw $vN;`) — the
+        // point is it's a native JS `throw` with no dispatch-catch machinery.
+        assert!(js.contains("throw $v"), "js:\n{js}");
+        assert!(!js.contains("__handlers"), "js:\n{js}");
+        assert!(!js.contains("switch (__ip)"), "js:\n{js}");
+    }
+
+    #[test]
+    fn function_with_regions_falls_back_to_tier0_shape() {
+        let (js, reg) = compile(&try_region_code(), Config::default()).unwrap();
+        // Contained fallback (docs/exceptions-plan.md): the Tier 0 dispatch shape —
+        // handler stack + dispatch catch — not a restructured program.
+        assert!(js.contains("__handlers"), "js:\n{js}");
+        assert!(js.contains("switch (__ip)"), "js:\n{js}");
+        let body = format!("{}\n{js}", reg.prelude());
+        assert_eq!(run_js2(&body), "7", "js:\n{body}");
     }
 }

@@ -354,6 +354,15 @@ pub struct VecRegistry {
     decls: Vec<String>,
 }
 
+/// Shared-registry adapter: lets a caller that holds a registry behind
+/// `Rc<RefCell<_>>` (e.g. Tier 2, which shares one registry across every nesting
+/// level) drive the `Rc`-owned compile entry points without giving up ownership.
+impl FnRegistry for Rc<RefCell<VecRegistry>> {
+    fn register(&mut self, variant: FnVariant, params: &[&str], body: &str) -> String {
+        self.borrow_mut().register(variant, params, body)
+    }
+}
+
 impl VecRegistry {
     pub fn new() -> Self {
         Self { decls: Vec::new() }
@@ -611,7 +620,7 @@ impl<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>> Ops for JsJit<R, N> {
             let prefer_reloop = false;
             if prefer_reloop {
                 #[cfg(feature = "reloop")]
-                reloop::emit_reloop_program(&mut nested, code, j as usize)?;
+                reloop::emit_nested_program(&mut nested, code, j as usize)?;
             } else {
                 emit_program(&mut nested, code, j as usize)?;
             }

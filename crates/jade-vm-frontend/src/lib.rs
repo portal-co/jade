@@ -117,8 +117,11 @@ pub fn compile_to_bytecode_with_variant(
             type_params: None,
             return_type: None,
         };
-        let tfunc =
+        let mut tfunc =
             TFunc::try_from(&synthetic).map_err(|e| FrontendError::Tac(format!("{e:?}")))?;
+        // Catch bindings are declarations (see `declare_catch_pats`) — before the
+        // capture check, which reads decls.
+        declare_catch_pats(&mut tfunc);
         // Reject closure captures while names and decls are still accurate — after
         // `optimize_tfunc`'s SSA round-trip, its `$k…p…` block-param materializations
         // look identical to real captures.
@@ -126,8 +129,20 @@ pub fn compile_to_bytecode_with_variant(
         // Shared TAC canonicalizer + SSA constant-fold/DCE pass (see
         // `docs/bytecode-cfg-plan.md`); the same `jade-cfg-opt::optimize_tfunc` an
         // optional JIT plugin (Tier 2) can also apply to its own reconstructed CFG.
-        let tfunc = portal_solutions_jade_cfg_opt::optimize_tfunc(&tfunc)
-            .map_err(|e| FrontendError::Opt(format!("{e:?}")))?;
+        //
+        // Exception regions skip it: swc-ssa's catch shim snapshots the *entry* state
+        // of a protected block as the handler's carried values, so any value written
+        // inside the block before a throwing op is invisible to the handler (and
+        // superlinear block-param storms appear with many regions) — jsaw-core
+        // conv.rs, phase-5 work in docs/exceptions-plan.md. The plain TAC lowers
+        // catch edges correctly (the pat slot is bound by the dispatch and read by
+        // the handler), so correctness wins over optimization here.
+        let tfunc = if has_catch_edges(&tfunc) {
+            tfunc
+        } else {
+            portal_solutions_jade_cfg_opt::optimize_tfunc(&tfunc)
+                .map_err(|e| FrontendError::Opt(format!("{e:?}")))?
+        };
         compile_program(tfunc, global_ctxt)
     })
 }
@@ -260,6 +275,45 @@ fn check_no_finalizers(stmts: &[swc_ecma_ast::Stmt]) -> Result<(), FrontendError
         );
     }
     Ok(())
+}
+
+/// Insert every `TCatch::Jump` pat into its function's `cfg.decls`, recursively over
+/// nested functions. The catch binding *is* a declaration — but jsaw-core's `to_cfg`
+/// doesn't record it there (it only gets inserted on the *way back* from the SSA
+/// round-trip), so without this the SSA converter treats handler-body reads of the
+/// binding as untracked by-name loads and the exception value never reaches them
+/// (the handler reads an unbound slot).
+fn declare_catch_pats(tfunc: &mut TFunc) {
+    let pats: Vec<Ident> = tfunc
+        .cfg
+        .blocks
+        .iter()
+        .filter_map(|(_, b)| match &b.post.catch {
+            TCatch::Jump { pat, .. } => Some(pat.clone()),
+            TCatch::Throw => None,
+        })
+        .collect();
+    for pat in pats {
+        tfunc.cfg.decls.insert(pat);
+    }
+    for (_, block) in tfunc.cfg.blocks.iter_mut() {
+        for stmt in &mut block.stmts {
+            if let Item::Func { func: nested, .. } = &mut stmt.right {
+                declare_catch_pats(nested);
+            }
+        }
+    }
+}
+
+/// Any `TCatch::Jump` edge in this function or, transitively, in a nested one?
+fn has_catch_edges(tfunc: &TFunc) -> bool {
+    tfunc.cfg.blocks.iter().any(|(_, b)| {
+        matches!(b.post.catch, TCatch::Jump { .. })
+            || b.stmts.iter().any(|s| match &s.right {
+                Item::Func { func: nested, .. } => has_catch_edges(nested),
+                _ => false,
+            })
+    })
 }
 
 ///
@@ -1516,3 +1570,5 @@ mod exception_lowering_tests {
         }
     }
 }
+
+

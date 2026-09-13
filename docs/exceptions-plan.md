@@ -217,7 +217,26 @@ its structured output for the (overwhelmingly common) try-free case and stays
 semantically correct everywhere. Documented in the crate docs and the test262
 README.
 
-### 4.4 Tier 2 (`crates/jade-vm-jit-swc`) — lift regions back to catch edges
+### 4.4 Tier 2 (`crates/jade-vm-jit-swc`) — contained fallback (same as Tier 1)
+
+> **As-implemented update (phase 2):** the catch-edge lifting described below was
+> built and validated for *minimal* regions, but real functions blow up inside
+> `swc-ssa`'s catch shim: it carries the function's *entire* ident set as block
+> params across every region edge (`conv.rs`'s `safe_to_carry` prune is a stub
+> returning `false`), producing superlinear phi storms (a 25KB fixture → 17MB of
+> emitted JS, ~60s compile) — and handler-body reads of the catch binding came out
+> unbound because `to_cfg` never inserts the catch param into `cfg.decls` (jade
+> patches around that one in the frontend: `declare_catch_pats`). So Tier 2 takes
+> the same fallback as Tier 1: a function whose bytecode contains `TRYPUSH`
+> compiles to Tier 0's dispatch shape for that function only (nested bodies decide
+> independently via `with_nested_body_compiler`). A `THROW` with no regions still
+> lifts to a real JS `throw` via `Term::Throw`. The lifting machinery landed in
+> `build_cfg_func`'s git history and returns in phase 5 with the upstream fixes.
+>
+> Phase 2 also landed one upstream fix (in the locally-patched jsaw-core checkout,
+> awaiting review): swc-cfg's `process_block` now emits a `Throw` *terminator*
+> inside the block's try wrapper when the block has a catch edge — it previously
+> landed outside, so `try { throw x } catch (e) {}` never caught its own throw.
 
 Tier 2's output must keep real structure (the "clean code tier" rule), so it
 does the inverse of the frontend: it *consumes* the markers as region metadata
@@ -332,11 +351,14 @@ Per-op emissions; Tier 0 dispatch wrapper; Tier 1 region detection + per-functio
 fallback; `jit-t0`/`jit-t1` smoke parity.
 *Done when:* smoke passes on all three Node JIT envs with zero mismatches.
 
-**Phase 2 — Tier 2 catch-edge lifting.**
+**Phase 2 — Tier 2 catch-edge lifting (landed as the contained fallback).**
 `build_cfg_func` region stack, `Term::Throw`, handler-entry materialization;
 `jit-swc` release tests incl. a try/catch execution test.
 *Done when:* smoke passes on `jit-t2`; emitted output for a try script contains
 a real `try`/`catch` and no handler stack (asserted in a test).
+*Actual:* smoke passes on `jit-t2` via the Tier-0-shape fallback; the lifting
+exists in git history and is gated off until the phase-5 upstream fixes
+(swc-ssa catch-shim state pruning + entry-state snapshot semantics).
 
 **Phase 3 — WASM + native.**
 Catch-aware tenant calls (swallow fix); wasm `run_sync` regions; native
@@ -353,8 +375,13 @@ re-baseline every expectation file; remove the manifest entries.
 
 **Phase 5 — external follow-ups (user review required, separate repos).**
 jsaw-core: finally-on-exceptional/early-exit lowering (catch-all trampoline +
-exit interception). codegen-utils: catch edges in `cfg-traits`/`ssa-reloop2` so
-Tier 1 can restructure try regions instead of falling back. Land each behind
+exit interception); `swc-ssa` catch-shim state pruning (`safe_to_carry` is a
+stub returning `false`, so the shim carries every ident — superlinear phi
+storms, 17MB of JS for a 25KB fixture) and its entry-state snapshot semantics
+(values written inside a protected block before a throwing op must be visible
+to the handler; jade's frontend skips the SSA round-trip for try-containing
+functions until then). codegen-utils: catch edges in `cfg-traits`/`ssa-reloop2`
+so Tier 1 can restructure try regions instead of falling back. Land each behind
 the usual review-and-pin flow; until then the plan's documented gaps stand.
 
 ## 8. Risks / open questions

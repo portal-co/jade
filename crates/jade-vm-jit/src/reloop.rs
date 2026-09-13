@@ -464,6 +464,36 @@ fn emit_dispatch<
     Ok(())
 }
 
+/// Does the function at `code[start_ip..]` contain any exception regions? Shared by
+/// the top-level gate (`compile_from_variant`) and the nested-body gate
+/// (`emit_nested_program`, called by `op_fn`).
+fn has_regions(code: &[u8], start_ip: usize) -> Result<bool, String> {
+    Ok(crate::discover_blocks(code, start_ip)?
+        .values()
+        .any(|b| {
+            b.ops
+                .iter()
+                .any(|op| matches!(op, crate::Operation::Trypush { .. }))
+        }))
+}
+
+/// Emit a *nested* function body through the region gate, exactly like the top-level
+/// `compile_from_variant` check: TRYPUSH-containing functions fall back to Tier 0's
+/// dispatch shape. `op_fn` calls this directly (it holds a `&mut JsJit`, not the
+/// `Config`) — bypassing it would emit `__handlers.push` lines with no handler
+/// stack in scope, hijacking the *outer* function's dispatch stack at runtime.
+pub fn emit_nested_program<R: FnRegistry, N: portal_jit_host_names::HostMethodNames<crate::JadeTenantMethod>>(
+    jit: &mut JsJit<R, N>,
+    code: &[u8],
+    start_ip: usize,
+) -> Result<(), String> {
+    if has_regions(code, start_ip)? {
+        crate::emit_program(jit, code, start_ip)
+    } else {
+        emit_reloop_program(jit, code, start_ip)
+    }
+}
+
 pub fn compile_from_variant<R: FnRegistry, N>(
     code: &[u8],
     start_ip: usize,
@@ -483,17 +513,11 @@ where
     // bytecode contains TRYPUSH falls back to Tier 0's dispatch shape for this
     // function only; nested `FN` bodies still recurse through Tier 1 (via
     // `prefer_reloop`) and decide independently.
-    let has_regions = crate::discover_blocks(code, start_ip)?
-        .values()
-        .any(|b| {
-            b.ops
-                .iter()
-                .any(|op| matches!(op, crate::Operation::Trypush { .. }))
-        });
+    let regions = has_regions(code, start_ip)?;
     let cell = alloc::rc::Rc::new(RefCell::new(reg));
     let body = {
         let mut jit = JsJit::with_config(cell.clone(), cfg, is_gen, is_async, false);
-        if has_regions {
+        if regions {
             crate::emit_program(&mut jit, code, start_ip)?;
         } else {
             emit_reloop_program(&mut jit, code, start_ip)?;
@@ -929,5 +953,58 @@ fn throw_without_regions_stays_structured_on_tier1() {
     // No regions → no fallback: a native JS `throw`, no handler-stack machinery.
     assert!(js.contains("throw state[0];"), "js:\n{js}");
     assert!(!js.contains("__handlers"), "js:\n{js}");
+}
+use super::*;
+mod exception_nested_tests {
+    use super::*;
+
+
+    // Top-level: FN(inner, j=50) -> s1 @0; CALL s1 -> s2 @26; RET s2 @44.
+    // inner (@50): TRYPUSH(0, 76); LIT32 7 -> s1 @60; THROW s1 @70; handler @76: RET s0.
+    // Both levels carry regions; the nested body must get its OWN handler stack
+    // (a relooped nested body emitting `__handlers.push` with no stack in scope
+    // would hijack the outer dispatch — the ip=826 infinite-loop regression).
+    fn nested_region_code() -> Vec<u8> {
+    bytecode(vec![
+        Operation::Fn {
+            variant: Operand::Literal(0),
+            closure_args: Operand::Literal(0),
+            spanner: Operand::Literal(0),
+            params: Operand::Literal(0),
+            j: 50,
+            dest: 1,
+        },
+        Operation::Call {
+            fn_op: Operand::StateRef(1),
+            this_op: Operand::Literal(0),
+            args: vec![],
+            dest: 2,
+        },
+        Operation::Ret(Operand::StateRef(2)),
+        Operation::Trypush {
+            catch_slot: 0,
+            handler_ip: 76,
+        },
+        Operation::Lit32 { dest: 1, val: 7 },
+        Operation::Throw(Operand::StateRef(1)),
+        Operation::Ret(Operand::StateRef(0)),
+    ])
+    }
+
+    #[test]
+    fn nested_region_gets_its_own_handler_stack_on_tier1() {
+    let mut cfg = Config::default();
+    cfg.prefer_reloop = true;
+    let (js, reg) = compile(&nested_region_code(), VecRegistry::new(), cfg).expect("tier 1 compile");
+    // The top level has no regions of its own (the nested fn carries them), so it
+    // reloops with no dispatch machinery; the nested body must have its OWN handler
+    // stack in the prelude, never a reference to an outer one.
+    assert!(!js.contains("__handlers"), "js:\n{js}");
+    let full = format!("{}\n{js}", reg.prelude());
+    assert_eq!(full.matches("const __handlers").count(), 1, "full:\n{full}");
+    let result = run_js_with_prelude(&reg.prelude(), &js);
+    assert_eq!(result, "7", "js:\n{full}");
+    }
+
 }
 }
