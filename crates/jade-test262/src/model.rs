@@ -66,12 +66,18 @@ pub struct CellVerdict {
     /// Error text when the cell failed/crashed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The thrown error's `name` when a cell threw one (host `Error.name` on JS cells,
+    /// `TenantError` variant name or the thrown guest object's `name` own-property on
+    /// native) — the machine-checkable channel for `negative: {phase: runtime}`
+    /// classification (docs/exceptions-plan.md §5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_name: Option<String>,
     pub duration_ms: u64,
 }
 
 impl CellVerdict {
     pub fn new(kind: VerdictKind) -> Self {
-        Self { kind, reason: None, value: None, error: None, duration_ms: 0 }
+        Self { kind, reason: None, value: None, error: None, error_name: None, duration_ms: 0 }
     }
 
     pub fn skip(kind: VerdictKind, reason: impl Into<String>) -> Self {

@@ -60,7 +60,7 @@ function opt(args: string[], name: string): string | undefined {
   return i >= 0 ? args[i + 1] : undefined;
 }
 
-function discover(shard: string): string[] {
+function discover(shard: string): { root: string; files: string[] } {
   const root = shard === "smoke"
     ? join(T262_DIR, "fixtures/smoke")
     : shard.startsWith("test262:")
@@ -75,7 +75,7 @@ function discover(shard: string): string[] {
     }
   };
   walk(root);
-  return out.sort();
+  return { root, files: out.sort() };
 }
 
 function die(msg: string): never {
@@ -104,7 +104,13 @@ interface CompileArtifact {
 function compile(file: string): CompileArtifact {
   let stdout: string;
   try {
-    stdout = execFileSync(RUST_BIN, ["compile", "--file", file], { cwd: ROOT, encoding: "utf8" });
+    stdout = execFileSync(RUST_BIN, ["compile", "--file", file], {
+      cwd: ROOT,
+      encoding: "utf8",
+      // Try-shaped fixtures compile unoptimized (docs/exceptions-plan.md), which
+      // balloons tier bodies past the 1MiB default maxBuffer.
+      maxBuffer: 256 * 1024 * 1024,
+    });
   } catch (error) {
     // The compile subcommand exits nonzero for parse/unsupported verdicts, with the
     // artifact still on stdout.
@@ -112,6 +118,22 @@ function compile(file: string): CompileArtifact {
     if (!stdout.trim()) throw error;
   }
   return JSON.parse(stdout);
+}
+
+/** TS port of `normalize.rs::unsupported` — parameterized message families to their
+ * stable manifest keys. */
+function normalizeUnsupported(msg: string): string {
+  if (msg.startsWith("numeric literal ")) {
+    const idx = msg.indexOf(" (Jade's LIT32");
+    if (idx >= 0) return `numeric literal <value>${msg.slice(idx)}`;
+  }
+  if (msg.startsWith("Un {")) {
+    const m = msg.match(/op: "([^"]+)"/);
+    return m ? `unary operator "${m[1]}" (no Jade opcode)` : "unary operator (no Jade opcode)";
+  }
+  if (msg.startsWith("New {")) return "new expressions (no Jade opcode)";
+  if (msg.startsWith("closure capture of ")) return "closure capture (see docs/closure-capture-plan.md)";
+  return msg;
 }
 
 /** Manifest skip-justification — the TS port of `manifest.rs::justify_skip`. */
@@ -153,14 +175,15 @@ async function main(): Promise<void> {
 
   ensureRustBin();
   if (envs.includes("wasm-interp")) ensureWasmBundle();
-  const files = discover(shard);
+  const { root: shardRoot, files } = discover(shard);
   if (files.length === 0) die(`shard ${shard} discovered no tests`);
 
   const results: TestOutcome[] = [];
   for (const file of files) {
-    const path = shard === "smoke"
-      ? `fixtures/smoke/${file.split("/").pop()}`
-      : relative(join(ROOT, "vendor/test262/test"), file);
+    // Shard-root-relative keys — the same format run.rs uses for reports and
+    // expectations (tests-root-relative keys used to diverge here, silently
+    // breaking every expectations lookup written by the Rust orchestrator).
+    const path = relative(shardRoot, file);
     const artifact = compile(file);
     const cells: Record<string, CellVerdict> = {};
 
@@ -191,12 +214,9 @@ async function main(): Promise<void> {
         }
       }
     }
-    if (!uniform && artifact.meta?.negative?.phase === "runtime") {
-      uniform = {
-        kind: "skip-unsupported-frontend",
-        reason: "exceptions: no bytecode opcode for throw/try yet",
-      };
-    }
+    // Negative-runtime tests no longer skip uniformly: they execute and are
+    // reclassified from the cell's thrown error after execution
+    // (docs/exceptions-plan.md §5).
     if (!uniform && flags.includes("async")) {
       uniform = { kind: "skip-flag", reason: "async" };
     }
@@ -212,7 +232,7 @@ async function main(): Promise<void> {
         if (compileRejectionExpected) {
           cell = { kind: "pass", reason: `expected compile rejection: ${artifact.message}` };
         } else if (artifact.error_kind === "unsupported") {
-          cell = { kind: "skip-unsupported-frontend", reason: artifact.message };
+          cell = { kind: "skip-unsupported-frontend", reason: normalizeUnsupported(artifact.message ?? "") };
         } else if (artifact.error_kind === "parse") {
           cell = { kind: "skip-parse", reason: artifact.message };
         } else {
@@ -234,6 +254,16 @@ async function main(): Promise<void> {
           cell = await execute({ test: path, env, tenant, body: out.body, prelude: out.prelude, harness: !flags.includes("raw") });
         } else {
           cell = { kind: "crash", error: `JIT compile (${env}): ${err ?? "no tier output"}` };
+        }
+      }
+      // `negative: {phase: runtime}` reclassification (docs/exceptions-plan.md §5):
+      // a matching thrown error passes; completing without throwing fails.
+      const neg = artifact.meta?.negative;
+      if (neg?.phase === "runtime") {
+        if (cell.kind === "pass") {
+          cell = { kind: "fail", reason: `completed without throwing the expected ${neg.type}` };
+        } else if (cell.kind === "fail" && cell.reason === "threw during execution" && neg.type && cell.errorName === neg.type) {
+          cell = { kind: "pass", reason: `expected runtime throw: ${neg.type}` };
         }
       }
       // Differential: every passing tier must agree with the interpreter's value.

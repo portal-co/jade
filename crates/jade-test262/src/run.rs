@@ -264,9 +264,10 @@ fn assemble(t: PlannedTest) -> TestOutcome {
     let mut baseline: Option<(VerdictKind, Option<String>)> = None;
     let mut out: BTreeMap<String, CellVerdict> = BTreeMap::new();
     for (env, planned) in cells {
-        let Planned::Done(cell) = planned else {
+        let Planned::Done(mut cell) = planned else {
             unreachable!("all cells executed before assemble")
         };
+        classify_negative_runtime(&meta, &mut cell);
         if env == ENV_INTERP {
             baseline = Some((cell.kind, cell.value.clone()));
         } else if let Some((bkind, bval)) = &baseline {
@@ -275,7 +276,7 @@ fn assemble(t: PlannedTest) -> TestOutcome {
                 && cell.value != *bval
             {
                 let got = cell.value.clone().unwrap_or_default();
-                out.insert(
+                    out.insert(
                     env,
                     CellVerdict {
                         kind: VerdictKind::DifferentialMismatch,
@@ -285,6 +286,7 @@ fn assemble(t: PlannedTest) -> TestOutcome {
                         )),
                         value: None,
                         error: Some(format!("this cell produced {got:?}")),
+                        error_name: None,
                         duration_ms: cell.duration_ms,
                     },
                 );
@@ -296,8 +298,35 @@ fn assemble(t: PlannedTest) -> TestOutcome {
     TestOutcome { path, meta, cells: out }
 }
 
-/// Skips that apply to every cell identically: manifest flags, harness includes with no
-/// primordial equivalent, and negative-runtime tests (no exception opcodes yet).
+/// `negative: {phase: runtime}` reclassification (docs/exceptions-plan.md §5): a cell
+/// that threw an error whose `errorName` matches the demanded type PASSES; a cell that
+/// completed without throwing FAILS. Assertion failures and crashes are never
+/// reclassified — they are harness/host problems, not the test's own throw.
+fn classify_negative_runtime(meta: &TestMeta, cell: &mut CellVerdict) {
+    let Some(neg) = &meta.negative else { return };
+    if neg.phase != "runtime" {
+        return;
+    }
+    let expected = neg.error_type.as_deref().unwrap_or("");
+    match cell.kind {
+        VerdictKind::Pass => {
+            *cell = CellVerdict::fail(format!(
+                "completed without throwing the expected {expected}"
+            ));
+        }
+        VerdictKind::Fail if cell.reason.as_deref() == Some("threw during execution") => {
+            if !expected.is_empty() && cell.error_name.as_deref() == Some(expected) {
+                let mut c = CellVerdict::new(VerdictKind::Pass);
+                c.reason = Some(format!("expected runtime throw: {expected}"));
+                *cell = c;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Skips that apply to every cell identically: manifest flags and harness includes
+/// with no primordial equivalent.
 fn uniform_skip(meta: &TestMeta, manifest: &Manifest, cfg: &RunConfig) -> Option<CellVerdict> {
     if let Some(flag) = manifest.flag_skip(meta) {
         return Some(CellVerdict::skip(VerdictKind::SkipFlag, flag));
@@ -320,14 +349,8 @@ fn uniform_skip(meta: &TestMeta, manifest: &Manifest, cfg: &RunConfig) -> Option
             }
         }
     }
-    if let Some(neg) = &meta.negative {
-        if neg.phase == "runtime" {
-            return Some(CellVerdict::skip(
-                VerdictKind::SkipUnsupportedFrontend,
-                "exceptions: no bytecode opcode for throw/try yet".to_string(),
-            ));
-        }
-    }
+    // Negative-runtime tests no longer skip here: they execute and are reclassified
+    // from the cell's thrown error in `classify_negative_runtime`.
     // Async tests need `$DONE` + an async-capable cell — Phase 5. Until then every
     // current cell is sync and skips uniformly (justified by manifest.flags.async,
     // which stays `partial` until async cells exist).

@@ -52,11 +52,14 @@ Shards: `smoke` (the fixtures) or `test262:<subdir>` (a vendored subtree under
 runners build it on demand via `wasm-pack build --target nodejs crates/jade-vm-wasm`
 when a run names the cell, and `--update-wasm` forces a rebuild after editing
 `jade-vm-wasm`. Its ratchet file (`expectations/wasm-interp.json`) is seeded from the
-Phase-1/2 subset; current known deltas from `interp` are the four
-`language/literals/numeric/S7.8.3_A4.1_T{1,2,7,8}.js` tests (they call
-`assert.throws`, which `harness.ts` deliberately omits until exception opcodes exist —
-the TS interpreter correctly fails them while the WASM interpreter's `Fn`/call path
-silently treats the missing member as inert, a genuine backend gap to fix, not mask).
+Phase-1/2 subset. Since the exception-opcode phase-3 work (`docs/exceptions-plan.md`),
+tenant calls are catch-aware rather than swallowing exceptions to `undefined`, so the
+former `S7.8.3_A4.1_T{1,2,7,8}.js` delta class is gone: wasm-interp matches `interp`
+verdict-for-verdict and value-for-value on the whole Phase-1 subset. Those four tests
+then flipped to an honest uniform fail in phase 4 (`assert.throws: function did not
+throw`): reading an *undeclared* global yields `undefined` via the globals pass
+instead of throwing `ReferenceError` — a documented modeling gap in the globals
+design, not an exception-mechanism issue.
 
 `native` (the plan's native-Rust cell) executes the same bytecode entirely in-process:
 `jade-vm-native`'s sync interpreter drives `jade-tenant-rt`'s ObjectManager with the

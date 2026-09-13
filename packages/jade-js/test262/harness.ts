@@ -8,8 +8,10 @@
  * guest calls arrive through `tenant.invoke`.
  *
  * Phase 1 scope: Test262Error, $ERROR, assert (+ sameValue/notSameValue/compareArray),
- * print, $262.global. `assert.throws` needs exception opcodes; `$DONE`,
- * `$262.createRealm`/`detachArrayBuffer`/`evalScript` land in their own phases.
+ * print, $262.global. Phase 4 (exceptions) adds assert.throws — loosely typed: guest
+ * realms have no error primordials yet, so constructor checks compare `name`s when
+ * readable and otherwise accept any throw. `$DONE`, `$262.createRealm`/
+ * `detachArrayBuffer`/`evalScript` land in their own phases.
  */
 import type { Tenant } from "../index.ts";
 import type { CellContext } from "./exec.ts";
@@ -96,6 +98,33 @@ export function installHarness(ctx: CellContext): void {
     },
   )));
   setGlobal("assert", assert);
+
+  // assert.throws(expectedCtor, fn, description): invoke the guest fn; a guest throw
+  // crosses tenant.invoke as a host exception (docs/exceptions-plan.md). The
+  // constructor check is deliberately loose — no error primordials exist guest-side
+  // (so `TypeError` reads as undefined and any throw satisfies it); when the caught
+  // value is our own Test262Error and the ctor is not the guest Test262Error shell,
+  // an assertion failed *inside* the callback: rethrow it rather than pass.
+  const test262ErrorShell = drive(tenant.get(ctx.realm.globalThis, "Test262Error"));
+  drive(tenant.set(assert as unknown as object, "throws", mkfn(
+    function assertThrows(expectedCtor: unknown, fn: unknown, description?: string) {
+      let caught: unknown;
+      let threw = false;
+      try {
+        drive(tenant.invoke(fn, { kind: "apply", thisArg: undefined, args: [] }));
+      } catch (e) {
+        threw = true;
+        caught = e;
+      }
+      if (!threw) {
+        throw new Test262Error(description ?? "assert.throws: function did not throw");
+      }
+      if (caught instanceof Test262Error && expectedCtor !== test262ErrorShell) {
+        throw caught;
+      }
+      return caught;
+    },
+  )));
 
   // --- misc --------------------------------------------------------------------------
   setGlobal("print", mkfn(function print(...args: unknown[]) {

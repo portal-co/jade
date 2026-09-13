@@ -366,12 +366,24 @@ Catch-aware tenant calls (swallow fix); wasm `run_sync` regions; native
 *Done when:* smoke passes on `wasm-interp` and `native`; the
 `S7.8.3` wasm delta flips to interp parity in a re-run (re-baseline).
 
-**Phase 4 — harness + dirs + baseline.**
+**Phase 4 — harness + dirs + baseline (landed).**
 `assert.throws` in both harnesses; negative-runtime reclassification
 (`errorName`); `language/statements/{throw,try}` on all six environments;
 re-baseline every expectation file; remove the manifest entries.
 *Done when:* both new dirs meet the Phase-2 parity criteria and
 `--check` is stable twice on all six envs.
+*Actual:* statements/try is pass=30 fail=2 on all six environments (the 2 fails are
+parser-strictness gaps — SWC accepts catch-param redeclarations the spec calls
+early errors — recorded in the ratchet), statements/throw is pass=1 (the rest skip
+on unrelated unsupported constructs), `--check` stable twice on all six
+environments across all 12 shards. Landed alongside: a nested-frame `tenant`
+threading fix in the TS interpreter (the FN handler built child contexts without
+it, crashing every tenant op inside a nested function); catch-destructuring
+rejection (jsaw-core's `trap_catch` is `todo!()` on non-ident pats); a TS-runner
+`maxBuffer` bump; and TS-runner parity fixes (shard-root-relative expectation
+keys, the `normalize.rs` port). Known honest gap recorded in the ratchet:
+undeclared-global reads yield `undefined` instead of `ReferenceError`, so
+`assert.throws(ReferenceError, …)` tests fail as "did not throw".
 
 **Phase 5 — external follow-ups (user review required, separate repos).**
 jsaw-core: finally-on-exceptional/early-exit lowering (catch-all trampoline +

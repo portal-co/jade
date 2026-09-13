@@ -23,7 +23,7 @@ use portal_solutions_jade_tenant_rt::object_manager::{
     GuestCallError, GuestCallable, ObjectManager, Value,
 };
 use portal_solutions_jade_tenant_rt::{
-    PropertyKey, Tenant, TenantError, TenantPropertyDescriptor,
+    PropertyKey, Tenant, TenantError, TenantInvocation, TenantPropertyDescriptor,
 };
 use portal_solutions_jade_vm_native as vm_native;
 
@@ -61,9 +61,34 @@ pub fn execute_cell(bytes: &[u8], harness: bool) -> CellVerdict {
             } else {
                 "threw during execution".to_string()
             });
+            // Machine-checkable error identity for negative-runtime classification
+            // (docs/exceptions-plan.md §5): a tenant failure names its variant; a guest
+            // throw names the thrown object's `name` own-property when it has one.
+            c.error_name = match &e {
+                portal_solutions_jade_vm_native::NativeError::Tenant(te) => Some(
+                    match te {
+                        TenantError::TypeError(_) => "TypeError",
+                        TenantError::RangeError(_) => "RangeError",
+                    }
+                    .to_string(),
+                ),
+                portal_solutions_jade_vm_native::NativeError::GuestThrow(v) => {
+                    guest_error_name(&mut tenant, v)
+                }
+                _ => None,
+            };
             c.error = Some(text);
             c
         }
+    }
+}
+
+/// The `name` own-property of a guest-thrown value, when it's a string — the native
+/// counterpart of exec.ts's host `Error.name` channel for negative-runtime tests.
+fn guest_error_name(tenant: &mut ObjectManager, v: &Value) -> Option<String> {
+    match tenant.get(v, &PropertyKey::from("name")) {
+        Ok(Value::Str(s)) => Some(s),
+        _ => None,
     }
 }
 
@@ -182,6 +207,14 @@ fn install_harness(tenant: &mut ObjectManager, global_this: &Value) -> Result<()
         )))
     })?;
     set_global(tenant, global_this, "Test262Error", &error_ctor)?;
+    // Guest `assert.throws(Test262Error, fn)` needs the shell identifiable — give it a
+    // readable `name` (test262's harness semantics: a Test262Error thrown *inside* the
+    // callback is a failed assertion and rethrows, unless the test asked for it).
+    tenant.set(
+        &error_ctor,
+        &PropertyKey::from("name"),
+        Value::Str("Test262Error".to_string()),
+    )?;
 
     let dollar_error = host_fn(tenant, |_tenant, _this, args| {
         Err(test262_error(
@@ -234,6 +267,48 @@ fn install_harness(tenant: &mut ObjectManager, global_this: &Value) -> Result<()
         Ok(Value::Undefined)
     })?;
     tenant.set(&assert_fn, &PropertyKey::from("notSameValue"), not_same_value_fn)?;
+
+    // assert.throws(expectedCtor, fn, description): drive the guest fn through
+    // invoke_raising so a guest throw keeps its value (docs/exceptions-plan.md §4.6).
+    // Constructor check is loose like the TS harness: no error primordials exist
+    // guest-side, so `TypeError` reads as undefined and any throw satisfies it; a
+    // Test262Error raised *inside* the callback is a failed assertion and rethrows
+    // unless the test explicitly asked for Test262Error (by name, like test262's
+    // assert.js identity check).
+    let throws_fn = host_fn(tenant, |tenant, _this, args| {
+        let ctor = args.first().cloned().unwrap_or(Value::Undefined);
+        let f = args.get(1).cloned().unwrap_or(Value::Undefined);
+        let desc = args
+            .get(2)
+            .map(message_of)
+            .filter(|m| !m.is_empty() && m != "undefined");
+        match tenant.invoke_raising(&f, TenantInvocation::Apply {
+            this_arg: Value::Undefined,
+            args: vec![],
+        }) {
+            Ok(_) => Err(test262_error(
+                &desc.unwrap_or_else(|| "assert.throws: function did not throw".to_string()),
+            )),
+            Err(GuestCallError::Throw(v)) => Ok(v),
+            Err(GuestCallError::Tenant(e)) => {
+                if e.to_string().contains("Test262Error") {
+                    let ctor_name = match &ctor {
+                        Value::Object(_) => tenant
+                            .get(&ctor, &PropertyKey::from("name"))
+                            .unwrap_or(Value::Undefined),
+                        _ => Value::Undefined,
+                    };
+                    if matches!(ctor_name, Value::Str(s) if s == "Test262Error") {
+                        return Ok(Value::Undefined);
+                    }
+                    return Err(e);
+                }
+                // Any other tenant-level failure is a guest-observable error throw.
+                Ok(Value::Undefined)
+            }
+        }
+    })?;
+    tenant.set(&assert_fn, &PropertyKey::from("throws"), throws_fn)?;
 
     let compare_array_fn = host_fn(tenant, |tenant, _this, args| {
         let actual = args.first().cloned().unwrap_or(Value::Undefined);
@@ -368,4 +443,20 @@ fn snapshot(tenant: &mut ObjectManager, v: &Value) -> String {
         }
     }
     inner(tenant, v, 0)
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn assert_throws_catches_dollar_error() {
+        let src = r#"
+assert.throws(Test262Error, function() { $ERROR("boom"); });
+return 0;
+"#;
+        let bytes = portal_solutions_jade_vm_frontend::compile_to_bytecode(src).expect("compile");
+        let v = execute_cell(&bytes, true);
+        assert_eq!(v.kind, crate::model::VerdictKind::Pass, "error: {:?}", v.error);
+    }
 }

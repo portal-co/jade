@@ -98,7 +98,7 @@ pub fn compile_to_bytecode_with_variant(
 ) -> Result<Vec<u8>, FrontendError> {
     swc_common::GLOBALS.set(&swc_common::Globals::new(), || {
         let mut stmts = parse_script(src)?;
-        check_no_finalizers(&stmts)?;
+        check_try_shapes(&stmts)?;
         // Resolve free-identifier reads into realm-global member reads *before* TAC
         // conversion — afterwards, names are gone (see globals.rs).
         let global_ctxt = globals::resolve_globals(&mut stmts).map(|g| g.ctxt);
@@ -253,25 +253,44 @@ fn parse_script(src: &str) -> Result<Vec<swc_ecma_ast::Stmt>, FrontendError> {
 /// `return`/`break`/`continue`) inside the try would silently skip the finalizer —
 /// a miscompile, not just a gap. Honest `Unsupported` until the upstream fix lands
 /// (docs/exceptions-plan.md, phase 5).
-fn check_no_finalizers(stmts: &[swc_ecma_ast::Stmt]) -> Result<(), FrontendError> {
+/// Reject `try` shapes jsaw-core can't lower: `try/finally` (its finalizer lowering
+/// covers only fall-through paths, so an uncaught throw or early exit would silently
+/// skip it — a miscompile, not just a gap) and destructuring catch params
+/// (`trap_catch` is `todo!()` on anything but an identifier, a hard panic). Honest
+/// `Unsupported` until the upstream fixes land (docs/exceptions-plan.md, phase 5).
+fn check_try_shapes(stmts: &[swc_ecma_ast::Stmt]) -> Result<(), FrontendError> {
     struct Finder {
-        found: bool,
+        finalizer: bool,
+        destructure: bool,
     }
     impl swc_ecma_visit::Visit for Finder {
         fn visit_try_stmt(&mut self, t: &swc_ecma_ast::TryStmt) {
             if t.finalizer.is_some() {
-                self.found = true;
+                self.finalizer = true;
+            }
+            if let Some(handler) = &t.handler {
+                if !matches!(handler.param, Some(swc_ecma_ast::Pat::Ident(_)) | None) {
+                    self.destructure = true;
+                }
             }
             swc_ecma_visit::VisitWith::visit_children_with(t, self);
         }
     }
-    let mut finder = Finder { found: false };
+    let mut finder = Finder {
+        finalizer: false,
+        destructure: false,
+    };
     for stmt in stmts {
         swc_ecma_visit::VisitWith::visit_with(stmt, &mut finder);
     }
-    if finder.found {
+    if finder.finalizer {
         return unsupported(
             "try/finally (jsaw-core's finally lowering only covers fall-through paths — see docs/exceptions-plan.md)",
+        );
+    }
+    if finder.destructure {
+        return unsupported(
+            "catch destructuring (jsaw-core only lowers identifier catch parameters)",
         );
     }
     Ok(())

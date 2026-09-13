@@ -47,6 +47,8 @@ export interface CellVerdict {
   /** JSON-encoded completion value snapshot, when one was produced. */
   value?: string;
   error?: string;
+  /** Thrown error's `name`, when a cell threw one (negative-runtime classification). */
+  errorName?: string;
 }
 
 export interface CellContext {
@@ -163,6 +165,10 @@ export async function execute(job: Job): Promise<CellVerdict> {
       kind: "fail",
       reason: error instanceof Test262Error ? "assertion failed" : "threw during execution",
       error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+      // Machine-checkable error identity for negative-runtime classification; guest
+      // values and guest shells have no meaningful host `name`, so this is host-Error
+      // only (native cells report their own errorName server-side).
+      errorName: error instanceof Error ? error.name : undefined,
     };
   }
 }

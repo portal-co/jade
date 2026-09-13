@@ -64,6 +64,11 @@ export async function* runVirtualizedAG(code: () => DataView, state: {[a: number
                             __proto__: null,
                             ip:j,
                             globalThis,
+                            // The nested frame runs tenant ops through the *same*
+                            // tenant — omitting this leaves tenant undefined in the
+                            // child and every GET/SET/CALL inside a nested function
+                            // crashes with "Cannot read properties of undefined".
+                            tenant,
                             nt: new.target,
                             promiseRuntime,
                             addAsync,
@@ -197,6 +202,11 @@ async function _runVirtualizedA(code: () => DataView, state: {[a: number]: any},
                             __proto__: null,
                             ip:j,
                             globalThis,
+                            // The nested frame runs tenant ops through the *same*
+                            // tenant — omitting this leaves tenant undefined in the
+                            // child and every GET/SET/CALL inside a nested function
+                            // crashes with "Cannot read properties of undefined".
+                            tenant,
                             nt: new.target,
                             promiseRuntime,
                             addAsync,
@@ -333,6 +343,11 @@ export  function* runVirtualizedG(code: () => DataView, state: {[a: number]: any
                             __proto__: null,
                             ip:j,
                             globalThis,
+                            // The nested frame runs tenant ops through the *same*
+                            // tenant — omitting this leaves tenant undefined in the
+                            // child and every GET/SET/CALL inside a nested function
+                            // crashes with "Cannot read properties of undefined".
+                            tenant,
                             nt: new.target,
                             promiseRuntime,
                             addAsync,
@@ -466,6 +481,11 @@ export  function runVirtualized(code: () => DataView, state: {[a: number]: any},
                             __proto__: null,
                             ip:j,
                             globalThis,
+                            // The nested frame runs tenant ops through the *same*
+                            // tenant — omitting this leaves tenant undefined in the
+                            // child and every GET/SET/CALL inside a nested function
+                            // crashes with "Cannot read properties of undefined".
+                            tenant,
                             nt: new.target,
                             promiseRuntime,
                             addAsync,

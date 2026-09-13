@@ -146,6 +146,18 @@
     "binary operator \"!=\" (only ===, !==, <, <=, >, >= have a Jade opcode)": {
       "status": "unsupported",
       "note": "surfaced once try/catch and throw stopped masking it"
+    },
+    "binary operator \"&&\" (only ===, !==, <, <=, >, >= have a Jade opcode)": {
+      "status": "unsupported",
+      "note": "surfaced by statements/throw/try"
+    },
+    "catch destructuring (jsaw-core only lowers identifier catch parameters)": {
+      "status": "unsupported",
+      "note": "trap_catch is todo!() on non-ident pats (panic risk); phase-5 upstream work"
+    },
+    "unary operator \"delete\" (no Jade opcode)": {
+      "status": "unsupported",
+      "note": "surfaced by statements/try"
     }
   }
 }

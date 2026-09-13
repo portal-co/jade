@@ -108,6 +108,11 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
                             __proto__: null,
                             ip:j,
                             globalThis,
+                            // The nested frame runs tenant ops through the *same*
+                            // tenant — omitting this leaves tenant undefined in the
+                            // child and every GET/SET/CALL inside a nested function
+                            // crashes with "Cannot read properties of undefined".
+                            tenant,
                             nt: new.target,
                             promiseRuntime,
                             addAsync,
