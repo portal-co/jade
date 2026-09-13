@@ -25,6 +25,12 @@ export const opcodes: { [Op in Opcode]: OpcodeInfo } = freeze({
   SWITCH:     freeze({ id: 22, args: "switch_jump" }), // [LSB val][raw n][n×(raw case_val, raw target)][raw default_target]
   GET:        freeze({ id: 23, args: "member_get"  }),  // [LSB obj][LSB key][raw dest]
   SET:        freeze({ id: 24, args: "member_set"  }),  // [LSB obj][LSB key][LSB val][raw dest]
+  // Exception regions (docs/exceptions-plan.md): THROW raises, TRYPUSH/TRYPOP
+  // delimit a protected region whose handler starts at handler_ip and binds the
+  // exception into state slot catch_slot. All three are loop-level.
+  THROW:      freeze({ id: 25, args: "throw_src"   }),  // [LSB val]
+  TRYPUSH:    freeze({ id: 26, args: "trypush"    }),  // [raw catch_slot][raw handler_ip]
+  TRYPOP:     freeze({ id: 27, args: "none"       }),  // (no operands)
 });
 export type Opcode =
   | "RET"
@@ -51,12 +57,15 @@ export type Opcode =
   | "COND_JMP"
   | "SWITCH"
   | "GET"
-  | "SET";
+  | "SET"
+  | "THROW"
+  | "TRYPUSH"
+  | "TRYPOP";
 export type OpcodeInfo = {
   id: number;
   args: "src" | "src_dest" | "dest" | "fn" | "lit32" | "array" | "object" | "call"
       | "bool" | "binop" | "sel" | "jmp" | "condjmp" | "switch_jump"
-      | "member_get" | "member_set";
+      | "member_get" | "member_set" | "throw_src" | "trypush" | "none";
 };
 export type Handler = string;
 export const handlers: { [Op in Opcode]?: Handler} = freeze({
@@ -190,4 +199,9 @@ export const handlers: { [Op in Opcode]?: Handler} = freeze({
             }`,
   GET:  `{ const o=arg(),k=arg(); state[code().getUint32(ip,true)]=__DRIVE__tenant.driveTenant(tenant.get(o,k),addAsync,addGen); ip+=4; break; }`,
   SET:  `{ const o=arg(),k=arg(),v=arg(); __DRIVE__tenant.driveTenant(tenant.set(o,k,v),addAsync,addGen); state[code().getUint32(ip,true)]=v; ip+=4; break; }`,
+  // Guest `throw`: raise on the host channel so the driving loop's catch
+  // dispatches it into the innermost region (see scripts/gen/vm-ts.ts).
+  THROW: `{ throw arg(); }`,
+  TRYPUSH: `{ __handlers.push([code().getUint32(ip,true), code().getUint32(ip+4,true)]); ip+=8; break; }`,
+  TRYPOP: `{ __handlers.pop(); break; }`,
 });

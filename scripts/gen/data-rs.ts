@@ -10,6 +10,10 @@ function enumVariant(name: string, info: any): string {
   switch (info.args) {
     case "src":
       return `    ${v}(crate::Operand),`;
+    case "throw_src":
+      return `    ${v}(crate::Operand),`;
+    case "trypush":
+      return `    ${v} { catch_slot: u32, handler_ip: u32 },`;
     case "src_dest":
       return `    ${v} { val: crate::Operand, dest: u32 },`;
     case "dest":
@@ -51,6 +55,10 @@ function parseArm(name: string, info: any): string {
   switch (info.args) {
     case "src":
       return `            ${id} => { let (a,no) = read_u32_le(buf, off)?; off = no; Some((Operation::${v}(crate::Operand::decode(a)), &buf[off..])) },`;
+    case "throw_src":
+      return `            ${id} => { let (a,no) = read_u32_le(buf, off)?; off = no; Some((Operation::${v}(crate::Operand::decode(a)), &buf[off..])) },`;
+    case "trypush":
+      return `            ${id} => { let (catch_slot,no) = read_u32_le(buf, off)?; off = no; let (handler_ip,no) = read_u32_le(buf, off)?; off = no; Some((Operation::${v}{ catch_slot, handler_ip }, &buf[off..])) },`;
     case "src_dest":
       return `            ${id} => { let (a,no) = read_u32_le(buf, off)?; off = no; let (dest,no) = read_u32_le(buf, off)?; off = no; Some((Operation::${v}{ val: crate::Operand::decode(a), dest }, &buf[off..])) },`;
     case "dest":
@@ -105,6 +113,10 @@ function emitArm(name: string, info: any): string {
   switch (info.args) {
     case "src":
       return `            Operation::${v}(a) => { ${hdr} wtr.extend_from_slice(&a.encode().to_le_bytes()); },`;
+    case "throw_src":
+      return `            Operation::${v}(a) => { ${hdr} wtr.extend_from_slice(&a.encode().to_le_bytes()); },`;
+    case "trypush":
+      return `            Operation::${v}{catch_slot, handler_ip} => { ${hdr} wtr.extend_from_slice(&catch_slot.to_le_bytes()); wtr.extend_from_slice(&handler_ip.to_le_bytes()); },`;
     case "src_dest":
       return `            Operation::${v}{val, dest} => { ${hdr} wtr.extend_from_slice(&val.encode().to_le_bytes()); wtr.extend_from_slice(&dest.to_le_bytes()); },`;
     case "dest":
@@ -159,6 +171,10 @@ function genArm(name: string, info: any): string {
   switch (info.args) {
     case "src":
       return `            Operation::${v}(a) => { ${hdr} for b in a.encode().to_le_bytes() { yield_! b; } },`;
+    case "throw_src":
+      return `            Operation::${v}(a) => { ${hdr} for b in a.encode().to_le_bytes() { yield_! b; } },`;
+    case "trypush":
+      return `            Operation::${v}{catch_slot, handler_ip} => { ${hdr} for b in catch_slot.to_le_bytes() { yield_! b; } for b in handler_ip.to_le_bytes() { yield_! b; } },`;
     case "src_dest":
       return `            Operation::${v}{val, dest} => { ${hdr} for b in val.encode().to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },`;
     case "dest":

@@ -2553,6 +2553,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[patch.unused]]
+name = "volar-circuit-exec-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-constchain"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-import-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-pass-build"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-pass-support"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "thin-mcp"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "portal-solutions-blitz-aarch64"
 version = "0.1.0"
 
@@ -2586,90 +2610,6 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "portal-solutions-blitz-x86-64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-circuit-exec-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-constchain"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-import-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-pass-build"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-pass-support"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-aarch64"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "vane-riscv"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-build"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-ir-common"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-lir-test-corpus"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-ir-import"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-llvm-vaffle-import"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "volar-wasm-circuit-import"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo-crypto"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo-std"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo-crypto"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "lazy-repo-std"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "thin-mcp"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -2809,6 +2749,34 @@ name = "volar-llvm-pass-support"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "volar-ir"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-build"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-ir-common"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-lir-test-corpus"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-ir-import"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-llvm-vaffle-import"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "volar-wasm-circuit-import"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "portal-solutions-asm-arm"
 version = "0.1.0"
 
@@ -2818,4 +2786,36 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "portal-solutions-asm-x86"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-crypto"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-std"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-crypto"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "lazy-repo-std"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-aarch64"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "vane-riscv"
 version = "0.1.0"

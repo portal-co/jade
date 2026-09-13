@@ -98,6 +98,7 @@ pub fn compile_to_bytecode_with_variant(
 ) -> Result<Vec<u8>, FrontendError> {
     swc_common::GLOBALS.set(&swc_common::Globals::new(), || {
         let mut stmts = parse_script(src)?;
+        check_no_finalizers(&stmts)?;
         // Resolve free-identifier reads into realm-global member reads *before* TAC
         // conversion — afterwards, names are gone (see globals.rs).
         let global_ctxt = globals::resolve_globals(&mut stmts).map(|g| g.ctxt);
@@ -232,6 +233,35 @@ fn parse_script(src: &str) -> Result<Vec<swc_ecma_ast::Stmt>, FrontendError> {
 }
 
 /// Reject (transitively) nested functions that reference enclosing-scope names.
+/// Reject `try/finally` at the AST level: jsaw-core's `Stmt::Try` lowering places
+/// the finalizer only on the fall-through join block, so an uncaught throw (or a
+/// `return`/`break`/`continue`) inside the try would silently skip the finalizer —
+/// a miscompile, not just a gap. Honest `Unsupported` until the upstream fix lands
+/// (docs/exceptions-plan.md, phase 5).
+fn check_no_finalizers(stmts: &[swc_ecma_ast::Stmt]) -> Result<(), FrontendError> {
+    struct Finder {
+        found: bool,
+    }
+    impl swc_ecma_visit::Visit for Finder {
+        fn visit_try_stmt(&mut self, t: &swc_ecma_ast::TryStmt) {
+            if t.finalizer.is_some() {
+                self.found = true;
+            }
+            swc_ecma_visit::VisitWith::visit_children_with(t, self);
+        }
+    }
+    let mut finder = Finder { found: false };
+    for stmt in stmts {
+        swc_ecma_visit::VisitWith::visit_with(stmt, &mut finder);
+    }
+    if finder.found {
+        return unsupported(
+            "try/finally (jsaw-core's finally lowering only covers fall-through paths — see docs/exceptions-plan.md)",
+        );
+    }
+    Ok(())
+}
+
 ///
 /// A nested function may only see its own declarations and parameters (plus the marked
 /// global object ident — global reads are member ops after `globals::resolve_globals`,
@@ -241,8 +271,7 @@ fn parse_script(src: &str) -> Result<Vec<swc_ecma_ast::Stmt>, FrontendError> {
 fn check_no_captures(
     tfunc: &TFunc,
     global_ctxt: Option<swc_common::SyntaxContext>,
-) -> Result<(), FrontendError> {
-    /// The function's *own* references — everything `TCfg::refs()` yields except the
+) -> Result<(), FrontendError> {    /// The function's *own* references — everything `TCfg::refs()` yields except the
     /// transitive `Item::Func` externs it also folds in. Those externs can't be used
     /// here: `TCfg::externs()` filters only by the nested cfg's `decls` (its `params`
     /// live on `TFunc`, which `TCfg` can't see), so a nested function's *parameter*
@@ -284,9 +313,26 @@ fn check_no_captures(
         out
     }
     fn walk(func: &TFunc, global_ctxt: Option<swc_common::SyntaxContext>) -> Result<(), FrontendError> {
+        // Catch-binding idents are function-local declarations: the exception
+        // mechanism binds the pat in the handler within the same frame, never an
+        // upvalue. jsaw-core only inserts them into `cfg.decls` on the SSA
+        // round-trip (rew.rs), so collect them here for the pre-optimization check.
+        let catch_pats: Vec<&Ident> = func
+            .cfg
+            .blocks
+            .iter()
+            .filter_map(|(_, b)| match &b.post.catch {
+                TCatch::Jump { pat, .. } => Some(pat),
+                TCatch::Throw => None,
+            })
+            .collect();
         let mut names = Vec::new();
         for id in own_refs(func) {
-            if Some(id.1) == global_ctxt || func.cfg.decls.contains(&id) || func.params.contains(&id) {
+            if Some(id.1) == global_ctxt
+                || func.cfg.decls.contains(&id)
+                || func.params.contains(&id)
+                || catch_pats.contains(&&id)
+            {
                 continue;
             }
             if !names.contains(&id) {
@@ -419,6 +465,19 @@ impl<'a> FnLowering<'a> {
 struct LoweredBlock {
     ops_bytes: Vec<u8>,
     term: TTerm,
+    catch: TCatch,
+}
+
+/// A protected region closes with a TRYPOP immediately before the block's
+/// terminator — unless the terminator is itself a `throw`: a `throw` must
+/// observe its own region's handler (so `try { throw x } catch (e) { … }`
+/// catches), and the dispatch pops the region instead of a TRYPOP.
+fn needs_try_close(catch: &TCatch, term: &TTerm) -> bool {
+    matches!(catch, TCatch::Jump { .. }) && !matches!(term, TTerm::Throw(_))
+}
+
+fn try_close_len(catch: &TCatch, term: &TTerm) -> u32 {
+    if needs_try_close(catch, term) { 2 } else { 0 }
 }
 
 impl<'a> FnLowering<'a> {
@@ -451,14 +510,12 @@ impl<'a> FnLowering<'a> {
             for stmt in &block.stmts {
                 self.lower_stmt(stmt, phase, &mut ops_bytes)?;
             }
-            if !matches!(block.post.catch, TCatch::Throw) {
-                return unsupported("try/catch (Jade bytecode has no exception-handling opcode)");
-            }
             lowered.push((
                 *id,
                 LoweredBlock {
                     ops_bytes,
                     term: block.post.term.clone(),
+                    catch: block.post.catch.clone(),
                 },
             ));
         }
@@ -469,20 +526,54 @@ impl<'a> FnLowering<'a> {
         // matter and no real jump-target value is observed) plus the local prefix-sum
         // `cursor` — since every jump target in Jade bytecode, including a nested `Fn`'s
         // `j`, is absolute into the one shared buffer, never rebased by any backend.
+        //
+        // Exception regions (docs/exceptions-plan.md): a block whose TAC catch edge is
+        // `TCatch::Jump` is wrapped in a TRYPUSH…TRYPOP pair — TRYPUSH at block entry
+        // (ahead of everything else, including the entry block's GLOBAL op, so the
+        // region covers the whole block), TRYPOP immediately before the terminator
+        // unless the terminator is itself a `throw` (a `throw` must observe its own
+        // region's handler, so the region is popped by the dispatch instead).
         let mut offsets: HashMap<TBlockId, u32> = HashMap::with_capacity(lowered.len());
         let mut cursor = 0u32;
         for (id, block) in &lowered {
             offsets.insert(*id, region_offset + cursor);
             let term_len = self.emit_terminator(&block.term, &offsets, true)?.len() as u32;
-            cursor += block.ops_bytes.len() as u32 + term_len;
+            cursor += self.emit_try_open(&block.catch, &offsets, true)?.len() as u32
+                + block.ops_bytes.len() as u32
+                + try_close_len(&block.catch, &block.term)
+                + term_len;
         }
 
         let mut out = Vec::with_capacity(cursor as usize);
         for (_, block) in &lowered {
+            out.extend(self.emit_try_open(&block.catch, &offsets, false)?);
             out.extend_from_slice(&block.ops_bytes);
+            if needs_try_close(&block.catch, &block.term) {
+                out.extend(Operation::Trypop.emit());
+            }
             out.extend(self.emit_terminator(&block.term, &offsets, false)?);
         }
         Ok(out)
+    }
+
+    /// Emit the region-opening TRYPUSH for a block with a catch edge (nothing for
+    /// `TCatch::Throw`). Fixed-size (2 + 4 + 4 bytes) so phase-1 measuring can pass
+    /// `placeholder: true` with a dummy handler target, exactly like jump targets.
+    fn emit_try_open(
+        &mut self,
+        catch: &TCatch,
+        offsets: &HashMap<TBlockId, u32>,
+        placeholder: bool,
+    ) -> Result<Vec<u8>, FrontendError> {
+        Ok(match catch {
+            TCatch::Throw => Vec::new(),
+            TCatch::Jump { pat, k } => Operation::Trypush {
+                catch_slot: self.slot_for(pat),
+                handler_ip: if placeholder { 0 } else { offsets[k] },
+            }
+            .emit()
+            .collect(),
+        })
     }
 
     /// BFS over `TTerm`'s jump targets, starting at `entry`. `entry` is always first in
@@ -503,6 +594,14 @@ impl<'a> FnLowering<'a> {
                     worklist.push_back(target);
                 }
             }
+            // The exception-handler block is reachable through the block's catch edge
+            // even when no terminator targets it — traverse it or the handler is
+            // silently dropped from the bytecode.
+            if let TCatch::Jump { k, .. } = &block.post.catch {
+                if visited.insert(*k) {
+                    worklist.push_back(*k);
+                }
+            }
         }
         Ok(order)
     }
@@ -518,9 +617,9 @@ impl<'a> FnLowering<'a> {
             TTerm::Switch { .. } => {
                 return unsupported("`switch` statement (JS `switch`, not yet lowered)");
             }
-            TTerm::Throw(_) => {
-                return unsupported("`throw` (Jade bytecode has no exception-handling opcode)");
-            }
+            // `throw` transfers to no block — the catch edge is not a terminator
+            // target (`discover_reachable` traverses it separately).
+            TTerm::Throw(_) => vec![],
             TTerm::Tail { .. } => return unsupported("tail call"),
             // Reachable `Default` = falls off the end of the program/function. It's a
             // valid final terminator; only *unreachable* Default blocks (placeholder
@@ -567,7 +666,8 @@ impl<'a> FnLowering<'a> {
             // Reachable `Default` = falls off the end: complete with `undefined`,
             // exactly like `return;` with no value (JS completion semantics).
             TTerm::Default => Operation::Ret(self.undefined_operand()).emit().collect(),
-            TTerm::Switch { .. } | TTerm::Throw(_) | TTerm::Tail { .. } => {
+            TTerm::Throw(id) => Operation::Throw(self.operand_for(id)).emit().collect(),
+            TTerm::Switch { .. } | TTerm::Tail { .. } => {
                 // `discover_reachable` already rejects these before we ever get here.
                 return unsupported(
                     "internal invariant: unreachable TAC terminator reached emit_terminator",
@@ -1351,5 +1451,68 @@ mod capture_check_test {
         .unwrap();
         let err = crate::compile_to_bytecode(&src);
         assert!(matches!(err, Err(crate::FrontendError::Unsupported(_))), "got: {err:?}");
+    }
+}
+
+mod exception_lowering_tests {
+    use portal_solutions_jade_vm::Operation;
+
+    fn ops(src: &str) -> Vec<Operation> {
+        let bytes = crate::compile_to_bytecode(src).expect("frontend compile failed");
+        let mut out = Vec::new();
+        let mut rest = &bytes[..];
+        while let Some((op, r)) = Operation::parse(rest) {
+            out.push(op);
+            rest = r;
+        }
+        assert!(rest.is_empty(), "trailing unparsed bytes");
+        out
+    }
+
+    #[test]
+    fn try_catch_emits_balanced_exception_regions() {
+        let ops = ops("try { throw 42; } catch (e) { return e; }");
+        let throws = ops.iter().filter(|o| matches!(o, Operation::Throw(_))).count();
+        let pushes = ops.iter().filter(|o| matches!(o, Operation::Trypush { .. })).count();
+        let pops = ops.iter().filter(|o| matches!(o, Operation::Trypop)).count();
+        assert_eq!(throws, 1, "ops: {ops:?}");
+        assert!(pushes >= 1, "ops: {ops:?}");
+        // A block whose own terminator is the `throw` closes its region via the
+        // dispatch instead of a TRYPOP, so pops may lag pushes by the throw count.
+        assert_eq!(pushes - pops, throws, "ops: {ops:?}");
+    }
+
+    #[test]
+    fn try_catch_handler_ips_target_block_starts() {
+        // Every TRYPUSH handler_ip must be the start of some op in the stream —
+        // Tier 2's `discover_blocks` relies on this (docs/exceptions-plan.md §8).
+        let bytes = crate::compile_to_bytecode("try { throw 1; } catch (e) { return e; }")
+            .expect("frontend compile failed");
+        let mut starts = std::collections::HashSet::new();
+        let mut handlers = Vec::new();
+        let mut rest = &bytes[..];
+        let mut off = 0usize;
+        while let Some((op, r)) = Operation::parse(rest) {
+            starts.insert(off);
+            if let Operation::Trypush { handler_ip, .. } = op {
+                handlers.push(handler_ip as usize);
+            }
+            off += rest.len() - r.len();
+            rest = r;
+        }
+        for h in handlers {
+            assert!(starts.contains(&h), "handler ip {h} is not a block start");
+        }
+    }
+
+    #[test]
+    fn try_finally_is_rejected_until_the_upstream_finally_fix() {
+        let err = crate::compile_to_bytecode("var x = false; try { x = true; } finally {}");
+        match err {
+            Err(crate::FrontendError::Unsupported(msg)) => {
+                assert!(msg.0.contains("try/finally"), "got: {msg:?}");
+            }
+            other => panic!("expected Unsupported, got: {other:?}"),
+        }
     }
 }

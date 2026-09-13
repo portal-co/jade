@@ -64,9 +64,15 @@ pub enum Opcode {
     Get = 23,
     /// SET operation (id: 24)
     Set = 24,
+    /// THROW operation (id: 25)
+    Throw = 25,
+    /// TRYPUSH operation (id: 26)
+    Trypush = 26,
+    /// TRYPOP operation (id: 27)
+    Trypop = 27,
 }
 impl Opcode {
-    pub const LEN: u16 = 25;
+    pub const LEN: u16 = 28;
 }
 
 /// Rich operation type with operands automatically decoded from bytecode
@@ -181,6 +187,12 @@ pub enum Operation {
         val: crate::Operand,
         dest: u32,
     },
+    Throw(crate::Operand),
+    Trypush {
+        catch_slot: u32,
+        handler_ip: u32,
+    },
+    Trypop,
 }
 
 fn read_u16_le(buf: &[u8], off: usize) -> Option<(u16, usize)> {
@@ -206,7 +218,7 @@ fn read_i32_le(buf: &[u8], off: usize) -> Option<(i32, usize)> {
 }
 
 impl Operation {
-    pub const LEN: u16 = 25;
+    pub const LEN: u16 = 28;
 
     /// Parse an Operation from the start of `buf`, returning the operation and the remaining slice.
     pub fn parse(buf: &[u8]) -> Option<(Operation, &[u8])> {
@@ -595,6 +607,25 @@ impl Operation {
                     &buf[off..],
                 ))
             }
+            25 => {
+                let (a, no) = read_u32_le(buf, off)?;
+                off = no;
+                Some((Operation::Throw(crate::Operand::decode(a)), &buf[off..]))
+            }
+            26 => {
+                let (catch_slot, no) = read_u32_le(buf, off)?;
+                off = no;
+                let (handler_ip, no) = read_u32_le(buf, off)?;
+                off = no;
+                Some((
+                    Operation::Trypush {
+                        catch_slot,
+                        handler_ip,
+                    },
+                    &buf[off..],
+                ))
+            }
+            27 => Some((Operation::Trypop, &buf[off..])),
             _ => None,
         }
     }
@@ -643,6 +674,9 @@ impl Operation {
                 Operation::Switch{..} => { /* alloc disabled: cannot emit */ },
                 Operation::Get{obj, key, dest} => { yield_!(23 as u8); yield_!((23>>8) as u8); for b in obj.encode().to_le_bytes() { yield_! b; } for b in key.encode().to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },
                 Operation::Set{obj, key, val, dest} => { yield_!(24 as u8); yield_!((24>>8) as u8); for b in obj.encode().to_le_bytes() { yield_! b; } for b in key.encode().to_le_bytes() { yield_! b; } for b in val.encode().to_le_bytes() { yield_! b; } for b in dest.to_le_bytes() { yield_! b; } },
+                Operation::Throw(a) => { yield_!(25 as u8); yield_!((25>>8) as u8); for b in a.encode().to_le_bytes() { yield_! b; } },
+                Operation::Trypush{catch_slot, handler_ip} => { yield_!(26 as u8); yield_!((26>>8) as u8); for b in catch_slot.to_le_bytes() { yield_! b; } for b in handler_ip.to_le_bytes() { yield_! b; } },
+                Operation::Trypop => { yield_!(27 as u8); yield_!((27>>8) as u8); },
         }
         };
     }
@@ -877,6 +911,24 @@ impl Operation {
                 wtr.extend_from_slice(&key.encode().to_le_bytes());
                 wtr.extend_from_slice(&val.encode().to_le_bytes());
                 wtr.extend_from_slice(&dest.to_le_bytes());
+            }
+            Operation::Throw(a) => {
+                wtr.push(25 as u8);
+                wtr.push((25 >> 8) as u8);
+                wtr.extend_from_slice(&a.encode().to_le_bytes());
+            }
+            Operation::Trypush {
+                catch_slot,
+                handler_ip,
+            } => {
+                wtr.push(26 as u8);
+                wtr.push((26 >> 8) as u8);
+                wtr.extend_from_slice(&catch_slot.to_le_bytes());
+                wtr.extend_from_slice(&handler_ip.to_le_bytes());
+            }
+            Operation::Trypop => {
+                wtr.push(27 as u8);
+                wtr.push((27 >> 8) as u8);
             }
         }
         wtr.into_iter()

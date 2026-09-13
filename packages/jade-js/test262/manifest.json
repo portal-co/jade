@@ -75,14 +75,6 @@
     }
   },
   "unsupportedConstructs": {
-    "`throw` (Jade bytecode has no exception-handling opcode)": {
-      "status": "unsupported",
-      "note": "no exception opcodes; RET/AWAIT/YIELD/YIELDSTAR are the only loop-level exits"
-    },
-    "try/catch (Jade bytecode has no exception-handling opcode)": {
-      "status": "unsupported",
-      "note": "no exception opcodes"
-    },
     "BigInt literal": {
       "status": "unsupported",
       "note": "no BigInt-producing opcode (BigInt deliberately unavailable per AGENTS.md)"
@@ -138,6 +130,22 @@
     "closure capture (see docs/closure-capture-plan.md)": {
       "status": "unsupported",
       "note": "normalized family: nested function references enclosing-scope names; FN closure_args unwired"
+    },
+    "try/finally (jsaw-core's finally lowering only covers fall-through paths — see docs/exceptions-plan.md)": {
+      "status": "unsupported",
+      "note": "finalizers rejected until the jsaw-core finally-on-exceptional-paths fix lands (docs/exceptions-plan.md phase 5)"
+    },
+    "`null` literal (no Jade opcode produces it)": {
+      "status": "unsupported",
+      "note": "surfaced once try/catch and throw stopped masking it"
+    },
+    "unary operator \"!\" (no Jade opcode)": {
+      "status": "unsupported",
+      "note": "surfaced once try/catch and throw stopped masking it"
+    },
+    "binary operator \"!=\" (only ===, !==, <, <=, >, >= have a Jade opcode)": {
+      "status": "unsupported",
+      "note": "surfaced once try/catch and throw stopped masking it"
     }
   }
 }

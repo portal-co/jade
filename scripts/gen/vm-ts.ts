@@ -15,12 +15,19 @@ export function genVmTs(opcodes: Record<string, any>, handlers: Record<string, s
       const self = implementationName;
       const drive = isGenerator ? "yield* " : isAsync ? "await " : "";
       const subst = (s: string) => s.replaceAll("__DRIVE__", drive).replaceAll("__SELF__", self);
-      const parameters = `(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,promiseRuntime,addAsync,addGen,doubleGen})),unshift(args,state),unshift(args,code),args)`;
-      const context = `{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,promiseRuntime,addAsync=false,addGen=false,doubleGen=false}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,promiseRuntime:PromiseRuntime,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean}`;
+      const parameters = `(unshift(args,freeze({__proto__:null,ip:ip-2,globalThis,nt,tenant,promiseRuntime,addAsync,addGen,doubleGen,handlers:__handlers})),unshift(args,state),unshift(args,code),args)`;
+      const context = `{ip=0,globalThis=(0,eval)('this'),nt=undefined,tenant,promiseRuntime,addAsync=false,addGen=false,doubleGen=false,handlers=undefined}:{ip?:number,globalThis?: _globalThis,nt?: any,tenant:Tenant,promiseRuntime:PromiseRuntime,addAsync?:boolean,addGen?:boolean,doubleGen?:boolean,handlers?: [number,number][]}`;
       const signature = `(code: () => DataView, state: {[a: number]: any},${context},...args: any[])`;
       const result = isAsync ? (isGenerator ? `AsyncGenerator<any,any,any>` : `HostTask<any>`) : `any`;
+      // TRYPUSH/TRYPOP maintain a per-frame exception-handler stack (one entry
+      // per live region: [catch_slot, handler_ip]); the loop's catch dispatches a
+      // raised value to the innermost handler, binding it into state[catch_slot]
+      // and resuming at handler_ip. An empty stack rethrows, propagating to the
+      // guest caller's frame (its own loop dispatches against its own stack).
       const body = subst(`
+    const __handlers: [number, number][] = handlers ?? [];
     for(;;){
+        try {
         const op = code().getUint16(ip,true);ip += 2;
         const arg = () => {
             const val = code().getUint32(ip,true);
@@ -39,6 +46,12 @@ export function genVmTs(opcodes: Record<string, any>, handlers: Record<string, s
               ? `state[code().getUint32(ip,true)]=yield* (doubleGen ? unpackGuestGen(val) : val);ip += 4;break;`
               : `return apply(${functionName({ isGenerator: true })},this,${parameters});`}
     ${Object.keys(opcodes).filter((op) => op !== "AWAIT" && op !== "YIELD" && op !== "YIELDSTAR").map((op) => `case ${opcodes[op].id}: ${handlers[op]}`).join("")}
+        }
+        } catch (__e) {
+            const __h = __handlers.pop();
+            if (__h === undefined) throw __e;
+            state[__h[0]] = __e;
+            ip = __h[1];
         }
     }`);
       if (isAsync && !isGenerator) {
