@@ -1,0 +1,14 @@
+[package]
+name = "portal-solutions-jade-vm-native"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description.workspace = true
+
+[dependencies]
+portal-solutions-jade-vm = { path = "../jade-vm", features = ["alloc"] }
+portal-solutions-jade-vm-core = { path = "../jade-vm-core" }
+portal-solutions-jade-tenant-rt = { path = "../jade-tenant-rt" }
+
+[dev-dependencies]
+portal-solutions-jade-vm-frontend = { path = "../jade-vm-frontend" }
