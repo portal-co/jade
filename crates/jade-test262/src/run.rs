@@ -11,8 +11,9 @@ use crate::meta::{self, TestMeta};
 use crate::model::{
     self, CellVerdict, Expectations, Report, TestOutcome, VerdictKind, REPORT_VERSION,
 };
+use crate::native;
 use crate::node;
-use crate::pipeline::{self, CompileVerdict, ENV_INTERP, INTERP_ENVS, NODE_ENVS};
+use crate::pipeline::{self, CompileVerdict, ENV_INTERP, INTERP_ENVS, NATIVE_ENVS, NODE_ENVS};
 
 pub struct RunConfig {
     /// `smoke` (the synthetic fixtures) or `test262:<subdir>` (a vendored subtree).
@@ -94,15 +95,27 @@ pub fn run(cfg: &RunConfig) -> Result<Report, String> {
     }
 
     // Phase B: batch-execute every cell that needs it, then assemble outcomes.
+    // Native cells execute in-process (no job JSON); Node cells go to the driver.
     let mut job_refs: Vec<(usize, String)> = Vec::new();
     let mut jobs: Vec<serde_json::Value> = Vec::new();
+    let mut native_refs: Vec<(usize, String, Vec<u8>, bool)> = Vec::new();
     for (ti, t) in planned.iter().enumerate() {
         for (env, cell) in &t.cells {
-            if let Planned::Exec(job) = cell {
-                job_refs.push((ti, env.clone()));
-                jobs.push(job.clone());
+            match cell {
+                Planned::Exec(job) => {
+                    job_refs.push((ti, env.clone()));
+                    jobs.push(job.clone());
+                }
+                Planned::NativeExec(bytes, harness) => {
+                    native_refs.push((ti, env.clone(), bytes.clone(), *harness));
+                }
+                Planned::Done(_) => {}
             }
         }
+    }
+    for (ti, env, bytes, harness) in native_refs {
+        let verdict = native::execute_cell(&bytes, harness);
+        planned[ti].cells.insert(env, Planned::Done(verdict));
     }
     // `wasm-interp` needs the Node-side WASM bundle (`packages/jade-js/test262/pkg`);
     // build it once per run that requests the cell rather than checking artifacts in.
@@ -193,10 +206,12 @@ fn write_json<T: serde::Serialize>(path: &Path, v: &T) -> Result<(), String> {
 }
 
 /// A cell that either already has a verdict (uniform gate / compile outcome) or is a
-/// job awaiting execution.
+/// job awaiting execution (Node-driver job JSON, or in-process native bytecode).
 enum Planned {
     Done(CellVerdict),
     Exec(serde_json::Value),
+    /// Bytecode + `!meta.has_flag("raw")` for the in-process native cell.
+    NativeExec(Vec<u8>, bool),
 }
 
 struct PlannedTest {
@@ -423,6 +438,10 @@ fn plan_cell(
         CompileState::Uniform(v) => return Planned::Done(v.clone()),
         CompileState::Bytecode { bytes, tiers } => (bytes, tiers),
     };
+
+    if NATIVE_ENVS.contains(&env) {
+        return Planned::NativeExec(bytes.clone(), !meta.has_flag("raw"));
+    }
 
     let mut job = serde_json::json!({
         "test": rel,

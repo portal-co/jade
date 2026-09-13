@@ -19,6 +19,9 @@ pub const ENV_JIT_T2: &str = "jit-t2";
 /// The WASM interpreter (`jade-vm-wasm`'s generated `run_virtualized`) executing in
 /// Node against the same TS tenant + primordial realm as `interp`.
 pub const ENV_WASM_INTERP: &str = "wasm-interp";
+/// The pure-Rust cell: `jade-vm-native` driving `jade-tenant-rt`'s ObjectManager with
+/// primordials from `jade-primordial-rt` — no Node, no JS engine in the process.
+pub const ENV_NATIVE: &str = "native";
 
 /// The Node cells the Phase-1/2 ratchet is pinned on. `wasm-interp` is deliberately
 /// *not* part of this default matrix while its Phase-3 rollout is in flight — run it
@@ -28,6 +31,9 @@ pub const NODE_ENVS: &[&str] = &[ENV_INTERP, ENV_JIT_T0, ENV_JIT_T1, ENV_JIT_T2]
 /// Every interpreter environment (TS + WASM). Used by the runner to know which cells
 /// run bytecode directly versus needing a JIT `TierOut`.
 pub const INTERP_ENVS: &[&str] = &[ENV_INTERP, ENV_WASM_INTERP];
+
+/// Cells this process executes natively (no Node driver, no job JSON).
+pub const NATIVE_ENVS: &[&str] = &[ENV_NATIVE];
 
 /// What the frontend made of one test's source.
 pub enum CompileVerdict {

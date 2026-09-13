@@ -249,10 +249,14 @@ except where the manifest names a genuine Rust/TS primordial gap.
 directories. The 4 remaining deltas (`language/literals/numeric/S7.8.3_A4.1_T{1,2,7,8}.js`)
 are a real WASM-backend `Fn`/call-path gap around the deliberately-absent `assert.throws`
 (see `packages/jade-js/test262/README.md`), recorded in `expectations/wasm-interp.json`.
-Row 7 (native Rust) is still open: it needs a first-class `jade-tenant-rt` object-manager
-tenant (the current `TestTenant` is test-only and can't run bytecode — no FN-op closures)
-and the Rust equivalent of `createPrimordialRealm` + the test262 harness primordials before
-it can execute the Phase-1 subset.
+Row 7 (native Rust) is landed and ratcheted: `env = native` runs the same bytecode
+in-process via `jade-vm-native` driving `jade-tenant-rt`'s ObjectManager with the
+`jade-primordial-rt` primordials (no Node/JS engine), with `crates/jade-test262/src/native.rs`
+installing the `sta.js`/`assert.js` harness surface natively. It matches the `interp`
+rollup verdict-for-verdict (and completion-value-for-value on passes) across all 9
+Phase-1 directories; `expectations/native.json` is seeded. The one deliberate
+divergence: native assertions *return* `TenantError("Test262Error: …")` instead of
+throwing a host error (Rust has no host exceptions).
 
 **Phase 4 — Globals and built-ins.** Grow realm coverage toward `built-ins/{Object,Function,
 Reflect,Proxy,Promise}` and (with `BufferHooks`) `ArrayBuffer`/typed arrays; tenant-matrix

@@ -10,6 +10,7 @@
 pub mod manifest;
 pub mod meta;
 pub mod model;
+pub mod native;
 pub mod node;
 pub mod normalize;
 pub mod pipeline;

@@ -10,6 +10,9 @@ portal-solutions-jade-vm = { path = "../jade-vm", features = ["alloc"] }
 portal-solutions-jade-vm-frontend = { path = "../jade-vm-frontend" }
 portal-solutions-jade-vm-jit = { path = "../jade-vm-jit", features = ["reloop"] }
 portal-solutions-jade-vm-jit-swc = { path = "../jade-vm-jit-swc" }
+portal-solutions-jade-vm-native = { path = "../jade-vm-native" }
+portal-solutions-jade-tenant-rt = { path = "../jade-tenant-rt" }
+portal-solutions-jade-primordial-rt = { path = "../jade-primordial-rt" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

@@ -43,7 +43,8 @@ target/debug/jade-test262 validate-report packages/jade-js/test262/reports/smoke
 
 Shards: `smoke` (the fixtures) or `test262:<subdir>` (a vendored subtree under
 `vendor/test262/test/`). Environments: `interp`, `wasm-interp`, `jit-t0`, `jit-t1`,
-`jit-t2` (`--env a,b` to subset). Tenants: `--tenant multi` (default) or `single`.
+`jit-t2`, `native` (`--env a,b` to subset). Tenants: `--tenant multi` (default) or
+`single`.
 
 `wasm-interp` (Phase 3) executes the same bytecode through `jade-vm-wasm`'s generated
 `run_virtualized` inside Node, against the same TS tenant + primordial realm as
@@ -56,6 +57,18 @@ Phase-1/2 subset; current known deltas from `interp` are the four
 `assert.throws`, which `harness.ts` deliberately omits until exception opcodes exist —
 the TS interpreter correctly fails them while the WASM interpreter's `Fn`/call path
 silently treats the missing member as inert, a genuine backend gap to fix, not mask).
+
+`native` (the plan's native-Rust cell) executes the same bytecode entirely in-process:
+`jade-vm-native`'s sync interpreter drives `jade-tenant-rt`'s ObjectManager with the
+primordials `jade-primordial-rt` generates (no Node, no JS engine in the process). The
+realm mirrors `createPrimordialRealm` minus Promise and the buffer family (not
+generated; the interpreter is sync-only), and `crates/jade-test262/src/native.rs`
+installs the same `sta.js`/`assert.js` harness surface as `harness.ts`. The one
+deliberate divergence: the native harness *returns* `TenantError("Test262Error: …")`
+from a failed assertion instead of throwing a host error (Rust has no host
+exceptions), and the cell classifies the prefix back into `fail "assertion failed"`.
+Its ratchet file (`expectations/native.json`) is seeded from the Phase-1/2 subset and
+matches the `interp` rollup verdict-for-verdict.
 
 ## Invariants
 
