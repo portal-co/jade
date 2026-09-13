@@ -644,7 +644,10 @@ fn emit_call_arg(expr: &Expr, kind: shims::ArgKind) -> Result<TokenStream, IrErr
 
 pub fn emit_module(module: &Module, module_name: &str) -> String {
     let header = format!(
-        "/* This is GENERATED code by gen-primordials, from packages/jade-js/primordials/{module_name}.ts. */\n"
+        "/* This is GENERATED code by gen-primordials, from packages/jade-js/primordials/{module_name}.ts. */\n\
+         // Generator-induced warning clutter is suppressed module-locally; hand-written\n\
+         // code keeps full lints.\n\
+         #![allow(\n    unused_mut,\n    unused_variables,\n    unused_parens,\n    unused_must_use,\n    non_shorthand_field_patterns,\n    unreachable_patterns,\n    unused_labels,\n    unreachable_code\n)]\n"
     );
     header + try_emit_module(module).to_string().as_str()
 }

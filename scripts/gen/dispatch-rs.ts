@@ -159,6 +159,18 @@ export function genDispatchRs(opcodes: Record<string, any>): string {
 
   const BT = "\x60";
   return `/* This is GENERATED code by ${BT}regen.ts${BT} */
+// Generator-induced warning clutter is suppressed crate-locally; hand-written code
+// keeps full lints.
+#![allow(
+    unused_mut,
+    unused_variables,
+    unused_parens,
+    unused_must_use,
+    non_shorthand_field_patterns,
+    unreachable_patterns,
+    unused_labels,
+    unreachable_code
+)]
 use portal_solutions_jade_vm::{Operand, Operation};
 
 /// State access for the Jade VM.

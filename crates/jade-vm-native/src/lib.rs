@@ -33,9 +33,8 @@ use std::cmp::Ordering;
 
 use portal_solutions_jade_tenant_rt::object_manager::{GuestCallable, ObjectManager, Value};
 use portal_solutions_jade_tenant_rt::{PropertyKey, Tenant, TenantError, TenantInvocation};
-use portal_solutions_jade_vm::{Operand, Operation};
+use portal_solutions_jade_vm::Operation;
 use portal_solutions_jade_vm_core as jade_vm_core;
-use portal_solutions_jade_vm_core::{Ops as _, State as _};
 
 /// The native interpreter's error type. `Ops::Error` is set to this so `exec_op`'s own
 /// invariant failure (`P::err`) and `op_call`/`op_fn`'s tenant errors share one channel.

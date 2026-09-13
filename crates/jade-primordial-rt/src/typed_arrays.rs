@@ -1,4 +1,16 @@
 /* This is GENERATED code by gen-primordials, from packages/jade-js/primordials/typed-arrays.ts. */
+// Generator-induced warning clutter is suppressed module-locally; hand-written
+// code keeps full lints.
+#![allow(
+    unused_mut,
+    unused_variables,
+    unused_parens,
+    unused_must_use,
+    non_shorthand_field_patterns,
+    unreachable_patterns,
+    unused_labels,
+    unreachable_code
+)]
 #[allow(unused_imports)]
 use crate::array_buffer::BufferPrimordialImpl;
 #[allow(unused_imports)]
