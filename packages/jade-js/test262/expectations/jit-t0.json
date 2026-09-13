@@ -1725,6 +1725,9 @@
     },
     "to-prim-hint.js": {
       "verdict": "skip-feature"
+    },
+    "try-finally.js": {
+      "verdict": "skip-unsupported-frontend"
     }
   }
 }

@@ -892,6 +892,18 @@ pub fn discover_blocks(
                     blocks.insert(start, Block { ops, term: op });
                     break;
                 }
+                // `throw` terminates a block exactly like `return`: control never
+                // falls through it.
+                Operation::Throw(_) => {
+                    blocks.insert(start, Block { ops, term: op });
+                    break;
+                }
+                // A region marker is an ordinary op, but its handler_ip is a block
+                // start the BFS must discover (it is reachable only via exceptions).
+                Operation::Trypush { handler_ip, .. } => {
+                    worklist.push(*handler_ip as usize);
+                    ops.push(op);
+                }
                 _ => ops.push(op),
             }
         }
@@ -948,7 +960,33 @@ fn emit_op<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>>(
             }
             Ok(())
         }
+        _ if matches!(op, Operation::Trypush { .. } | Operation::Trypop) => {
+            emit_region_op(jit, &op)?;
+            Ok(())
+        }
         _ => exec_op(op, code, jit),
+    }
+}
+
+/// Emit the exception-region markers: ordinary statements maintaining the
+/// per-frame handler stack the dispatch catch consults (see `emit_program`).
+fn emit_region_op<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>>(
+    jit: &mut JsJit<R, N>,
+    op: &Operation,
+) -> Result<bool, String> {
+    match op {
+        Operation::Trypush {
+            catch_slot,
+            handler_ip,
+        } => {
+            jit.line(format!("__handlers.push([{catch_slot}, {handler_ip}]);"));
+            Ok(true)
+        }
+        Operation::Trypop => {
+            jit.line("__handlers.pop();".to_string());
+            Ok(true)
+        }
+        _ => Ok(false),
     }
 }
 
@@ -962,6 +1000,10 @@ fn emit_terminator<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>>(
         Operation::Ret(val_op) => {
             let val = resolve(val_op, jit);
             jit.line(format!("return {val};"));
+        }
+        Operation::Throw(val_op) => {
+            let val = resolve(val_op, jit);
+            jit.line(format!("throw {val};"));
         }
         Operation::Jmp { target } => {
             jit.line(format!("__ip = {target}; continue;"));
@@ -1006,7 +1048,12 @@ fn emit_program<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>>(
 ) -> Result<(), String> {
     let blocks = discover_blocks(code, start_ip)?;
     jit.line(format!("let __ip = {start_ip};"));
+    // Per-frame exception-handler stack (docs/exceptions-plan.md): TRYPUSH/TRYPOP
+    // maintain it, and the dispatch-level catch binds a raised value into
+    // state[catch_slot] and resumes at handler_ip — empty stack rethrows.
+    jit.line("const __handlers = [];");
     jit.line("while (true) {");
+    jit.line("try {");
     jit.line("switch (__ip) {");
     for (start, block) in blocks {
         jit.line(format!("case {start}: {{"));
@@ -1016,6 +1063,12 @@ fn emit_program<R: FnRegistry, N: HostMethodNames<JadeTenantMethod>>(
         emit_terminator(jit, block.term)?;
         jit.line("}");
     }
+    jit.line("}");
+    jit.line("} catch (__e) {");
+    jit.line("const __h = __handlers.pop();");
+    jit.line("if (__h === undefined) throw __e;");
+    jit.line("state[__h[0]] = __e;");
+    jit.line("__ip = __h[1];");
     jit.line("}");
     jit.line("}");
     Ok(())

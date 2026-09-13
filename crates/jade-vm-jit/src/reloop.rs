@@ -50,6 +50,10 @@ type BlockIdx = usize;
 /// into `BlockIdx`-addressed targets.
 enum Term {
     Ret(Operand),
+    /// `throw` — like `Ret`, transfers to no block (structured Tier 1 emits a
+    /// native JS `throw`; regions only ever appear in Tier-0-fallback functions,
+    /// so no handler lookup is needed here).
+    Throw(Operand),
     Jmp(BlockIdx),
     CondJmp {
         cond: Operand,
@@ -155,7 +159,7 @@ impl cfg_traits::Term<CfgFunc> for Term {
         CfgFunc: 'a,
     {
         match self {
-            Term::Ret(_) => Box::new(empty()),
+            Term::Ret(_) | Term::Throw(_) => Box::new(empty()),
             Term::Jmp(t) => Box::new(once(t)),
             Term::CondJmp {
                 if_true, if_false, ..
@@ -170,7 +174,7 @@ impl cfg_traits::Term<CfgFunc> for Term {
         CfgFunc: 'a,
     {
         match self {
-            Term::Ret(_) => Box::new(empty()),
+            Term::Ret(_) | Term::Throw(_) => Box::new(empty()),
             Term::Jmp(t) => Box::new(once(t)),
             Term::CondJmp {
                 if_true, if_false, ..
@@ -200,6 +204,7 @@ fn build_cfg_func(mut blocks: BTreeMap<usize, Block>, entry_offset: usize) -> Cf
             let block = blocks.remove(o).expect("offset came from blocks.keys()");
             let term = match block.term {
                 Operation::Ret(val) => Term::Ret(val),
+                Operation::Throw(val) => Term::Throw(val),
                 Operation::Jmp { target } => Term::Jmp(idx(target)),
                 Operation::CondJmp {
                     cond,
@@ -361,6 +366,10 @@ fn emit_terminator<
             let v = resolve(*val, jit);
             jit.line(format!("return {v};"));
         }
+        Term::Throw(val) => {
+            let v = resolve(*val, jit);
+            jit.line(format!("throw {v};"));
+        }
         Term::Jmp(target) => {
             if !emit_branch_arm(jit, branches, *target, loops)? {
                 if let Some(im) = immediate {
@@ -468,10 +477,27 @@ where
 {
     // Preserve Tier 1 for every nested closure, exactly like `compile`.
     cfg.prefer_reloop = true;
+    // Exception regions can't be restructured — ssa-reloop2's block graph has no
+    // catch edges (docs/exceptions-plan.md §4.3), and after restructuring there
+    // is no `__ip` for a dispatch-level catch to jump to. A function whose own
+    // bytecode contains TRYPUSH falls back to Tier 0's dispatch shape for this
+    // function only; nested `FN` bodies still recurse through Tier 1 (via
+    // `prefer_reloop`) and decide independently.
+    let has_regions = crate::discover_blocks(code, start_ip)?
+        .values()
+        .any(|b| {
+            b.ops
+                .iter()
+                .any(|op| matches!(op, crate::Operation::Trypush { .. }))
+        });
     let cell = alloc::rc::Rc::new(RefCell::new(reg));
     let body = {
         let mut jit = JsJit::with_config(cell.clone(), cfg, is_gen, is_async, false);
-        emit_reloop_program(&mut jit, code, start_ip)?;
+        if has_regions {
+            crate::emit_program(&mut jit, code, start_ip)?;
+        } else {
+            emit_reloop_program(&mut jit, code, start_ip)?;
+        }
         jit.emit.into_inner().buf
     };
     let reg = alloc::rc::Rc::try_unwrap(cell)
@@ -845,4 +871,63 @@ mod tests {
             "prelude:\n{prelude}\njs:\n{js}"
         );
     }
+use super::*;
+use crate::Config;
+
+fn bytecode(ops: Vec<Operation>) -> Vec<u8> {
+    ops.into_iter()
+        .flat_map(|op| op.emit().collect::<Vec<u8>>())
+        .collect()
+}
+
+// Layout: TRYPUSH (10 bytes) @0, LIT32 (10 bytes) @10, THROW (6 bytes) @20,
+// handler block @26: RET state[0].
+fn try_region_code() -> Vec<u8> {
+    bytecode(vec![
+        Operation::Trypush {
+            catch_slot: 0,
+            handler_ip: 26,
+        },
+        Operation::Lit32 { dest: 1, val: 7 },
+        Operation::Throw(Operand::StateRef(1)),
+        Operation::Ret(Operand::StateRef(0)),
+    ])
+}
+
+#[test]
+fn try_region_dispatches_throw_to_handler_on_tier0() {
+    let (js, reg) = crate::compile(&try_region_code(), VecRegistry::new(), Config::default())
+        .expect("tier 0 compile");
+    assert!(js.contains("__handlers"), "js:\n{js}");
+    assert!(js.contains("catch (__e)"), "js:\n{js}");
+    let result = run_js_with_prelude(&reg.prelude(), &js);
+    assert_eq!(result, "7", "js:\n{js}");
+}
+
+#[test]
+fn try_region_falls_back_to_tier0_shape_on_tier1() {
+    let mut cfg = Config::default();
+    cfg.prefer_reloop = true;
+    let (js, reg) = compile(&try_region_code(), VecRegistry::new(), cfg).expect("tier 1 compile");
+    // The fallback: the whole function compiles to the Tier 0 dispatch shape
+    // (handler stack + dispatch catch), not a restructured program.
+    assert!(js.contains("__handlers"), "js:\n{js}");
+    assert!(js.contains("switch (__ip)"), "js:\n{js}");
+    let result = run_js_with_prelude(&reg.prelude(), &js);
+    assert_eq!(result, "7", "js:\n{js}");
+}
+
+#[test]
+fn throw_without_regions_stays_structured_on_tier1() {
+    let code = bytecode(vec![
+        Operation::Lit32 { dest: 0, val: 9 },
+        Operation::Throw(Operand::StateRef(0)),
+    ]);
+    let mut cfg = Config::default();
+    cfg.prefer_reloop = true;
+    let (js, _reg) = compile(&code, VecRegistry::new(), cfg).expect("tier 1 compile");
+    // No regions → no fallback: a native JS `throw`, no handler-stack machinery.
+    assert!(js.contains("throw state[0];"), "js:\n{js}");
+    assert!(!js.contains("__handlers"), "js:\n{js}");
+}
 }
